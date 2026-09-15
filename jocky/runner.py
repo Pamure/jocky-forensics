@@ -89,12 +89,21 @@ def inspect_artifact(artifact: bytes) -> Dict[str, Any]:
 def run_program(program: Program, natives: Optional[Dict[str, Any]] = None,
                 wall_clock_ms: Optional[float] = DEFAULT_WALL_MS,
                 max_steps: int = DEFAULT_MAX_STEPS,
-                ctx: Optional[Dict[str, Any]] = None) -> RunResult:
-    """Execute a compiled program with the full forensic runtime."""
+                ctx: Optional[Dict[str, Any]] = None,
+                sandbox: str = "off") -> RunResult:
+    """Execute a compiled program with the full forensic runtime.
+
+    ``sandbox`` selects a Landlock confinement level (``off``/``vm``/``ro``/
+    ``strict``); it is applied to the *current* process before the VM starts, so
+    the report is attached to the result for the record.
+    """
     vm = VM(natives=natives if natives is not None else default_natives(),
             max_steps=max_steps)
     if ctx:
         vm.ctx.update(ctx)
+    if sandbox and sandbox != "off":
+        from jocky.sandbox import apply as apply_sandbox
+        vm.ctx["sandbox"] = apply_sandbox(sandbox).to_dict()
     return vm.run(program, wall_clock_ms=wall_clock_ms)
 
 

@@ -10,6 +10,32 @@ compatibility policy (see `docs/DESIGN.md` and the versioning page):
 * **minor** — backwards-compatible features (new natives, new checks);
 * **patch** — fixes only.
 
+## [1.2.0] — 2026-09-15
+
+### Added
+- **Sandbox levels** (`--sandbox=off|vm|ro|strict`) implemented on Landlock
+  through raw syscalls, standard library only. `vm` keeps writes inside the
+  working directory and the drop zones; `ro` denies every write; `strict` also
+  denies `socket(2)` with a seccomp filter. Verified in forked children: `/proc`
+  and `/etc` stay readable, writes fail with `EACCES`, sockets with `EPERM`.
+- `jocky doctor` reports Landlock availability and ABI (new *confinement*
+  group), so "you are not sandboxed" is never a surprise.
+- Zero-dependency documentation build (`site/tools/build_static.py`) for hosts
+  without a JavaScript toolchain, and `site/tools/gen.mjs` so a docs build
+  survives a builder image without Python.
+- Documentation and installation site under `site/` (SvelteKit, prerendered),
+  with reference pages generated from the source tree and releases generated
+  from `git tag`.
+
+### Fixed
+- `CertificatePinError` was referenced in the agent client but never defined, so
+  a pin mismatch raised `NameError` from inside `http.client` and escaped
+  `client.run` instead of being reported as a trust failure.
+- Landlock/seccomp syscall plumbing: attribute buffers were freed before the
+  syscall ran (`EINVAL`) and `struct sock_fprog` was packed with the pointer at
+  the wrong offset (`EFAULT`). Both are structure-level mistakes that made the
+  sandbox silently unavailable.
+
 ## [1.1.0] — 2026-09-15
 
 First publicly packaged release: the working forensic runtime from the initial

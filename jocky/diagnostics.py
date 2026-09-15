@@ -235,6 +235,31 @@ def _check_workspace(report: Report) -> None:
         )
 
 
+def _check_sandbox(report: Report) -> None:
+    """Report whether confinement is available — never assume it is."""
+    try:
+        from jocky import sandbox
+
+        probe = sandbox.probe()
+        if probe.get("available"):
+            detail = f"Landlock ABI {probe['abi']}"
+            if not probe.get("network_rights"):
+                detail += " (filesystem rights only; --sandbox=strict adds seccomp)"
+            report.checks.append(Check("sandbox (Landlock)", OK, detail,
+                                       group="confinement"))
+        else:
+            report.checks.append(
+                Check("sandbox (Landlock)", WARN, probe.get("reason", "unavailable"),
+                      "run untrusted scripts only with --sandbox=off acknowledged, or on a "
+                      "kernel built with CONFIG_SECURITY_LANDLOCK", group="confinement")
+            )
+    except Exception as exc:  # a broken probe must not break doctor
+        report.checks.append(
+            Check("sandbox (Landlock)", WARN, f"{type(exc).__name__}: {exc}",
+                  "confinement is optional", group="confinement")
+        )
+
+
 def run_checks(quick: bool = False) -> Report:
     """Probe every prerequisite. ``quick`` skips the end-to-end fileless run."""
     report = Report(started_at=time.time())
@@ -243,6 +268,7 @@ def run_checks(quick: bool = False) -> Report:
     _check_procfs(report)
     _check_permissions(report)
     _check_raw_syscalls(report)
+    _check_sandbox(report)
     _check_management(report)
     if not quick:
         _check_memfd(report)

@@ -12,7 +12,7 @@ FROM python:3.12-slim
 
 LABEL org.opencontainers.image.title="jocky" \
       org.opencontainers.image.description="JOCKY forensic scripting runtime (SIH26148)" \
-      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.licenses="MIT"
 
 # procps is *not* installed on purpose: JOCKY reads /proc directly, and an
 # image without ps/ss/lsof proves it at runtime.

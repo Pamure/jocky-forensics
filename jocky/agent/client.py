@@ -89,6 +89,16 @@ class Response:
         return 200 <= self.status < 300
 
 
+class CertificatePinError(RuntimeError):
+    """The server presented a certificate that does not match the pinned one.
+
+    Raised from the connection handshake, so it is also listed in
+    :meth:`_Transport.request`'s except clause: an embedder calling
+    :func:`jocky.agent.client.run` must get a reportable failure, not a stray
+    exception from deep inside ``http.client``.
+    """
+
+
 class _FrontedHTTPSConnection(http.client.HTTPSConnection):
     """HTTPS connection presenting an SNI that may differ from the connect host.
 
@@ -214,6 +224,9 @@ class _Transport:
                                 error="server returned a non-JSON body")
             return Response(status=raw.status,
                             body=parsed if isinstance(parsed, dict) else {"data": parsed})
+        except CertificatePinError as exc:
+            # A pin mismatch is a hard trust failure: report it, never retry.
+            return Response(status=0, body={}, error=str(exc))
         except (OSError, http.client.HTTPException, ValueError) as exc:
             return Response(status=0, body={}, error=f"{type(exc).__name__}: {exc}")
         finally:

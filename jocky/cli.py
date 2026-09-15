@@ -46,7 +46,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"jocky: {exc}", file=sys.stderr)
         return 2
     result = runner.run_source(source, wall_clock_ms=args.wall_ms,
-                               max_steps=args.max_steps, ctx=ctx)
+                               max_steps=args.max_steps, ctx=ctx,
+                               sandbox=args.sandbox)
     if args.json:
         _emit(result.to_dict(), True)
     else:
@@ -71,7 +72,8 @@ def cmd_exec(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"jocky: {exc}", file=sys.stderr)
         return 2
-    result = runner.run_artifact(artifact, wall_clock_ms=args.wall_ms, ctx=ctx)
+    result = runner.run_artifact(artifact, wall_clock_ms=args.wall_ms, ctx=ctx,
+                                 sandbox=args.sandbox)
     _emit(result.to_dict(), True) if args.json else None
     if not args.json:
         for finding in result.findings:
@@ -303,6 +305,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--max-steps", type=int, default=runner.DEFAULT_MAX_STEPS)
     p_run.add_argument("--allow", default=None,
                        help="grant privileged capabilities (comma list: syscall,exec)")
+    p_run.add_argument("--sandbox", default="off", choices=["off", "vm", "ro", "strict"],
+                       help="Landlock confinement level for the script (default: off)")
     p_run.set_defaults(func=cmd_run)
 
     p_exec = sub.add_parser("exec", help="execute a compiled artifact")
@@ -312,6 +316,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_exec.add_argument("--wall-ms", type=float, default=runner.DEFAULT_WALL_MS)
     p_exec.add_argument("--allow", default=None,
                         help="grant privileged capabilities (comma list: syscall,exec)")
+    p_exec.add_argument("--sandbox", default="off", choices=["off", "vm", "ro", "strict"],
+                        help="Landlock confinement level for the artifact (default: off)")
     p_exec.set_defaults(func=cmd_exec)
 
     p_build = sub.add_parser("build", help="compile a script to a polymorphic artifact")

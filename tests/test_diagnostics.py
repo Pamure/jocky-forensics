@@ -26,7 +26,8 @@ def test_quick_report_is_structured():
     assert report.counts[diagnostics.OK] >= 1
     for check in report.checks:
         assert check.status in (diagnostics.OK, diagnostics.WARN, diagnostics.FAIL)
-        assert check.group in ("runtime", "collection", "fileless", "management", "packaging")
+        assert check.group in ("runtime", "collection", "fileless", "management",
+                              "packaging", "confinement")
         if check.status != diagnostics.OK:
             assert check.fix, f"check {check.name} reports a problem without a fix"
 
