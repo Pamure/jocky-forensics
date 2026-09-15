@@ -3,9 +3,16 @@ export default [
   {
     "version": "1.4.0",
     "date": "unreleased",
-    "commit": "de25f67",
+    "commit": "bde84eb",
     "subject": "working tree",
     "current": true
+  },
+  {
+    "version": "v1.4.0",
+    "date": "2026-09-16",
+    "commit": "b4b71b7",
+    "subject": "v1.4.0 \u2014 in-language test facility, denial auditing, language consistency",
+    "current": false
   },
   {
     "version": "v1.3.0",

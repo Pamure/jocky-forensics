@@ -19,7 +19,7 @@ raises a catchable error naming the function.
 | `dict` | 0..0 |
 | `error` | 1..1 |
 | `expect` | 2..3 |
-| `expect_throws` | 1..2 |
+| `expect_throws` | 1..3 |
 | `fail` | 0..1 |
 | `filter` | 2..2 |
 | `float` | 1..1 |

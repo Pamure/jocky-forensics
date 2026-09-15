@@ -9,11 +9,14 @@ expect_throws(fn() { return mem.syscall(39) },
 expect_throws(fn() { return mem.memfd_run("print(1)") },
               "memfd execution is refused without an explicit grant")
 
-# the refusal names the capability and the flag that grants it
-let message = ""
-try { mem.syscall(39) } catch e { set message = e }
-assert(message.contains("syscall"), "the error names the capability")
-assert(message.contains("--allow"), "the error names the flag that grants it")
+# the refusal names the capability and the flag that grants it, and the run
+# records the attempt even though the script caught it
+expect_throws(fn() { return mem.syscall(39) }, "syscall refusal names the capability",
+              "capability is disabled")
+expect_throws(fn() { return mem.syscall(39) }, "syscall refusal names the flag",
+              "--allow syscall")
+expect_throws(fn() { return mem.memfd_run("print(1)") }, "exec refusal is specific",
+              "memfd execution runs arbitrary code")
 
 # read-only probes stay available: they are what makes the gate usable
 let probe = mem.probe()

@@ -26,7 +26,7 @@ error is uncaught.
 |---|---|---|
 | `assert(condition, label)` | the condition is truthy | it is falsy |
 | `expect(actual, expected, label)` | deep equality | the values differ |
-| `expect_throws(closure, label)` | the closure raises a *catchable* error | nothing was raised, or a budget was hit instead |
+| `expect_throws(closure, label, substring)` | the closure raises a *catchable* error (optionally containing `substring`) | nothing was raised, the wrong error came back, or a budget was hit instead |
 | `fail(label)` | — | always (for a branch that must not be reached) |
 | `skip(label)` | — | never; the check is recorded as skipped |
 
@@ -37,8 +37,9 @@ expect(2 + 3 * 4, 14, "precedence")
 expect([1, 2] == [1, 2], true, "structural equality")
 expect("x={7}", "x=7", "interpolation")
 
-expect_throws(fn() { return 1 / 0 }, "division by zero is catchable")
-expect_throws(fn() { return mem.syscall(39) }, "capabilities are denied by default")
+expect_throws(fn() { return 1 / 0 }, "division by zero is catchable", "division by zero")
+expect_throws(fn() { return mem.syscall(39) }, "capabilities are denied by default",
+              "capability is disabled")
 
 if fs.exists("/etc/shadow") {
   expect(len(fs.hash("/etc/shadow")), 64, "SHA-256 of a readable file")

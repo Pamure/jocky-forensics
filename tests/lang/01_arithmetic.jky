@@ -28,5 +28,5 @@ expect(1_000, 1000, "underscores are ignored in numbers")
 expect(9007199254740993 + 0, 9007199254740993, "integers are arbitrary precision")
 
 # division by zero is a catchable error, not a crash (see 07_errors.jky)
-expect_throws(fn() { return 1 / 0 }, "division by zero raises")
-expect_throws(fn() { return 1 % 0 }, "modulo by zero raises")
+expect_throws(fn() { return 1 / 0 }, "division by zero raises", "division by zero")
+expect_throws(fn() { return 1 % 0 }, "modulo by zero raises", "modulo by zero")

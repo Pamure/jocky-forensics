@@ -10,6 +10,14 @@ compatibility policy (see `docs/DESIGN.md` and the versioning page):
 * **minor** — backwards-compatible features (new natives, new checks);
 * **patch** — fixes only.
 
+## [Unreleased]
+
+### Changed
+- `expect_throws(closure, label, substring)` can require the error text to
+  contain `substring`: "something raised" is a weak assertion when the
+  interesting part is *which* error came back. A mismatch reports the actual
+  message (`raised 'division by zero', which does not contain 'modulo by zero'`).
+
 ## [1.4.0] — 2026-09-15
 
 ### Added

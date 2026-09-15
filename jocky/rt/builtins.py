@@ -131,15 +131,26 @@ def core_builtins() -> Dict[str, Any]:
         return _record(vm, label, ok, detail)
 
     def _expect_throws(vm: Any, args: List[Any]) -> bool:
-        """A closure must raise a *catchable* error (limits are failures, not passes)."""
+        """A closure must raise a *catchable* error.
+
+        ``expect_throws(fn() { … }, label, "substring")`` additionally requires
+        the error text to contain ``substring`` — "something raised" is a weak
+        assertion when the interesting part is *which* error came back. Budget
+        exhaustion is a failure, not a pass: exceeding a limit is not the error
+        the test asked for.
+        """
         fn = args[0]
         label = _str(args[1]) if len(args) > 1 else "expect_throws"
+        expected = _str(args[2]) if len(args) > 2 else ""
         try:
             vm.call_value(fn, [])
         except JockyRuntimeError as exc:
-            return _record(vm, label, True, f"raised: {exc}")
+            message = str(exc)
+            if expected and expected not in message:
+                return _record(vm, label, False,
+                               f"raised {message!r}, which does not contain {expected!r}")
+            return _record(vm, label, True, f"raised: {message}")
         except JockyLimitError as exc:
-            # exceeding a budget is not the error the test asked for
             return _record(vm, label, False, f"hit a limit instead of raising: {exc}")
         except Exception as exc:  # host-level surprise: report, never swallow
             return _record(vm, label, False, f"raised a host error: {type(exc).__name__}: {exc}")
@@ -211,7 +222,7 @@ def core_builtins() -> Dict[str, Any]:
         "print": _fn("print", _print, 0, None),
         "assert": _fn("assert", _assert, 1, 2),
         "expect": _fn("expect", _expect, 2, 3),
-        "expect_throws": _fn("expect_throws", _expect_throws, 1, 2),
+        "expect_throws": _fn("expect_throws", _expect_throws, 1, 3),
         "fail": _fn("fail", _fail, 0, 1),
         "skip": _fn("skip", _skip, 0, 1),
         "len": _fn("len", _len, 1, 1),

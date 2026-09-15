@@ -121,6 +121,21 @@ def test_limits_are_not_mistaken_for_errors(tmp_path):
     assert "limit" in detail, detail
 
 
+def test_expect_throws_can_require_a_message(tmp_path):
+    """'Something raised' is a weak assertion; the interesting part is which error."""
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "messages.jky").write_text(
+        'expect_throws(fn() { return 1 / 0 }, "right message", "division by zero")\n'
+        'expect_throws(fn() { return 1 / 0 }, "wrong message", "modulo by zero")\n',
+        encoding="utf-8")
+    summary = testrunner.run(str(corpus))
+    assert summary["checks"] == 2
+    assert summary["failed"] == 1, summary
+    detail = summary["results"][0]["failed"][0]
+    assert "wrong message" in detail and "does not contain" in detail, detail
+
+
 def test_missing_path_is_reported_by_the_cli():
     finished = _run(["/definitely/not/a/directory"])
     assert finished.returncode == 2

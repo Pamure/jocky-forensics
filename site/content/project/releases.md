@@ -7,18 +7,11 @@ tagged commit, and `jocky --version` reports the same string.
 
 | Version | Date | Commit | Notes |
 |---|---|---|---|
+| `v1.4.0` | 2026-09-16 | `b4b71b7` | v1.4.0 — in-language test facility, denial auditing, language consistency |
 | `v1.3.0` | 2026-09-15 | `73f56c5` | v1.3.0 — agent state hardening, serve --token-file, corrected syscall name |
 | `docs-2026-09-15` | 2026-09-15 | `a76df4c` | Documentation site complete: 24 pages, both build paths verified |
 | `v1.1.0` | 2026-09-15 | `a34a5f6` | v1.1.0 — forensic runtime hardening, integrity and installation tooling |
 | `v1.2.0` | 2026-09-15 | `fb59c2d` | v1.2.0 — Landlock sandbox, documentation site, release versioning |
-
-## Unreleased
-
-Commits after the latest tag:
-
-- `de25f67 docs: operations pages refreshed at 1.3.0 (evidence labelled as a 1.2.0-era run)`
-- `3c4af7d docs: refresh language, management and versioning pages to 1.3.0`
-- `ed50df5 docs: refresh installation pages to 1.3.0 and document token handling`
 
 ## Cutting a release
 

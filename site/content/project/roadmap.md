@@ -77,6 +77,10 @@ three language-consistency fixes the corpus exposed.
 | **Cost model for natives** — a native costs one step regardless of bytes read, so `fs.scan` can exhaust memory "within budget" | `cap-performance-envelope.md` | S | `cap-forensic-features.md` |
 | **Editor tooling** — no Pygments lexer, TextMate/tree-sitter grammar, LSP, formatter or REPL; a prototype lexer tokenised 1,082 lines with zero errors in 22 rules | 24 `.jky` files exist to highlight | S (lexer) / L (LSP) | `cap-tooling.md` |
 | **Fixture replay** — `jocky test --record` so a corpus can run against captured `/proc` snapshots instead of the live host | today every collector test depends on the host | M | `cap-dsl-survey.md` |
+| **Source positions on checks** — a failing `expect` reports its label and the difference, but not the line; `Proto.starts` records statement ingress and would carry a `lines` map to the wire format | rustc's `//~ ERROR` and Go's `ERROR` annotations both anchor a diagnostic to a line | M | `cap-language-testing.md` |
+| **Expectation files instead of inline values** — rustc keeps `.stderr` goldens with `--bless`; JOCKY's corpus asserts inline, so a deliberate change rewrites the test by hand | snapshot brittleness is a known failure mode (blind blessing) | M | `cap-language-testing.md` |
+| **Grammar-based fuzzing of the parser/VM** — wasm-smith's always-valid generator is the model; JOCKY has no fuzzing at all | the lexer's `KeyError` on a trailing `0` was found by reading, not by a fuzzer | M | `cap-language-testing.md` |
+| **Mutation testing** — mutants proxy real faults at equal coverage; diff-scoped mutation keeps it affordable | nothing measures whether the suite *would* catch a change | L | `cap-language-testing.md` |
 
 Closest external analogue: **Velociraptor VQL** — a host-native query language
 with versioned artifacts served from a central server; JOCKY's namespaces mirror
