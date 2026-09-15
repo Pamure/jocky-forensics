@@ -34,7 +34,6 @@ degrades to "match everything" is worse than one that refuses to load.
 from __future__ import annotations
 
 import base64
-import binascii
 import re as _stdlib_re          # only for the YAML/condition tokenizer, never for matching
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Sequence, Tuple
@@ -493,15 +492,16 @@ def _selection_matches(selection: Selection, record: Any) -> bool:
     for alternative in selection.alternatives:
         if _selection_matches(alternative, record):
             return True
+    if not selection.fields:
+        return False
     for field_name, require_all, matchers in selection.fields:
         value = _record_value(record, field_name)
         if require_all:
             if not all(matcher(value) for matcher in matchers):
-                continue
+                return False
         elif not any(matcher(value) for matcher in matchers):
-            continue
-        return True
-    return False
+            return False
+    return True
 
 
 class Rule:

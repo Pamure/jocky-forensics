@@ -407,8 +407,17 @@ class VM:
 
     def _add(self, a: Any, b: Any) -> Any:
         if isinstance(a, str) or isinstance(b, str):
-            return to_str(a) + to_str(b)
+            sa, sb = to_str(a), to_str(b)
+            if len(sa) + len(sb) > MAX_COLLECTION_SIZE:
+                raise JockyRuntimeError(
+                    f"string concatenation would exceed {MAX_COLLECTION_SIZE:,} characters"
+                )
+            return sa + sb
         if isinstance(a, list) and isinstance(b, list):
+            if len(a) + len(b) > MAX_COLLECTION_SIZE:
+                raise JockyRuntimeError(
+                    f"list concatenation would exceed {MAX_COLLECTION_SIZE:,} elements"
+                )
             return a + b
         if isinstance(a, (int, float)) and isinstance(b, (int, float)):
             return a + b
@@ -422,9 +431,21 @@ class VM:
 
     def _mul(self, a: Any, b: Any) -> Any:
         if isinstance(a, str) and isinstance(b, int):
-            return a * max(0, b)
+            count = max(0, b)
+            limit = MAX_COLLECTION_SIZE // max(len(a), 1)
+            if count > limit:
+                raise JockyRuntimeError(
+                    f"string repeat would exceed {MAX_COLLECTION_SIZE:,} characters"
+                )
+            return a * count
         if isinstance(a, list) and isinstance(b, int):
-            return a * max(0, b)
+            count = max(0, b)
+            limit = MAX_COLLECTION_SIZE // max(len(a), 1)
+            if count > limit:
+                raise JockyRuntimeError(
+                    f"list repeat would exceed {MAX_COLLECTION_SIZE:,} elements"
+                )
+            return a * count
         if isinstance(a, (int, float)) and isinstance(b, (int, float)):
             return _bounded(a * b)
         raise JockyRuntimeError(f"cannot multiply {type(a).__name__} by {type(b).__name__}")
@@ -524,6 +545,10 @@ class VM:
             frame.ip = target
 
     def _op_mk_list(self, frame: Frame, count: int) -> None:
+        if count > MAX_COLLECTION_SIZE:
+            raise JockyRuntimeError(
+                f"list literal would exceed {MAX_COLLECTION_SIZE:,} elements"
+            )
         if count:
             items = frame.stack[-count:]
             del frame.stack[-count:]
@@ -532,6 +557,10 @@ class VM:
             frame.stack.append([])
 
     def _op_mk_map(self, frame: Frame, count: int) -> None:
+        if count > MAX_COLLECTION_SIZE:
+            raise JockyRuntimeError(
+                f"map literal would exceed {MAX_COLLECTION_SIZE:,} entries"
+            )
         if count:
             items = frame.stack[-2 * count:]
             del frame.stack[-2 * count:]
@@ -741,6 +770,11 @@ def _safe_float(text: str) -> float:
 #: ceiling is far above anything forensic arithmetic needs (sizes, epochs, hashes,
 #: byte offsets) and turns that loop into a reported error on the 17th squaring.
 MAX_INT_BITS = 1 << 16
+
+#: Largest collection (list elements or string characters) a script may build.
+#: Prevents ``"a" * 10**9`` or ``[0] * 10**9`` from exhausting host memory in a
+#: single VM instruction.
+MAX_COLLECTION_SIZE = 10_000_000
 
 
 def _bounded(value: Any) -> Any:

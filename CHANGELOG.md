@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — hardening pass
+
+### Security
+- `jocky/lang/vm.py`: hard cap `MAX_COLLECTION_SIZE = 10_000_000` on string/list concatenation, string/list repetition, and `MK_LIST`/`MK_MAP` counts. Closes an unbounded-allocation vector (`"a" * 10**9`).
+- `jocky/rt/pattern.py`: hard cap `MAX_REPEAT = 100_000` on `{n}`/`{n,m}` quantifier bounds at compile time. Turns a crafted pattern into a clear error instead of a step-budget exhaustion.
+- `jocky/rt/filefs.py`: `scan()` refuses to walk the pseudo filesystems (`/proc`, `/sys`, `/dev`, `/run`) *when passed as the root*, so a script that mistakenly scans them gets a diagnostic rather than a silent zero-finding run. Drop zones (`/dev/shm`, `/tmp`, `/var/tmp`) are still scanned — the previous prefix-based guard over-blocked them.
+- `jocky/poly/wire.py`: `Reader.count()` now also enforces `_MAX_COLLECTION_ITEMS` on top of the remaining-bytes check, so a crafted artifact cannot claim millions of items even when the buffer is huge. `Reader.blob()` enforces `_MAX_FIELD_SIZE`.
+- `jocky/agent/server.py`: token comparison reviewed end-to-end — only `hmac.compare_digest` is used. Added per-IP rate limiting: `MAX_AUTH_FAILURES = 10` failed auths in `AUTH_WINDOW_SECONDS = 60` returns `429 Too Many Requests` before the token is touched.
+- `jocky/sandbox.py`: `apply()` rejects an unknown level with `ValueError` naming the valid choices.
+
+### Robustness
+- `jocky/rt/filefs.py`: `grep_file()` deadline check now runs every 1000 lines inside the inner split loop, and any line longer than `MAX_LINE_BYTES` is truncated before matching — a single very long line no longer bypasses both the byte cap and the wall-clock budget.
+- `jocky/rt/procfs.py`: `read_fds()` distinguishes `PermissionError` (root-owned process), `FileNotFoundError` (process vanished), and other `OSError`s, and never propagates them out of a `/proc` walk.
+- `jocky/rt/netfs.py`: `_read_unix()` wraps each row parse in `try/except`, so one malformed line does not abort the table read.
+- `jocky/rt/detect.py`: `triage()` deduplicates findings sharing `(check, evidence.pid)`, keeping the highest-severity instance. Overlapping process checks no longer report the same pid twice.
+
+### Usability
+- `jocky/cli.py`: `run`, `exec`, `build`, `triage`, `evidence`, and `attest` subcommands gained worked examples in `--help`.
+- `scripts/quickstart.jky`: a fully commented tour of the language and every forensic namespace, runnable end-to-end in all four modes (`run`, `exec`, `fileless`, `--ndjson`).
+
 All notable changes to JOCKY are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [semantic versioning](https://semver.org/spec/v2.0.0.html) with an explicit

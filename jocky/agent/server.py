@@ -57,6 +57,14 @@ from jocky import __version__
 #: this is either a bug or an attempt to exhaust the server.
 MAX_BODY = 8 * 1024 * 1024
 
+#: Rate-limit parameters for authentication failures.
+MAX_AUTH_FAILURES = 10
+AUTH_WINDOW_SECONDS = 60
+
+#: Per-IP sliding-window tracker: ip -> [timestamp, …].
+_AUTH_FAILURES: Dict[str, List[float]] = {}
+_AUTH_FAILURES_LOCK = threading.Lock()
+
 CERT_NAME = "agent.crt"
 KEY_NAME = "agent.key"
 STORE_NAME = "store.db"
@@ -610,12 +618,30 @@ class Handler(BaseHTTPRequestHandler):
                  f" {elapsed_ms:.1f}ms")
 
     def _require_token(self) -> None:
-        """Constant-time token check; a missing token is as wrong as a bad one."""
+        """Constant-time token check with per-IP rate limiting."""
+        client_ip = self.client_address[0]
+        now = time.monotonic()
+
+        # --- rate-limit check (before touching the token) ---
+        with _AUTH_FAILURES_LOCK:
+            timestamps = _AUTH_FAILURES.get(client_ip)
+            if timestamps is not None:
+                # Evict entries older than the window.
+                cutoff = now - AUTH_WINDOW_SECONDS
+                timestamps[:] = [t for t in timestamps if t > cutoff]
+                if not timestamps:
+                    del _AUTH_FAILURES[client_ip]
+                elif len(timestamps) >= MAX_AUTH_FAILURES:
+                    raise _HTTPError(429, "too many authentication failures")
+
+        # --- constant-time token comparison ---
         expected = getattr(self.server, "token", "") or ""
         provided = self.headers.get("X-JKY-Token") or ""
         if not expected or not hmac.compare_digest(
             provided.encode("utf-8", "replace"), expected.encode("utf-8")
         ):
+            with _AUTH_FAILURES_LOCK:
+                _AUTH_FAILURES.setdefault(client_ip, []).append(now)
             raise _HTTPError(401, "missing or invalid X-JKY-Token")
 
     def _read_json(self) -> Dict[str, Any]:

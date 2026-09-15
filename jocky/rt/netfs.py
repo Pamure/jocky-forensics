@@ -96,14 +96,18 @@ def _read_unix(path: str = "/proc/net/unix") -> List[Dict[str, Any]]:
         parts = line.split()
         if len(parts) < 7:
             continue
-        rows.append({
-            "proto": "unix",
-            "type": parts[4],
-            "state": parts[5],
-            "inode": int(parts[6]) if parts[6].isdigit() else 0,
-            "path": parts[7] if len(parts) > 7 else "",
-            "listening": parts[4] == "0001" and parts[5] == "01",
-        })
+        try:
+            rows.append({
+                "proto": "unix",
+                "type": parts[4],
+                "state": parts[5],
+                "inode": int(parts[6]) if parts[6].isdigit() else 0,
+                "path": parts[7] if len(parts) > 7 else "",
+                "listening": parts[4] == "0001" and parts[5] == "01",
+            })
+        except (ValueError, IndexError):
+            # Malformed line; skip without aborting the entire table
+            continue
     return rows
 
 

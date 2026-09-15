@@ -30,7 +30,7 @@ import fnmatch
 import os
 import re
 import time
-from typing import Sequence, Any, Dict, Iterable, List, Optional, Tuple
+from typing import Sequence, Any, Dict, Iterable, List, Optional
 
 from jocky.canon import (
     GENESIS,
@@ -77,11 +77,11 @@ def _iter_files(directory: str, exclude: Sequence[str] = ()) -> List[str]:
     return sorted(found, key=lambda path: os.path.relpath(path, directory))
 
 
-def build_entries(directory: str) -> List[Dict[str, Any]]:
-    """Hash every file and link it into the chain."""
+def build_entries(directory: str, exclude: Optional[Iterable[str]] = None) -> List[Dict[str, Any]]:
+    """Hash every non-excluded file and link it into the chain."""
     entries: List[Dict[str, Any]] = []
     chain = GENESIS
-    for path in _iter_files(directory):
+    for path in _iter_files(directory, exclude=list(exclude or ())):
         relative = os.path.relpath(path, directory)
         file_digest = digest_file(path)
         chain = chain_digest(chain, file_digest)
@@ -110,9 +110,8 @@ def attest(directory: str, note: Optional[str] = None,
     if not os.path.isdir(directory):
         raise FileNotFoundError(f"not a directory: {directory}")
 
-    excluded = {os.path.abspath(path) for path in (exclude or [])}
-    entries = [e for e in build_entries(directory)
-               if os.path.abspath(os.path.join(directory, e["path"])) not in excluded]
+    exclude_list = [str(x) for x in (exclude or [])]
+    entries = build_entries(directory, exclude=exclude_list)
     head = chain_head(entries)
     generated_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
 
@@ -123,6 +122,7 @@ def attest(directory: str, note: Optional[str] = None,
         "total_bytes": sum(entry["size"] for entry in entries),
         "chain_head": head,
         "note": note,
+        "exclude": exclude_list,
         "entries": entries,
     }
     manifest_path = os.path.join(directory, MANIFEST_NAME)
@@ -179,8 +179,8 @@ def verify(directory: str, key: Optional[bytes] = None,
                 "checked": 0, "missing": [], "modified": [], "added": []}
 
     recorded = {entry["path"]: entry for entry in manifest.get("entries", [])}
-    current = {entry["path"]: entry for entry in build_entries(directory)}
-
+    exclude_patterns = manifest.get("exclude") or []
+    current = {entry["path"]: entry for entry in build_entries(directory, exclude=exclude_patterns)}
     missing = sorted(set(recorded) - set(current))
     added = sorted(set(current) - set(recorded))
     modified = sorted(
@@ -212,6 +212,9 @@ def verify(directory: str, key: Optional[bytes] = None,
         elif len(fields) > 1 and fields[1].isdigit() and int(fields[1]) != len(recorded):
             problems.append("stored head file count does not match the manifest")
             head_ok = False
+        elif len(fields) > 2 and fields[2] != manifest.get("generated_at"):
+            problems.append("stored head timestamp does not match the manifest")
+            head_ok = False
     else:
         problems.append(f"no {HEAD_NAME} found (looked at {head_source})")
 
@@ -223,21 +226,26 @@ def verify(directory: str, key: Optional[bytes] = None,
             signature_ok = False
         else:
             import json
-
-            with open(signature_path, encoding="utf-8") as handle:
-                record = json.load(handle)
-            expected = hmac.new(
-                key,
-                f"{manifest.get('chain_head')}:{manifest.get('file_count')}".encode(),
-                "sha256",
-            ).hexdigest()
-            signature_ok = hmac.compare_digest(record.get("hmac", ""), expected)
-            if not signature_ok:
-                problems.append("signature does not verify with the supplied key")
-            elif record.get("key_id") != key_id(key):
-                problems.append("signature was made with a different key")
+            try:
+                with open(signature_path, encoding="utf-8") as handle:
+                    record = json.load(handle)
+                if not isinstance(record, dict):
+                    raise ValueError("signature file must be a JSON mapping")
+            except Exception as exc:
+                problems.append(f"malformed {SIGNATURE_NAME}: {exc}")
                 signature_ok = False
+                record = None
 
+            if record is not None:
+                payload = f"{manifest.get('chain_head')}:{manifest.get('file_count')}:{manifest.get('generated_at')}:{manifest.get('note')}"
+                expected = hmac.new(key, payload.encode(), "sha256").hexdigest()
+                legacy = hmac.new(key, f"{manifest.get('chain_head')}:{manifest.get('file_count')}".encode(), "sha256").hexdigest()
+                signature_ok = hmac.compare_digest(record.get("hmac", ""), expected) or hmac.compare_digest(record.get("hmac", ""), legacy)
+                if not signature_ok:
+                    problems.append("signature does not verify with the supplied key")
+                elif record.get("key_id") != key_id(key):
+                    problems.append("signature was made with a different key")
+                    signature_ok = False
     return {
         "ok": not problems,
         "directory": directory,
@@ -266,7 +274,8 @@ def sign_head(directory: str, key: Optional[bytes] = None,
     manifest = _load_manifest(directory)
     head = str(manifest.get("chain_head"))
     count = int(manifest.get("file_count", 0))
-    mac = hmac.new(key, f"{head}:{count}".encode(), "sha256").hexdigest()
+    payload = f"{head}:{count}:{manifest.get('generated_at')}:{manifest.get('note')}"
+    mac = hmac.new(key, payload.encode(), "sha256").hexdigest()
     record = {
         "algorithm": "HMAC-SHA256",
         "key_id": key_id(key),

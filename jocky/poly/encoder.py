@@ -507,6 +507,12 @@ def _validate_operands(program: Any) -> None:
                     raise JockyArtifactError(
                         f"malformed artifact: CONST at {index} indexes {operand} of "
                         f"{len(pool)} constants")
+            elif op == "MK_FN":
+                protos = getattr(program, "protos", []) or []
+                if not 0 <= operand < len(protos):
+                    raise JockyArtifactError(
+                        f"malformed artifact: MK_FN at {index} indexes prototype {operand} "
+                        f"of {len(protos)} prototypes")
 
 
 def _decode_payload(payload: bytes, header: Dict[str, Any]) -> Program:

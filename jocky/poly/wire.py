@@ -52,6 +52,8 @@ _A_NONE, _A_INT, _A_TUPLE, _A_LIST = range(4)
 # A varint longer than this cannot come from a plausible program and is
 # treated as corruption rather than expanded into a huge Python int.
 _MAX_VARINT_BYTES = 16
+_MAX_FIELD_SIZE = 10_000_000  # 10 MB – reject implausibly large blob/text fields
+_MAX_COLLECTION_ITEMS = 1_000_000  # absolute cap on decoded collection counts
 
 _OP_INDEX: Dict[str, int] = {name: i for i, name in enumerate(OPCODES)}
 
@@ -201,11 +203,17 @@ class Reader:
         return (zig >> 1) if not zig & 1 else -((zig + 1) >> 1)
 
     def blob(self) -> bytes:
-        return self.take(self.uvarint())
+        length = self.uvarint()
+        if length > _MAX_FIELD_SIZE:
+            raise JockyArtifactError(
+                f"blob field too large ({length} bytes, limit {_MAX_FIELD_SIZE})"
+            )
+        return self.take(length)
 
     def text(self) -> str:
+        raw = self.blob()
         try:
-            return self.blob().decode("utf-8")
+            return raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise JockyArtifactError(f"invalid UTF-8 string in artifact: {exc}") from exc
 
@@ -214,9 +222,14 @@ class Reader:
 
         Every element in this format costs at least one byte, so a count
         larger than ``remaining`` is corruption and would otherwise make the
-        decoder spin allocating.
+        decoder spin allocating.  An absolute cap prevents pathological
+        payloads from claiming millions of items even when the buffer is huge.
         """
         value = self.uvarint()
+        if value > _MAX_COLLECTION_ITEMS:
+            raise JockyArtifactError(
+                f"{what} count {value} exceeds the limit of {_MAX_COLLECTION_ITEMS}"
+            )
         if value > self.remaining:
             raise JockyArtifactError(
                 f"{what} count {value} exceeds the {self.remaining} byte(s) left in the artifact"

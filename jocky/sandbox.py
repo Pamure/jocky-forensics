@@ -288,7 +288,7 @@ def apply(level: str, extra_write: Optional[List[str]] = None,
     """
     level = (level or "off").lower()
     if level not in LEVELS:
-        raise ValueError(f"unknown sandbox level {level!r} (expected one of {', '.join(LEVELS)})")
+        raise ValueError(f"unknown sandbox level {level!r}; choose from {LEVELS}")
     report = SandboxReport(level=level)
     if level == "off":
         report.reason = "confinement disabled by request"

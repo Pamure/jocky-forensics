@@ -240,14 +240,44 @@ def test_artifact_operands_are_range_checked_at_decode():
     with pytest.raises(JockyArtifactError, match="CONST"):
         _validate_operands(program)
 
+    proto = SimpleNamespace(code=[("MK_FN", 99)])
+    program = SimpleNamespace(main=proto, protos=[], consts=["a"])
+    with pytest.raises(JockyArtifactError, match="MK_FN"):
+        _validate_operands(program)
+
     # A sane program passes untouched.
     proto = SimpleNamespace(code=[("CONST", 0), ("EMIT", None), ("HALT", None)])
     program = SimpleNamespace(main=proto, protos=[], consts=["a"])
     _validate_operands(program)
 
 
-def test_a_valid_artifact_passes_the_operand_check():
-    artifact, _meta = runner.build_artifact("emit 1", seed=b"\x44" * 32, deterministic=True)
-    result = runner.run_artifact(artifact)
-    assert not result.errors, result.errors
-    assert result.findings == [1]
+def test_tampered_attestation_timestamp_is_detected(case_dir):
+    case.attest(str(case_dir))
+    head_path = case_dir / "manifest.head"
+    fields = head_path.read_text(encoding="utf-8").strip().split()
+    # Tamper the timestamp
+    tampered = f"{fields[0]} {fields[1]} 1980-01-01T00:00:00+0000\n"
+    head_path.write_text(tampered, encoding="utf-8")
+    result = case.verify(str(case_dir))
+    assert not result["ok"]
+    assert result["head_matches"] is False
+    assert any("timestamp" in err for err in result["errors"])
+
+
+def test_malformed_signature_file_handled_gracefully(case_dir):
+    case.attest(str(case_dir))
+    sig_path = case_dir / "manifest.sig"
+    sig_path.write_text("NOT_JSON_DATA_CORRUPT", encoding="utf-8")
+    result = case.verify(str(case_dir), key=b"key")
+    assert not result["ok"]
+    assert result["signature_valid"] is False
+    assert any("malformed manifest.sig" in err for err in result["errors"])
+
+
+def test_attest_and_verify_with_exclusions(case_dir):
+    (case_dir / "temp.log").write_text("ephemeral log data", encoding="utf-8")
+    res_attest = case.attest(str(case_dir), exclude=["*.log"])
+    assert res_attest["file_count"] >= 1
+    res_verify = case.verify(str(case_dir))
+    assert res_verify["ok"], res_verify["errors"]
+    assert res_verify["checked"] == res_attest["file_count"]

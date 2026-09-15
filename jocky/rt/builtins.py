@@ -593,11 +593,18 @@ def _read_text(path: str, limit: int, offset: int = 0) -> str:
     sweep instead of a blind one.
     """
     from jocky.errors import JockyRuntimeError
+    from jocky.rt.filefs import MAX_READ_BYTES
+
+    count = max(0, limit)
+    if count > MAX_READ_BYTES:
+        raise JockyRuntimeError(
+            f"read limit {count} exceeds the {MAX_READ_BYTES}-byte ceiling; "
+            "read the file in windows with offset instead")
     try:
         with open(path, "rb") as fh:
             if offset > 0:
                 fh.seek(offset)
-            data = fh.read(max(0, limit))
+            data = fh.read(count)
     except OSError as exc:
         raise JockyRuntimeError(f"cannot read {path}: {exc.strerror or exc}")
     return data.decode("utf-8", "replace")

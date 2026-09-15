@@ -13,7 +13,7 @@ import os
 import re
 import stat as stat_mod
 import time
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 # Pseudo filesystems that must never be walked by a generic scan.
 SKIP_DIRS = {"/proc", "/sys", "/dev", "/run"}
@@ -154,6 +154,9 @@ def entropy(path: str, offset: int = 0, limit: int = 1 << 20) -> Dict[str, Any]:
 
     start = max(0, offset)
     window = max(0, limit)
+    if window > MAX_READ_BYTES:
+        raise JockyRuntimeError(
+            f"entropy window {window} exceeds the {MAX_READ_BYTES}-byte ceiling")
     try:
         with open(path, "rb") as handle:
             if start:
@@ -291,7 +294,19 @@ def stat_entry(path: str) -> Optional[Dict[str, Any]]:
 def scan(root: str = "/", max_files: int = 2000, max_depth: int = 6,
          pattern: Optional[str] = None, min_size: int = 0,
          include_dirs: bool = False, with_hash: bool = False) -> List[Dict[str, Any]]:
-    """Bounded recursive scan (depth and count capped, pseudo-fs skipped)."""
+    """Bounded recursive scan (depth and count capped, pseudo-fs skipped).
+
+    A root that resolves into a pseudo filesystem (:data:`SKIP_DIRS`) is
+    rejected: walking ``/proc`` or ``/sys`` from a script is never what a
+    forensic collection means, and silently returning nothing hid that.
+    """
+    from jocky.errors import JockyRuntimeError
+    resolved = os.path.realpath(root)
+    if resolved in SKIP_DIRS:
+        raise JockyRuntimeError(
+            f"fs.scan refuses to walk {resolved!r}: it is a pseudo filesystem "
+            "(/proc, /sys, /dev, /run); read it through the proc/net/sys namespaces instead"
+        )
     results: List[Dict[str, Any]] = []
     root = os.path.abspath(root)
     stack = [(root, 0)]
@@ -513,6 +528,7 @@ def grep_file(path: str, pattern: str, limit: int = 500,
     with handle:
         pending = b""
         skipping = False                 # discarding the tail of an over-long line
+        line_count = 0
         try:
             while max_bytes is None or consumed < max_bytes:
                 if deadline is not None and time.monotonic() > deadline:
@@ -540,6 +556,12 @@ def grep_file(path: str, pattern: str, limit: int = 500,
                         skipping = False
                         continue
                     lines += 1
+                    line_count += 1
+                    if line_count % 1000 == 0 and deadline is not None and time.monotonic() > deadline:
+                        break
+                    if len(raw) > MAX_LINE_BYTES:
+                        raw = raw[:MAX_LINE_BYTES]
+                        truncated = True
                     line = raw.decode(encoding, errors).rstrip("\r")
                     match = compiled.search(line)
                     if match is not None:

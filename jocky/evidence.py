@@ -35,8 +35,8 @@ import statistics
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Tuple
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_SCRIPTS = os.path.join(REPO_ROOT, "scripts")

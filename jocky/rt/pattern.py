@@ -44,6 +44,8 @@ MAX_PROGRAM = 4000
 #: Simulation step ceiling per call: len(text) x len(pattern) is bounded here so
 #: a huge file cannot turn one match into an unbounded pause.
 DEFAULT_STEP_BUDGET = 4_000_000
+#: Ceiling for explicit {n} / {n,m} repeat counts.
+MAX_REPEAT = 100_000
 
 _DIGIT = "0123456789"
 _WORD = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
@@ -196,6 +198,11 @@ class _Parser:
         self._next()
         if high is not None and high < low:
             raise self._error("repeat range is inverted")
+        cap = high if high is not None else low
+        if cap > MAX_REPEAT:
+            raise JockyRuntimeError(
+                f"repeat count {cap} exceeds the 100,000 ceiling"
+            )
         return _Repeat(node=node, low=low, high=high)
 
     def _atom(self) -> _Node:

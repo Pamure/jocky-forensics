@@ -1,0 +1,201 @@
+# quickstart.jky — a guided tour of JOCKY for a first-time reader.
+#
+# Run it with:
+#   ./venv/bin/jocky run scripts/quickstart.jky --json
+#
+# This script is written to be *read* top to bottom. Every block is small and
+# self-contained; nothing here is required to understand the next block. By the
+# end you will have seen the whole language and every forensic namespace a
+# triage script normally reaches for.
+#
+# The intent is not to be a tutorial about *forensics* — it is a tutorial about
+# *this runtime*, so that when you open `hunt.jky` or `triage.jky` you already
+# recognise the shape of what is in front of you.
+
+# -----------------------------------------------------------------------------
+# 1. Values, variables and string interpolation
+# -----------------------------------------------------------------------------
+# `let` declares a name. Names live in the function scope (there is no block
+# scoping), so a name declared inside an `if` is visible after it. `set` writes
+# to a name that already exists, and to members/indexes of containers.
+let host = sys.kernel()                    # a map: {"sysname": ..., "release": ...}
+let arch = sys.cpu()                       # a map: {"model": ..., "cpus": N}
+
+# `"{expr}"` interpolates. `{{` and `}}` are literal braces. Raw strings
+# (`r"...\..."`) decode nothing at all — useful for patterns and paths.
+print("host={host.sysname} release={host.release} arch={arch.cpus} cpus")
+
+# Numbers: int/float, `_` separators, hex/bin/oct. `/` is true division.
+let window_bytes = 4 * 1024 * 1024
+let half = window_bytes / 2
+print("window={window_bytes} half={half}")
+
+# Truthiness: nil, false, 0, 0.0, "", [], {} are false. Everything else is true.
+let flag = "non-empty"
+if flag { print("non-empty strings are truthy") }
+
+# -----------------------------------------------------------------------------
+# 2. Collections
+# -----------------------------------------------------------------------------
+# Lists and maps are structural — `==` compares by value, not identity.
+let findings = []                          # a list we will fill below
+let seen = {}                              # a map we will use as a set
+let counts = {"info": 0, "low": 0, "medium": 0, "high": 0, "critical": 0}
+
+# `push`, `get`, `keys`, `values`, `len`, `has`, `upper`, `split`, `join`, `trim`
+# are the methods you will reach for most. They are documented by
+# `jocky doctor` and in docs/DESIGN.md.
+let sample = ["a", "b", "c"]
+sample.push("d")
+let sep = ","
+print("sample={sample} len={len(sample)} joined={join(sample, sep)}")
+
+# -----------------------------------------------------------------------------
+# 3. Functions and closures
+# -----------------------------------------------------------------------------
+# `fn` declares a function; the same keyword makes a lambda. Closures capture
+# by reference to a cell, so two closures over one variable see each other's
+# writes — the same late-binding rule as Python lambdas.
+fn add_severity(f, severity) {
+  # `set` writes into the map `f`. Finding maps are the primary output shape.
+  set f.severity = severity
+  return f
+}
+
+fn make_counter() {
+  let n = 0
+  return fn() {
+    set n = n + 1
+    return n
+  }
+}
+let counter = make_counter()
+print("counter: {counter()} {counter()} {counter()}")
+
+# -----------------------------------------------------------------------------
+# 4. Control flow
+# -----------------------------------------------------------------------------
+# `for ... in` iterates lists and maps (maps iterate keys). `while` is a
+# conventional loop; `break` and `continue` work as you would expect.
+let severity_order = ["info", "low", "medium", "high", "critical"]
+for level in severity_order {
+  set counts[level] = counts[level] + 1
+}
+print("counts={counts}")
+
+# `try`/`catch` catches runtime errors; the caught value is the message string.
+try {
+  let boom = 1 / 0
+  print("unreachable")
+} catch e {
+  print("caught: {e}")
+}
+
+# -----------------------------------------------------------------------------
+# 5. The forensic namespaces — what makes this runtime different
+# -----------------------------------------------------------------------------
+# Everything below reads the host *directly* (procfs, sysfs, netfs). No `ps`,
+# `ss`, `lsof`, `lsmod`, `find` or `sha256sum` is ever spawned: that is the
+# whole point of the runtime, and `jocky evidence` measures it with a Python
+# audit hook.
+
+# 5a. Processes. `proc.list(limit)` returns a list of maps with pid, exe,
+#     cmdline, uid, state, and (when you ask) fds/maps/io/environ.
+let procs = proc.list(50)
+print("visible processes: {len(procs)}")
+
+# 5b. Sockets. `net.connections(include_unix, with_process)` attributes each
+#     socket to its owning pid by reading /proc/<pid>/fd. That attribution is
+#     a linear pass, not a Cartesian join — see the solution playbooks.
+let conns = net.connections(false, true)
+let listeners = net.listeners()
+print("sockets={len(conns)} listeners={len(listeners)}")
+
+# 5c. Filesystem. `fs.scan` is bounded (depth and count); it skips /proc, /sys,
+#     /dev, /run; `fs.entropy` reports Shannon entropy so packed or encrypted
+#     payloads stand out from source code.
+# The sweep is wrapped in try/catch because /tmp is a busy directory: between
+# the scan and the entropy read, a file can be unlinked, replaced by a
+# directory, or become unreadable. A collection script that aborts on the
+# first such race reports nothing; one that catches, continues and records
+# the failure is the one an analyst can trust.
+let drop_zone = "/tmp"
+if fs.exists(drop_zone) {
+  let recent = fs.timeline(drop_zone, 20, 500)
+  for entry in recent {
+    if entry.executable {
+      try {
+        let e = fs.entropy(entry.path, 0, 65536)
+        if e.packed_likely {
+          findings.push(add_severity({
+            "kind": "high_entropy_dropzone_payload",
+            "path": entry.path,
+            "entropy": e.entropy
+          }, "high"))
+        }
+      } catch e {
+        # The path vanished or became unreadable between scan and read.
+        # Record it as an informational finding so "no match" stays distinct
+        # from "I could not look".
+        findings.push({
+          "kind": "dropzone_read_failed",
+          "severity": "info",
+          "path": entry.path,
+          "reason": e
+        })
+      }
+    }
+  }
+}
+
+# 5d. Host inventory. `sys.*` answers "what am I looking at" in one call each.
+let kernel = sys.kernel()
+print("kernel={kernel.sysname} release={kernel.release} machine={kernel.machine} uptime={sys.uptime().seconds}")
+
+# 5e. Detection. `det.*` is the mirror of the execution side: it finds fileless
+#     processes, executable memfd mappings, deleted executables, injected
+#     LD_*, suspicious command lines, and hidden kernel modules.
+for f in det.fileless()             { findings.push(f) }
+for f in det.memfd_maps()           { findings.push(f) }
+for f in det.temp_exes()            { findings.push(f) }
+for f in det.suspicious_cmdline()   { findings.push(f) }
+for f in det.hidden_modules()       { findings.push(f) }
+
+# -----------------------------------------------------------------------------
+# 6. Pattern matching — the safe matcher
+# -----------------------------------------------------------------------------
+# `re.*` runs JOCKY's own linear-time engine, never the host `re`. Cost is
+# O(len(text) × len(pattern)) regardless of the pattern, so a script that
+# searches attacker-authored text cannot be turned into a denial of service.
+# Unsupported by design: lazy quantifiers, back-references, look-around — each
+# is a syntax error naming the offset, never a silent mis-parse.
+if re.test(r"^\d{2}:\d{2}:\d{2}$", "12:34:56") {
+  print("time pattern matches")
+}
+let m = re.find(r"uid=(\d+)", "uid=0(root)")
+if len(m) > 0 {
+  print("captured uid={m[0].groups[0]}")
+}
+
+# -----------------------------------------------------------------------------
+# 7. Time and timelines
+# -----------------------------------------------------------------------------
+# Findings carry no timestamp of their own: the runner stamps them at collection
+# time only if you asked (`--stamp-findings`), and a script that watched an
+# event should stamp it itself. `tl.merge`/`tl.window`/`tl.bucket` shape events.
+let now = time.now()
+print("collected at {time.iso(now)} (epoch {now})")
+
+# -----------------------------------------------------------------------------
+# 8. Emitting findings
+# -----------------------------------------------------------------------------
+# `emit` is the primary output channel. Each `emit` appends one structured
+# finding to the run result; `--json` serialises the whole run, `--ndjson`
+# streams each finding as it arrives (bounded memory for huge sweeps).
+for f in findings {
+  emit f
+}
+
+# `print` writes human text. It is fine for a `quickstart` but a production
+# playbook should prefer `emit` so the operator can filter on `kind`.
+print("quickstart complete: {len(findings)} finding(s) emitted")

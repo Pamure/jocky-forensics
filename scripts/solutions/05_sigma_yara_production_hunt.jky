@@ -39,16 +39,19 @@ for zone in drop_zones {
     for f in files {
       if f.is_file and f.executable {
         # Calculate Shannon entropy (packed/encrypted payloads score near 8.0)
-        let ent = fs.entropy(f.path, 0, 65536)
-        if ent.packed_likely {
-          emit {
-            "kind": "high_entropy_dropzone_payload",
-            "severity": "high",
-            "path": f.path,
-            "entropy": ent.entropy,
-            "unique_bytes": ent.unique_bytes,
-            "recommendation": "Executable in temporary drop zone exhibits high Shannon entropy indicating runtime packing/encryption"
+        try {
+          let ent = fs.entropy(f.path, 0, 65536)
+          if ent != nil and ent.packed_likely {
+            emit {
+              "kind": "high_entropy_dropzone_payload",
+              "severity": "high",
+              "path": f.path,
+              "entropy": ent.entropy,
+              "unique_bytes": ent.unique_bytes,
+              "recommendation": "Executable in temporary drop zone exhibits high Shannon entropy indicating runtime packing/encryption"
+            }
           }
+        } catch e {
         }
       }
     }
@@ -71,17 +74,20 @@ let yara_rule = join([
 for df in proc.deleted_open() {
   let fd_path = "/proc/" + str(df.pid) + "/fd/" + str(df.fds[0])
   if fs.exists(fd_path) {
-    let head_bytes = fs.read_bytes(fd_path, 0, 1024)
-    if yara.check(yara_rule, head_bytes) {
-      emit {
-        "kind": "yara_signature_in_deleted_fd",
-        "severity": "critical",
-        "pid": df.pid,
-        "fd_path": fd_path,
-        "original_path": df.path,
-        "rule": yara.summary(yara_rule).rule,
-        "recommendation": "Unlinked open file descriptor matches signature for executable or web shell"
+    try {
+      let head_bytes = fs.read_bytes(fd_path, 0, 1024)
+      if yara.check(yara_rule, head_bytes) {
+        emit {
+          "kind": "yara_signature_in_deleted_fd",
+          "severity": "critical",
+          "pid": df.pid,
+          "fd_path": fd_path,
+          "original_path": df.path,
+          "rule": yara.summary(yara_rule).rule,
+          "recommendation": "Unlinked open file descriptor matches signature for executable or web shell"
+        }
       }
+    } catch e {
     }
   }
 }

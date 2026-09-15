@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import re as _stdlib_re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 from jocky.errors import JockyRuntimeError
 from jocky.rt.pattern import compile_pattern
@@ -229,15 +229,18 @@ class _HexString:
     @staticmethod
     def _jump(token: str) -> str:
         body = token.strip("[]")
-        if "-" in body:
-            low, _, high = body.partition("-")
-            low_value = int(low, 0) if low else 0
-            if not high:
-                raise JockyRuntimeError(
-                    "yara hex string: open-ended jumps are not supported")
-            high_value = int(high, 0)
-        else:
-            low_value = high_value = int(body, 0)
+        try:
+            if "-" in body:
+                low, _, high = body.partition("-")
+                low_value = int(low, 0) if low else 0
+                if not high:
+                    raise JockyRuntimeError(
+                        "yara hex string: open-ended jumps are not supported")
+                high_value = int(high, 0)
+            else:
+                low_value = high_value = int(body, 0)
+        except ValueError as exc:
+            raise JockyRuntimeError(f"yara hex string: malformed jump: {exc}")
         if low_value > high_value:
             raise JockyRuntimeError("yara hex string: inverted jump range")
         if low_value == high_value:
@@ -461,8 +464,20 @@ class _RuleParser:
         depth = 0
         out: List[str] = []
         while scanner.index < len(scanner.text):
+            if scanner.text.startswith("//", scanner.index):
+                end = scanner.text.find("\n", scanner.index)
+                end_pos = len(scanner.text) if end < 0 else end + 1
+                out.append(scanner.text[scanner.index:end_pos])
+                scanner.index = end_pos
+                continue
+            if scanner.text.startswith("/*", scanner.index):
+                end = scanner.text.find("*/", scanner.index + 2)
+                end_pos = len(scanner.text) if end < 0 else end + 2
+                out.append(scanner.text[scanner.index:end_pos])
+                scanner.index = end_pos
+                continue
             char = scanner.text[scanner.index]
-            if char == "{" :
+            if char == "{":
                 depth += 1
             elif char == "}":
                 if depth == 0:
@@ -518,10 +533,9 @@ def _build_pattern(identifier: str, source: str, body: str, kind: str,
             best = None
             for pattern in self.patterns:
                 found = pattern.search(data, start)
-                if found is not None and (best is None or found.start() < best.start()):
+                if found is not None and (best is None or found.start < best.start):
                     best = found
             return best
-
     return Pattern(identifier=identifier, source=source,
                    pattern=_Alternatives(forms) if len(forms) > 1 else first,
                    nocase=nocase, fullword="fullword" in modifiers)

@@ -583,6 +583,38 @@ def persistence(limit: int = 200) -> List[Dict[str, Any]]:
     return out
 
 
+
+# Checks that should never be deduplicated by (check, pid) — they originate
+# from ``ioc_match`` or have no meaningful per-process identity.
+_NO_DEDUP_CHECKS = frozenset({"ioc_connection", "ioc_hash", "ioc_filename"})
+
+
+def _dedup_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collapse findings that share the same ``(check, evidence.pid)`` tuple.
+
+    When a single process triggers multiple findings from the same check
+    (e.g. a fileless binary that also has a deleted executable entry), only
+    the highest-severity finding is kept.  Findings without a ``pid`` in
+    their evidence or belonging to ``_NO_DEDUP_CHECKS`` pass through
+    untouched.
+    """
+    best: Dict[tuple, Dict[str, Any]] = {}
+    passthrough: List[Dict[str, Any]] = []
+    for f in findings:
+        pid = f.get("evidence", {}).get("pid")
+        check = f.get("check", "")
+        if pid is None or check in _NO_DEDUP_CHECKS:
+            passthrough.append(f)
+            continue
+        key = (check, pid)
+        existing = best.get(key)
+        if existing is None or SEVERITY_ORDER.get(
+                f["severity"], -1) > SEVERITY_ORDER.get(
+                existing["severity"], -1):
+            best[key] = f
+    return list(best.values()) + passthrough
+
+
 # --------------------------------------------------------------- aggregation
 def triage(deep: bool = False, max_pids: int = 400) -> Dict[str, Any]:
     """Run every check and return findings plus counters."""
@@ -603,6 +635,7 @@ def triage(deep: bool = False, max_pids: int = 400) -> Dict[str, Any]:
     if deep:
         findings.extend(memfd_mappings(max_pids=max_pids, snapshot=snapshot))
         findings.extend(persistence())
+    findings = _dedup_findings(findings)
     counts: Dict[str, int] = {level: 0 for level in SEVERITY_ORDER}
     processes = procfs.list_processes()
     unreadable = [entry for entry in processes if entry.get("exe") is None]

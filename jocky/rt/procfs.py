@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 import time
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 def _sysconf(name: str, default: int) -> int:
@@ -175,13 +175,27 @@ def read_fds(pid: int, deleted_only: bool = False) -> List[Dict[str, Any]]:
     fd_dir = f"/proc/{pid}/fd"
     try:
         entries = os.listdir(fd_dir)
+    except PermissionError:
+        # Typically root-owned processes; fd dir unreadable by current user
+        return results
+    except FileNotFoundError:
+        # Process vanished between list_pids() and fd enumeration
+        return results
     except OSError:
+        # Any other I/O problem (e.g. EACCES on a FUSE mount)
         return results
     for entry in entries:
         path = f"{fd_dir}/{entry}"
         try:
             target = os.readlink(path)
+        except FileNotFoundError:
+            # FD closed between listdir and readlink
+            continue
+        except PermissionError:
+            # Restricted fd (e.g. /proc/1/fd/* without CAP_SYS_PTRACE)
+            continue
         except OSError:
+            # Other I/O failure; skip this fd
             continue
         deleted = target.endswith(" (deleted)")
         if deleted_only and not deleted:

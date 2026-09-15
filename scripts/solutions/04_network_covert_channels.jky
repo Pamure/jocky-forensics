@@ -4,7 +4,7 @@
 
 # 1. Linear-Time Process-to-Socket Correlation (Solving osquery/VQL Cartesian explosion)
 let procs = proc.list(500)
-let conns = net.connections(true, false)
+let conns = net.connections(false, true)
 
 let procs_by_pid = index_by(procs, fn(p) { return p.pid })
 let socket_attribution = []
@@ -39,9 +39,9 @@ for c in conns {
   }
 }
 
-# 3. Outbound Shellouts to Common Reverse Shell Ports (4444, 1337, 8888, 9001)
 for sa in socket_attribution {
-  let remote_port = int(sa.remote.split(":")[1])
+  let parts = sa.remote.split(":")
+  let remote_port = int(parts[len(parts) - 1])
   if remote_port == 4444 or remote_port == 1337 or remote_port == 8888 or remote_port == 9001 {
     emit {
       "kind": "suspicious_reverse_shell_port",

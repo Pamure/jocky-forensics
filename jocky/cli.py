@@ -493,7 +493,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"jocky {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_run = sub.add_parser("run", help="execute a JOCKY script")
+    p_run = sub.add_parser("run", help="execute a JOCKY script",
+        epilog="Examples:\n"
+               "  jocky run scripts/triage.jky          # human-readable triage\n"
+               "  jocky run scripts/hunt.jky --json      # machine-readable output\n"
+               "  jocky run hunt.jky --sandbox ro        # Landlock read-only confinement\n"
+               "  jocky run - < myscript.jky             # read from stdin",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_run.add_argument("script")
     p_run.add_argument("--json", action="store_true")
     p_run.add_argument("--ndjson", action="store_true",
@@ -509,7 +515,11 @@ def build_parser() -> argparse.ArgumentParser:
                        help="Landlock confinement level for the script (default: off)")
     p_run.set_defaults(func=cmd_run)
 
-    p_exec = sub.add_parser("exec", help="execute a compiled artifact")
+    p_exec = sub.add_parser("exec", help="execute a compiled artifact",
+        epilog="Examples:\n"
+               "  jocky exec payload.jky.build --json\n"
+               "  jocky exec payload.jky.build --inspect   # show artifact metadata only",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_exec.add_argument("artifact")
     p_exec.add_argument("--json", action="store_true")
     p_exec.add_argument("--ndjson", action="store_true",
@@ -528,7 +538,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Landlock confinement level for the artifact (default: off)")
     p_exec.set_defaults(func=cmd_exec)
 
-    p_build = sub.add_parser("build", help="compile a script to a polymorphic artifact")
+    p_build = sub.add_parser("build", help="compile a script to a polymorphic artifact",
+        epilog="Examples:\n"
+               "  jocky build scripts/hunt.jky -o /tmp/hunt.build\n"
+               "  jocky build scripts/hunt.jky --repeat 100 --json   # uniqueness test",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_build.add_argument("script")
     p_build.add_argument("-o", "--output")
     p_build.add_argument("--repeat", type=int, default=1,
@@ -578,7 +592,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_examples.add_argument("--json", action="store_true")
     p_examples.set_defaults(func=cmd_examples)
 
-    p_triage = sub.add_parser("triage", help="built-in host triage")
+    p_triage = sub.add_parser("triage", help="built-in host triage (no script needed)",
+        epilog="Examples:\n"
+               "  jocky triage                # quick human-readable summary\n"
+               "  jocky triage --json         # machine-readable findings\n"
+               "  jocky triage --deep --json  # deep scan (more checks, slower)",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_triage.add_argument("--deep", action="store_true")
     p_triage.add_argument("--json", action="store_true")
     p_triage.add_argument("--stamp-findings", action="store_true",
@@ -619,13 +638,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_test.add_argument("--verbose", action="store_true")
     p_test.set_defaults(func=cmd_test)
 
-    p_ev = sub.add_parser("evidence", help="run the proof harness")
+    p_ev = sub.add_parser("evidence", help="run the proof harness (polymorphism + repeatability + audit)",
+        epilog="Examples:\n"
+               "  jocky evidence --iterations 1000 --out evidence\n"
+               "  jocky evidence --quick              # fast smoke run (10 iterations)",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_ev.add_argument("--iterations", type=int, default=1000)
     p_ev.add_argument("--out", default="evidence")
     p_ev.add_argument("--quick", action="store_true")
     p_ev.set_defaults(func=cmd_evidence)
 
-    p_attest = sub.add_parser("attest", help="hash-chain a case directory")
+    p_attest = sub.add_parser("attest", help="hash-chain a case directory for tamper detection",
+        epilog="Examples:\n"
+               "  jocky attest ./case-2026-001\n"
+               "  jocky attest ./case --note 'Initial collection' --anchor /mnt/usb/head.txt",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_attest.add_argument("directory")
     p_attest.add_argument("--note", default=None, help="free-text note stored in the manifest")
     p_attest.add_argument("--anchor", default=None,
