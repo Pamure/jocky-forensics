@@ -17,10 +17,11 @@ import argparse
 import json
 import os
 import sys
-from typing import List, Optional
+from typing import Any, Iterable, List, Optional
 
 from jocky import __version__
 from jocky import runner
+from jocky.lang.vm import to_plain
 
 
 def _emit(payload: object, as_json: bool, text: str = "") -> None:
@@ -38,6 +39,22 @@ def _read(path: str) -> str:
 
 
 # ------------------------------------------------------------------ commands
+def _print_findings(findings: Iterable[Any]) -> None:
+    """Print findings the same way the ``--json`` path serialises them.
+
+    The terminal view used to fall back to ``str()`` for non-container values
+    and ``json.dumps(..., default=str)`` inside containers, so a finding holding
+    a function printed a full dataclass repr (including VM internals) on the
+    terminal and ``<fn <lambda>>`` through ``--json``. Both go through
+    ``to_plain`` now; bare strings still print unquoted so existing transcripts
+    stay valid.
+    """
+    for finding in findings:
+        plain = to_plain(finding)
+        print(json.dumps(plain, ensure_ascii=False, default=str)
+              if isinstance(plain, (dict, list)) else plain)
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     source = _read(args.script)
     try:
@@ -51,9 +68,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.json:
         _emit(result.to_dict(), True)
     else:
-        for finding in result.findings:
-            print(json.dumps(finding, ensure_ascii=False, default=str)
-                  if isinstance(finding, (dict, list)) else finding)
+        _print_findings(result.findings)
         for line in result.output:
             print(line)
     for error in result.errors:
@@ -76,9 +91,7 @@ def cmd_exec(args: argparse.Namespace) -> int:
                                  sandbox=args.sandbox)
     _emit(result.to_dict(), True) if args.json else None
     if not args.json:
-        for finding in result.findings:
-            print(json.dumps(finding, ensure_ascii=False, default=str)
-                  if isinstance(finding, (dict, list)) else finding)
+        _print_findings(result.findings)
         print(f"# {runner.result_summary(result)}", file=sys.stderr)
     return 0 if not result.errors else 1
 
@@ -122,9 +135,7 @@ def cmd_fileless(args: argparse.Namespace) -> int:
     if args.json:
         _emit(outcome, True)
     else:
-        for finding in result.get("findings", []):
-            print(json.dumps(finding, ensure_ascii=False, default=str)
-                  if isinstance(finding, (dict, list)) else finding)
+        _print_findings(result.get("findings", []))
         evidence = outcome.get("evidence", {})
         print(f"# exit={outcome.get('exit_code')} exe={evidence.get('exe')} "
               f"memfd_maps={evidence.get('memfd_map_count')} "

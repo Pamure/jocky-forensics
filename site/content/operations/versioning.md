@@ -38,10 +38,11 @@ $ git tag --list
 v1.1.0
 v1.2.0
 $ git describe --tags
-v1.2.0
-$ git log --oneline -2
-fb1f261 v1.2.0: Landlock sandbox, docs site and release versioning
-67d5945 JOCKY v1.1.0: forensic scripting runtime, hardening and evidence
+v1.2.0-2-g83629c7
+$ git log --oneline --decorate -3
+83629c7 (HEAD -> main) docs: language reference pages (verified examples), remaining content in flight
+234faaf docs: content pages, static-builder parity, sandbox documentation
+fb1f261 (tag: v1.2.0) v1.2.0: Landlock sandbox, docs site and release versioning
 ```
 
 The tags are annotated, so `git cat-file -t v1.2.0` answers `tag`, not `commit`.
@@ -69,13 +70,30 @@ takes `git tag` and `jocky/__init__.py` as input and writes three outputs:
 | `site/static/versions.json` | anything that wants the list machine-readable |
 | `site/content/project/releases.md` | the generated `/docs/project/releases` page |
 
-It runs as part of every site build — `npm run gen` calls it and then
-`gen_reference.py`, and both `npm run dev` and `npm run build` call `npm run gen`
-first. Run it on its own when you only want the version metadata refreshed:
+It runs as part of every site build. `npm run gen` invokes `node tools/gen.mjs`,
+which runs `tools/gen_versions.py` and then `tools/gen_reference.py` (the
+generator for the reference pages), and both `npm run dev` and `npm run build`
+call `npm run gen` first. The wrapper treats a generator failure as a warning, so
+a hosted builder without a Python interpreter still builds from the committed
+output:
 
 ```bash
+$ cd site && PYTHON=/nonexistent node tools/gen.mjs
+gen: skipped version metadata (/nonexistent tools/gen_versions.py failed) — using the committed output
+gen: skipped reference pages (/nonexistent tools/gen_reference.py failed) — using the committed output
+gen: 0/2 generator(s) ran
+$ echo $?
+0
+```
+
+```bash
+$ md5sum site/src/lib/versions.generated.js site/static/versions.json site/content/project/releases.md > /tmp/gen-before.md5
 $ python3 site/tools/gen_versions.py
-gen_versions: current=1.2.0 tags=2 unreleased_commits=1
+gen_versions: current=1.2.0 tags=2 unreleased_commits=3
+$ md5sum -c /tmp/gen-before.md5
+site/src/lib/versions.generated.js: OK
+site/static/versions.json: OK
+site/content/project/releases.md: OK
 ```
 
 `versions.json` is what the banner actually renders:
@@ -87,7 +105,7 @@ gen_versions: current=1.2.0 tags=2 unreleased_commits=1
     {
       "version": "1.2.0",
       "date": "unreleased",
-      "commit": "fb1f261",
+      "commit": "83629c7",
       "subject": "working tree",
       "current": true
     },
@@ -117,13 +135,20 @@ Three things in that file are worth understanding before you trust it:
   "subject": "working tree"}` entry is always prepended. It is the version the
   working tree declares, regardless of tagging.
 * **`unreleased_commits` can be phantom.** The generator sorts tags by creation
-  date and treats the first row as latest. Two tags created the same day tie, and
-  in this repository the tie resolves to `v1.1.0`, so the "unreleased" diff is
-  `v1.1.0..HEAD` and counts a commit that is in fact already inside `v1.2.0`.
-  Read it as "commits after *some* tag", not as a release-blocking count.
+  date and treats the first row as latest. Both tags in this repository were
+  created in the same second, so the sort falls back to refname order and
+  `v1.1.0` comes first. The "unreleased" diff is therefore taken against
+  `v1.1.0`, and the generated `/docs/project/releases` page lists three commits —
+  including `fb1f261`, which is the commit `v1.2.0` itself points at. The true
+  count against the newest tag is two. Read the number as "commits after *some*
+  tag", not as a release-blocking count.
 * **The `Commit` column shows the tag object.** `%(objectname:short)` on an
   annotated tag is the tag's own hash (`fb59c2d` above), not `fb1f261`, the
   commit `git log` shows. Dereference with `v1.2.0^{commit}` to compare.
+
+The snapshots above were taken at commit `83629c7` on `main`. Every `git show`,
+`gen_versions` and `md5sum` value here changes as soon as the tree moves, which
+is why the generator — not this page — is the source of truth for the banner.
 
 Two more properties matter if you edit the generator: it writes into existing
 directories rather than creating them (a tree without `site/src/lib` or

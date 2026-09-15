@@ -78,8 +78,7 @@ pipx install .
 
 The run quoted here used `PIPX_HOME`/`PIPX_BIN_DIR` overrides so the
 documentation host's real pipx environment was untouched; with the defaults the
-script lands in `~/.local/bin`. `pipx` is only useful when JOCKY is not going to
-be co-installed with other Python tooling.
+script lands in `~/.local/bin`.
 
 ## Docker
 
@@ -169,16 +168,8 @@ next steps:
 
 `jocky init` copies the five bundled example scripts (list them with
 `jocky examples`) into a case directory and adds a `README.md` plus a
-`.gitignore` for the artefacts a case produces:
-
-```text
-# jocky case directory
-.jocky-server/
-.jocky-agent/
-*.jky.build
-*.jky.artifact
-evidence/
-```
+`.gitignore` covering the artefacts a case produces (`.jocky-server/`,
+`.jocky-agent/`, `*.jky.build`, `*.jky.artifact`, `evidence/`).
 
 ```text
 {"kind": "summary", "host": "stormbreaker", "kernel": "6.6.87.2-microsoft-standard-WSL2", "processes": 94, "sockets": 92, "counts": {"info": 1, "low": 32, "medium": 0, "high": 0, "critical": 0}, "duration_ms": 586.093}

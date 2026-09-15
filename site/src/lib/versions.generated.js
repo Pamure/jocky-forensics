@@ -3,7 +3,7 @@ export default [
   {
     "version": "1.2.0",
     "date": "unreleased",
-    "commit": "fb1f261",
+    "commit": "83629c7",
     "subject": "working tree",
     "current": true
   },

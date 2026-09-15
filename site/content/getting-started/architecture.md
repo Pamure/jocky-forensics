@@ -219,13 +219,11 @@ wraps all of it in a `RunResult`.
 of the runtime package, memfd process inspection). `fileless.py` forks once,
 passes the package and payload as inherited file descriptors, and execs the
 in-memory interpreter with a `-c` bootstrap that imports the runtime through
-`zipimport` from `/proc/self/fd/<pkg_fd>` and reads the payload from
-`/proc/self/fd/<payload_fd>`. A watcher thread samples the child's `/proc`
-entries around the exec so the evidence is recorded by the tool itself rather
-than by a human with a stopwatch.
+`zipimport` and reads the payload, both via `/proc/self/fd`. A watcher thread
+samples the child's `/proc` entries around the exec, so the evidence is recorded
+by the tool itself rather than by a human with a stopwatch.
 
-The bootstrap is deliberately small; this is its body, read from a live
-memory-resident process:
+This is the bootstrap's body, read from a live memory-resident process:
 
 ```python
 sys.path.insert(0, "/proc/self/fd/" + os.environ["JKY_PKG"])
@@ -257,18 +255,17 @@ domain fronting (no CDN is bundled). See
 
 `canon.py` decides how a value becomes bytes (sorted-key compact JSON, UTF-8),
 so a digest computed during collection can be recomputed later on another
-machine. `case.py` builds on it: a per-file SHA-256 manifest, a hash chain over
-that manifest, a separately stored chain head and an optional HMAC signature by
-the analyst, surfaced as `jocky attest`, `jocky verify` and `jocky sign`.
-Attestation is deliberately an analyst-side step that runs *after* collection —
-signing during a run would spawn `openssl` and break the measured invariant
-"0 child processes during a run".
+machine. `case.py` builds on it: a per-file SHA-256 manifest, a hash chain, a
+separately stored chain head and an optional HMAC signature by the analyst,
+surfaced as `jocky attest`, `jocky verify` and `jocky sign`. Attestation is an
+analyst-side step that runs *after* collection: signing during a run would spawn
+`openssl` and break the measured invariant "0 child processes during a run".
 
 ## Where measurement lives, and why
 
 Every number this project publishes comes from one harness,
-`jocky/evidence.py`. It is a real run, not a fixture — a five-iteration pass
-takes about eleven seconds and writes the whole bundle:
+`jocky/evidence.py`. A five-iteration pass takes about eleven seconds and
+writes the whole bundle:
 
 ```bash
 jocky evidence --iterations 5 --out /tmp/ev
@@ -299,12 +296,11 @@ The harness exists because a claim like "no external processes are spawned" is
 worthless as an assertion: it is easy to write and impossible to check. So the
 harness measures it — a Python audit hook counts child-process creation,
 `execve`, write-mode `open` and socket calls during a real triage run, and the
-report quotes the counters. The same pattern applies to every other headline
-claim: builds are hashed individually to prove uniqueness, 25 freshly built
-artifacts are re-executed to prove semantic equivalence, the filesystem is
-snapshotted before and after to prove fileless mode writes nothing, and the
-detector is pointed at the runtime's own fileless process to prove the two
-sides agree.
+report quotes the counters. The same pattern covers every other headline claim:
+builds are hashed individually to prove uniqueness, 25 freshly built artifacts
+are re-executed to prove semantic equivalence, the filesystem is snapshotted
+before and after to prove fileless mode writes nothing, and the detector is
+pointed at the runtime's own fileless process to prove the two sides agree.
 
 `evidence/report.md` on this checkout was generated on 2026-09-15 19:14:23 on
 the development host (kernel `6.6.87.2-microsoft-standard-WSL2`, Python 3.12.3)
@@ -360,8 +356,8 @@ jocky/
 Alongside the package: `jocky/examples/*.jky` (the five scripts `jocky init`
 copies, shipped as package data), `scripts/*.jky` (triage, hunt, inventory,
 timeline, watch, smoke, evidence), `tests/` (language, runtime, live detection,
-encoder, agent, diagnostics, scaffold, security, sandbox), `evidence/` (the
-generated proof) and `site/` (this documentation).
+encoder, agent, diagnostics, scaffold, security, sandbox) and `evidence/` (the
+generated proof, consumed by this documentation).
 
 ## Import layering
 

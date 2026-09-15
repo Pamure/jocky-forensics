@@ -3,9 +3,8 @@
 How to work on JOCKY: the layout of the tree, the edit-run-test loop, the kind of test this project expects, and how to add a native, a check or a language feature.
 
 The runtime is Python 3.12 with the standard library only — `pyproject.toml` declares
-`dependencies = []`, and that is a design constraint, not an accident: a collection
-tool that needs a package index is a collection tool that fails on a target host.
-Everything runs on Linux and reads `/proc`, `/proc/net` and `/sys` directly.
+`dependencies = []`, and that is a design constraint, not an accident: a collection tool
+that needs a package index is one that fails on a target host.
 
 ## Repository layout
 
@@ -54,32 +53,17 @@ $ ./venv/bin/python -m jocky run scripts/smoke.jky
 
 # the same script as a polymorphic artifact
 $ ./venv/bin/python -m jocky build scripts/smoke.jky -o /tmp/smoke.jky.build
-wrote /tmp/smoke.jky.build (2036 bytes, sha256 29a6c27ca2e0c649...)
-$ ./venv/bin/python -m jocky exec /tmp/smoke.jky.build --json
-{
-  "findings": [
-    {
-      "kind": "smoke",
-      "total": 1225,
-      "doubled": 2450,
-      "uptime_s": 22634.53,
-      "listeners": 19,
-      "processes": 93
-    }
-  ],
-  "output": [],
-  "errors": [],
-  "steps": 513,
-  "native_calls": 6,
-  "duration_ms": 25.742,
-  "truncated": false
-}
+wrote /tmp/smoke.jky.build (2198 bytes, sha256 025515af1833fae9...)
+$ ./venv/bin/python -m jocky exec /tmp/smoke.jky.build
+{"kind": "smoke", "total": 1225, "doubled": 2450, "uptime_s": 23092.2, "listeners": 21, "processes": 115}
+# 1 finding(s), 0 error(s), 467 steps, 20.1 ms
 ```
 
 The artifact size and digest differ on every build — that is the encoder doing its job,
-not a regression. `jocky run` prints findings as one JSON object per line; `--json` on
-`exec` (and on the fileless modes) prints the whole run result, which is what you want
-when you are checking `errors`, `steps` or `truncated` rather than the findings.
+not a regression. Findings go to stdout as one JSON object per line, with a one-line
+summary after them; `--json` (accepted by `exec`, `fileless` and `memfd`) prints the
+whole run result instead, which is what you want when checking `errors`, `steps` or
+`truncated`.
 
 `jocky disasm <script>` shows the bytecode the compiler produced — the fastest way to
 see whether a language change reached the compiler. Compile something small you can
@@ -314,18 +298,18 @@ reach, or a VM that cannot execute what the compiler emits.
 4. **Compiler** (`jocky/lang/compiler.py`) — emit instructions in a single pass with label
    patching for forward jumps. A new instruction goes in the `OPCODES` tuple and in the
    module docstring. Two things follow from that tuple: `jocky/poly/wire.py` indexes
-   opcodes by position in it and `jocky/poly/encoder.py` permutes over it, so an artifact
-   built before the change is unreadable by the new build — acceptable, because artifacts
-   are per-build anyway. If your construct is a statement, make sure it lands in
-   `Proto.starts`, which is where the encoder may insert junk.
+   opcodes by position in it and `jocky/poly/encoder.py` permutes over it, so artifacts
+   built before the change cannot be decoded by the new build — acceptable, since
+   artifacts are per-build anyway. A new statement must land in `Proto.starts`, which is
+   where the encoder may insert junk.
 5. **VM** (`jocky/lang/vm.py`) — add the handler to the `self._ops` dispatch table and
    implement it as an `_op_*` method. Runtime errors must be catchable
-   (`JockyRuntimeError`, message naming what failed and with which operands); safety
-   limits stay uncatchable (`JockyLimitError`). A loop construct that pushes an iterator
-   must leave the stack balanced on every exit path, including `break`.
+   (`JockyRuntimeError`, naming what failed and with which operands); safety limits stay
+   uncatchable (`JockyLimitError`). A loop construct that pushes an iterator must leave
+   the stack balanced on every exit path, including `break`.
 
-Watch the intermediate representations instead of guessing — the lexer is one command
-away, and `jocky disasm` (above) shows whether the compiler emitted what you intended:
+Watch the intermediate representations instead of guessing: the lexer is one command away,
+and `jocky disasm` (above) shows what the compiler emitted.
 
 ```text
 $ ./venv/bin/python -c "from jocky.lang.lexer import tokenize; [print(t) for t in tokenize('emit \"n={len(xs)}\"')]"

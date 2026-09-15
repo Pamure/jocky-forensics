@@ -47,6 +47,10 @@ Each `emit` in the script becomes one JSON object on stdout, in the order the
 script emitted it. The script itself is short enough to read in full:
 
 ```jocky
+# Host triage: memory-resident execution, network exposure, kernel tampering.
+# Everything below reads /proc and /sys directly - no ps, ss, lsmod or find is
+# executed, so the collection itself is invisible to process-spawn telemetry.
+
 let report = det.triage()
 
 emit {
@@ -81,34 +85,12 @@ the output does not.
 
 ### The same run as structured data
 
-```bash
-jocky run /tmp/case/scripts/triage.jky --json
-```
+`--json` wraps the findings in the run result instead of printing them as JSON
+lines. The structure, with the findings array elided, is:
 
-```json
+```text
 {
-  "findings": [
-    {
-      "kind": "summary",
-      "host": "stormbreaker",
-      "kernel": "6.6.87.2-microsoft-standard-WSL2",
-      "processes": 94,
-      "sockets": 92,
-      "counts": {
-        "info": 1,
-        "low": 32,
-        "medium": 0,
-        "high": 0,
-        "critical": 0
-      },
-      "duration_ms": 638.807
-    },
-    {
-      "kind": "tail",
-      "high_or_critical": 0,
-      "total_findings": 33
-    }
-  ],
+  "findings": [ … the two objects printed above … ],
   "output": [],
   "errors": [],
   "steps": 449,
@@ -252,12 +234,9 @@ jocky exec /tmp/case/hunt.build
 # 2 finding(s), 0 error(s), 360 steps, 54.9 ms
 ```
 
-The `#` line is the run summary and goes to stderr, so piping findings into a
-consumer stays clean:
-
-```bash
-jocky exec /tmp/case/hunt.build --json > findings.json
-```
+The `#` line is the run summary and goes to stderr, so `jocky exec … >
+findings.json` gives you clean NDJSON on stdout while the human summary stays on
+the terminal.
 
 The artifact prints exactly the findings the source script prints — it is the
 same program, with different bytes. That equivalence is measured over 25

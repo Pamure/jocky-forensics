@@ -14,6 +14,8 @@ tagged commit, and `jocky --version` reports the same string.
 
 Commits after the latest tag:
 
+- `83629c7 docs: language reference pages (verified examples), remaining content in flight`
+- `234faaf docs: content pages, static-builder parity, sandbox documentation`
 - `fb1f261 v1.2.0: Landlock sandbox, docs site and release versioning`
 
 ## Cutting a release
