@@ -1,0 +1,41 @@
+# Host inventory: hardware, kernel view, network exposure, mount policy.
+# Used both interactively and as the first job an agent runs on enrolment.
+
+let host = sys.info()
+
+emit {
+  "kind": "host",
+  "hostname": host.kernel.hostname,
+  "kernel": host.kernel.release,
+  "wsl": host.kernel.wsl,
+  "distro": host.distro.PRETTY_NAME,
+  "uptime_s": host.uptime.seconds,
+  "boot_time": host.uptime.boot_time,
+  "cpus": host.cpu.cpus,
+  "memory_total": host.memory.MemTotal,
+  "kallsyms_visible": host.kallsyms_visible
+}
+
+for iface in net.interfaces() {
+  if iface.name != "lo" {
+    emit {"kind": "interface", "name": iface.name, "mac": iface.mac,
+          "state": iface.state, "rx_bytes": iface.rx_bytes, "tx_bytes": iface.tx_bytes}
+  }
+}
+
+for route in net.routes() {
+  emit {"kind": "route", "iface": route.iface, "destination": route.destination,
+        "gateway": route.gateway, "default": route.default}
+}
+
+for mount in sys.mounts() {
+  if mount.noexec == false and contains(mount.fstype, ["ext4", "xfs", "btrfs", "vfat", "ntfs"]) {
+    emit {"kind": "mount", "mountpoint": mount.mountpoint, "fstype": mount.fstype,
+          "nosuid": mount.nosuid, "nodev": mount.nodev}
+  }
+}
+
+let hidden = sys.hidden_modules()
+emit {"kind": "modules", "loaded": len(sys.modules()),
+      "hidden_from_sys": hidden.in_proc_not_sys,
+      "hidden_from_proc": hidden.in_sys_not_proc}

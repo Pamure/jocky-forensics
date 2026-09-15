@@ -1,0 +1,201 @@
+"""
+Central-management end-to-end tests.
+
+The server is started for real on an ephemeral port with a generated
+self-signed certificate, the agent is driven over TLS, and the assertions are
+about what an operator would observe: job queued → work executed on the agent →
+finding stored with provenance.  Nothing about the network is mocked.
+"""
+from __future__ import annotations
+
+import json
+import pathlib
+import socket
+import ssl
+import sys
+import tempfile
+import threading
+import time
+import urllib.error
+import urllib.request
+
+import pytest
+
+REPO = pathlib.Path(__file__).resolve().parents[1]
+if str(REPO) not in sys.path:
+    sys.path.insert(0, str(REPO))
+
+from jocky.agent import client, server as server_mod  # noqa: E402
+
+TOKEN = "test-token-do-not-reuse"
+
+_JOBS_SCRIPT = """
+emit {"kind": "agent-test", "hostname": sys.hostname(),
+      "uptime_positive": sys.uptime().seconds > 0, "listeners": len(net.listeners())}
+emit {"kind": "second", "severity": "low", "title": "second finding"}
+"""
+
+
+def _tls_context() -> ssl.SSLContext:
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
+
+@pytest.fixture(scope="module")
+def management_server():
+    state_dir = tempfile.mkdtemp(prefix="jky-server-")
+    thread = threading.Thread(
+        target=server_mod.serve,
+        kwargs={"host": "127.0.0.1", "port": 0, "token": TOKEN,
+                "state_dir": state_dir},
+        daemon=True,
+    )
+    thread.start()
+    port = None
+    for _ in range(200):
+        port = server_mod.last_bound_port()
+        if port:
+            break
+        time.sleep(0.05)
+    assert port, "management server never reported a bound port"
+    yield {"port": port, "token": TOKEN, "state": state_dir,
+           "url": f"https://127.0.0.1:{port}"}
+    server_mod.shutdown()
+    thread.join(timeout=15)
+
+
+def api(server, path, token=None, payload=None, method=None, timeout=15):
+    """One JSON call against the management API (returns status, body)."""
+    data = None if payload is None else json.dumps(payload).encode()
+    request = urllib.request.Request(
+        server["url"] + path, data=data, method=method or ("POST" if data else "GET"))
+    if token:
+        request.add_header("X-JKY-Token", token)
+    request.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(request, context=_tls_context(), timeout=timeout) as resp:
+            body = resp.read()
+            return resp.status, (json.loads(body) if body else None)
+    except urllib.error.HTTPError as exc:
+        body = exc.read()
+        try:
+            return exc.code, json.loads(body)
+        except ValueError:
+            return exc.code, None
+
+
+# --------------------------------------------------------------------- access
+def test_health_needs_no_token(management_server):
+    status, body = api(management_server, "/v1/health")
+    assert status == 200 and body["status"] == "ok"
+
+
+@pytest.mark.parametrize("token", [None, "wrong-token"])
+def test_other_routes_require_the_token(management_server, token):
+    status, _body = api(management_server, "/v1/status", token=token)
+    assert status == 401
+
+
+def test_unknown_route_is_404(management_server):
+    status, _body = api(management_server, "/v1/nope", token=TOKEN)
+    assert status == 404
+
+
+def test_oversized_body_is_rejected(management_server):
+    raw = socket.create_connection(("127.0.0.1", management_server["port"]), timeout=15)
+    try:
+        sock = _tls_context().wrap_socket(raw, server_hostname="127.0.0.1")
+        headers = (f"POST /v1/jobs/submit HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                   f"X-JKY-Token: {TOKEN}\r\n"
+                   f"Content-Length: {server_mod.MAX_BODY + 1}\r\n\r\n")
+        sock.sendall(headers.encode())
+        response = sock.recv(4096).decode("utf-8", "replace")
+        assert "413" in response.splitlines()[0], response.splitlines()[:1]
+    finally:
+        raw.close()
+
+
+# ------------------------------------------------------------------ work flow
+def test_full_job_lifecycle(management_server, tmp_path):
+    host = socket.gethostname()
+    name = f"test-agent-{time.time_ns() % 100000}"
+
+    status, first = api(management_server, "/v1/enroll", token=TOKEN,
+                        payload={"name": name, "host": host, "uid": 1000,
+                                 "kernel": "test"})
+    assert status == 200 and first["agent_id"]
+    _status, second = api(management_server, "/v1/enroll", token=TOKEN,
+                          payload={"name": name, "host": host, "uid": 1000,
+                                   "kernel": "test"})
+    assert second["agent_id"] == first["agent_id"], "enrolment is not idempotent"
+
+    status, submitted = api(management_server, "/v1/jobs/submit", token=TOKEN,
+                            payload={"kind": "source",
+                                     "payload_b64": _b64(_JOBS_SCRIPT),
+                                     "target": first["agent_id"]})
+    assert status == 200 and submitted["job_id"]
+
+    # the agent claims and executes the job (a manual poll here would consume it)
+    agent_state = tmp_path / "agent-state"
+    exit_code = client.run(server=management_server["url"], token=TOKEN, once=True,
+                           name=name, state_dir=str(agent_state))
+    assert exit_code == 0
+
+    # a second job proves the payload survives the wire unchanged
+    status, wire_job = api(management_server, "/v1/jobs/submit", token=TOKEN,
+                           payload={"kind": "source", "payload_b64": _b64(_JOBS_SCRIPT),
+                                    "target": first["agent_id"]})
+    assert status == 200
+    status, claimed = api(management_server, "/v1/jobs/poll", token=TOKEN,
+                          payload={"agent_id": first["agent_id"]})
+    assert status == 200
+    assert claimed["job_id"] == wire_job["job_id"]
+    assert claimed["kind"] == "source"
+    assert _unb64(claimed["payload_b64"]) == _JOBS_SCRIPT, "payload did not survive the wire"
+
+    status, findings = api(management_server, "/v1/findings?limit=50", token=TOKEN)
+    assert status == 200
+    stored = [f for f in findings["findings"] if f["job_id"] == submitted["job_id"]]
+    assert len(stored) == 2, stored
+    by_check = {f["check"]: f for f in stored}
+    assert "agent-test" in by_check
+    assert by_check["agent-test"]["severity"] == "info"
+    assert by_check["agent-test"]["evidence"]["uptime_positive"] is True
+    assert by_check["second"]["severity"] == "low"
+
+    status, report = api(management_server, "/v1/status", token=TOKEN)
+    assert status == 200
+    assert any(a["agent_id"] == first["agent_id"] for a in report["agents"])
+    assert report["jobs"]["ok"] >= 1, report["jobs"]
+    assert report["jobs"]["running"] >= 1, report["jobs"]     # the wire-check job
+    assert report["findings"]["total"] >= 2
+
+    journal = agent_state / "journal.jsonl"
+    assert journal.exists(), "agent kept no local journal"
+    entries = [json.loads(line) for line in journal.read_text().splitlines() if line.strip()]
+    assert any(entry.get("job_id") == submitted["job_id"] for entry in entries)
+
+
+def test_poll_without_work_returns_no_content(management_server):
+    status, _first = api(management_server, "/v1/enroll", token=TOKEN,
+                         payload={"name": "idle-agent", "host": socket.gethostname(),
+                                  "uid": 1000, "kernel": "test"})
+    assert status == 200
+    _status, agent = api(management_server, "/v1/enroll", token=TOKEN,
+                         payload={"name": "idle-agent", "host": socket.gethostname(),
+                                  "uid": 1000, "kernel": "test"})
+    status, body = api(management_server, "/v1/jobs/poll", token=TOKEN,
+                       payload={"agent_id": agent["agent_id"]})
+    assert status == 204 and body is None
+
+
+def _b64(text: str) -> str:
+    import base64
+    return base64.b64encode(text.encode()).decode()
+
+
+def _unb64(data: str) -> str:
+    import base64
+    return base64.b64decode(data).decode()

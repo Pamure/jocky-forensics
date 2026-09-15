@@ -1,0 +1,65 @@
+{
+  "pid": 30384,
+  "memfd_processes_seen": [
+    {
+      "pid": 30385,
+      "name": "4",
+      "exe": "/memfd:python3 (deleted)"
+    }
+  ],
+  "detector_findings": 1,
+  "detector_titles": [
+    "process 30385 (4) runs from memory"
+  ],
+  "memfd_mappings": 1,
+  "detected": true,
+  "run_report": {
+    "exit_code": 0,
+    "stdout": "JKY_RESULT {\"findings\": [{\"kind\": \"started\", \"hostname\": \"stormbreaker\", \"uptime_s\": 20308.33, \"exe\": \"/memfd:python3 (deleted)\"}, {\"kind\": \"collect\", \"passwd_present\": true, \"listeners\": 11}, {\"kind\": \"finished\"}], \"output\": [], \"errors\": [], \"steps\": 46, \"native_calls\": 8, \"duration_ms\": 8006.597, \"truncated\": false}",
+    "stderr": "",
+    "duration_ms": 8236.56,
+    "pid": 30385,
+    "timed_out": false,
+    "result": {
+      "findings": [
+        {
+          "kind": "started",
+          "hostname": "stormbreaker",
+          "uptime_s": 20308.33,
+          "exe": "/memfd:python3 (deleted)"
+        },
+        {
+          "kind": "collect",
+          "passwd_present": true,
+          "listeners": 11
+        },
+        {
+          "kind": "finished"
+        }
+      ],
+      "output": [],
+      "errors": [],
+      "steps": 46,
+      "native_calls": 8,
+      "duration_ms": 8006.597,
+      "truncated": false
+    },
+    "ok": true,
+    "evidence": {
+      "exe": "/memfd:python3 (deleted)",
+      "memfd_maps": [
+        "(deleted)",
+        "(deleted)",
+        "(deleted)",
+        "(deleted)"
+      ],
+      "memfd_map_count": 4,
+      "observed": true,
+      "in_memory": {
+        "interpreter_bytes": 8020928,
+        "package_zip_bytes": 94110,
+        "payload_bytes": 520
+      }
+    }
+  }
+}

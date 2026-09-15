@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jocky-forensics"
+dynamic = ["version"]
+description = "JOCKY — a forensic scripting language and runtime (SIH26148): quiet collection, polymorphic artifacts, fileless execution, built-in detection"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "JOCKY maintainers" }]
+keywords = ["forensics", "dfir", "procfs", "dsl", "incident-response", "sih26148"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Information Technology",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Security",
+  "Topic :: System :: Systems Administration",
+]
+dependencies = []
+
+[project.optional-dependencies]
+# The runtime is stdlib-only by design; these are conveniences for contributors.
+dev = ["pytest>=8", "pytest-xdist>=3"]
+
+[project.scripts]
+jocky = "jocky.cli:main"
+
+[project.urls]
+Documentation = "https://jocky.vercel.app"
+Source = "https://github.com/your-org/jocky"
+
+[tool.setuptools.dynamic]
+version = { attr = "jocky.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["jocky*"]
+
+[tool.setuptools.package-data]
+jocky = ["examples/*.jky"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-q --tb=short"
+markers = ["slow: takes more than a few seconds (end-to-end probes)"]

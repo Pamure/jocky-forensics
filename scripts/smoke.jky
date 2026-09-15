@@ -1,0 +1,20 @@
+# Minimal script used by the evidence harness to time thousands of executions.
+# It touches the language core (loops, arithmetic, closures), the host
+# collectors and the network table, so a timing run covers real work rather
+# than an empty program.
+
+let total = 0
+for i in range(1, 50) {
+  set total = total + i
+}
+
+let double = fn(n) { return n * 2 }
+
+emit {
+  "kind": "smoke",
+  "total": total,
+  "doubled": double(total),
+  "uptime_s": sys.uptime().seconds,
+  "listeners": len(net.listeners()),
+  "processes": len(proc.list(200))
+}

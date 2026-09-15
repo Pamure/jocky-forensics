@@ -1,0 +1,40 @@
+# Hunt for in-memory execution and correlate it with live network sockets.
+# Demonstrates the pieces that matter for a memory-resident intrusion:
+# memfd processes, deleted executables, temporary-directory execution, and
+# suspicious command lines, then network attribution for the flagged PIDs.
+
+let flagged = []
+
+for f in det.fileless()      { flagged.push(f) }
+for f in det.temp_exes()     { flagged.push(f) }
+for f in det.deleted_exes()  { flagged.push(f) }
+for f in det.suspicious_cmdline() {
+  if f.severity == "high" or f.severity == "critical" { flagged.push(f) }
+}
+
+let pids = []
+for f in flagged {
+  let pid = f.evidence.pid
+  if pid != nil { pids.push(pid) }
+}
+
+emit {"kind": "flagged_processes", "count": len(flagged), "pids": pids}
+
+for connection in net.established() {
+  if contains(connection.pid, pids) {
+    emit {
+      "kind": "flagged_socket",
+      "pid": connection.pid,
+      "process": connection.process,
+      "remote": connection.remote_addr,
+      "port": connection.remote_port,
+      "proto": connection.proto
+    }
+  }
+}
+
+for item in proc.deleted_open() {
+  emit {"kind": "deleted_open_file", "pid": item.pid, "path": item.path}
+}
+
+emit {"kind": "done", "sockets_scanned": len(net.established())}

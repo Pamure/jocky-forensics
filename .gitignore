@@ -1,0 +1,22 @@
+# --- python -------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+venv/
+*.egg-info/
+build/
+dist/
+
+# --- jocky runtime state -------------------------------------------------
+.jocky-server/
+.jocky-agent/
+*.jky.build
+
+# --- docs site ----------------------------------------------------------
+site/node_modules/
+site/build/
+site/.svelte-kit/
+.vercel/
+
+# --- generated probe directories ----------------------------------------
+evidence/_pycache_probe/

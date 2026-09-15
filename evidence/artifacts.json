@@ -1,0 +1,29 @@
+{
+  "source_mode": {
+    "created": [],
+    "deleted": [],
+    "modified": [],
+    "created_count": 0,
+    "deleted_count": 0,
+    "modified_count": 0
+  },
+  "source_mode_cold": {
+    "returncode": 0,
+    "bytecode_cache_files": 74
+  },
+  "fileless_mode": {
+    "created": [],
+    "deleted": [],
+    "modified": [],
+    "created_count": 0,
+    "deleted_count": 0,
+    "modified_count": 0,
+    "exit_code": 0,
+    "ok": true,
+    "exe": "/memfd:python3 (deleted)",
+    "memfd_map_count": 4
+  },
+  "fileless_code_created_nothing": true,
+  "interpreter_bytes": 8020928,
+  "runtime_zip_bytes": 94110
+}

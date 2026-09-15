@@ -1,0 +1,25 @@
+# Host triage: memory-resident execution, network exposure, kernel tampering.
+# Everything below reads /proc and /sys directly - no ps, ss, lsmod or find is
+# executed, so the collection itself is invisible to process-spawn telemetry.
+
+let report = det.triage()
+
+emit {
+  "kind": "summary",
+  "host": report.host.hostname,
+  "kernel": report.host.kernel,
+  "processes": report.scanned.processes,
+  "sockets": report.scanned.sockets,
+  "counts": report.counts,
+  "duration_ms": report.duration_ms
+}
+
+let interesting = filter(report.findings, fn(f) {
+  return f.severity == "high" or f.severity == "critical"
+})
+
+for f in interesting {
+  emit {"severity": f.severity, "check": f.check, "title": f.title, "evidence": f.evidence}
+}
+
+emit {"kind": "tail", "high_or_critical": len(interesting), "total_findings": len(report.findings)}

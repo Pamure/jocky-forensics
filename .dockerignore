@@ -1,0 +1,14 @@
+# keep the build context small and the image honest
+.git
+.gitignore
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+evidence/
+research/
+site/
+docs/
+tests/
+scripts/
+*.jky.build

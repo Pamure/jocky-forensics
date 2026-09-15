@@ -1,0 +1,33 @@
+# Volatile timeline: what changed recently in the writable drop zones, plus
+# files that were unlinked while still open (payload hiding).
+
+let roots = ["/tmp", "/var/tmp", "/dev/shm"]
+
+for root in roots {
+  if fs.exists(root) {
+    for entry in fs.timeline(root, 40, 4000) {
+      emit {
+        "kind": "recent_file",
+        "root": root,
+        "path": entry.path,
+        "size": entry.size,
+        "mtime": entry.mtime,
+        "mode": entry.mode,
+        "world_writable": entry.world_writable,
+        "magic": fs.magic(entry.path)
+      }
+    }
+  }
+}
+
+for item in proc.deleted_open() {
+  emit {"kind": "deleted_open", "pid": item.pid, "fd": item.fd, "path": item.path}
+}
+
+let perms = fs.special_perms("/usr", 4000)
+emit {"kind": "special_perms", "setuid_count": len(perms.setuid),
+      "setgid_count": len(perms.setgid)}
+
+for entry in perms.setuid {
+  emit {"kind": "setuid", "path": entry.path, "mode": entry.mode, "uid": entry.uid}
+}

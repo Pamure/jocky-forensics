@@ -1,0 +1,17 @@
+# Long-running collection loop, kept alive so live-detection demos can run
+# against it (used by the evidence harness: prove the detector sees a process
+# whose interpreter, runtime and program all execute from anonymous memory).
+
+emit {
+  "kind": "started",
+  "hostname": sys.hostname(),
+  "uptime_s": sys.uptime().seconds,
+  "exe": proc.exe(sys.pid())
+}
+
+let watched = fs.exists("/etc/passwd")
+emit {"kind": "collect", "passwd_present": watched, "listeners": len(net.listeners())}
+
+sleep(8)
+
+emit {"kind": "finished"}

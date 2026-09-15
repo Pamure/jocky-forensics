@@ -1,0 +1,43 @@
+# Deterministic workload for the evidence harness.
+#
+# Its findings must be byte-identical on every run, otherwise claims like
+# "1000 runs produced one output hash" and "every build behaves the same" would
+# be meaningless. Host state is therefore only read in forms that are stable
+# here: booleans and non-negative counts.
+
+let total = 0
+for i in range(1, 64) {
+  set total = total + i * 3 - 1
+}
+
+fn make_counter(start) {
+  let value = start
+  return fn() { set value = value + 1
+    return value }
+}
+let counter = make_counter(10)
+let sequence = [counter(), counter(), counter()]
+
+let caught = 0
+for n in [2, 0, 4] {
+  try { let v = 100 / n } catch e { set caught = caught + 1 }
+}
+
+let words = ["alpha", "beta", "gamma"]
+let upper = transform(words, fn(w) { return w.upper() })
+let long = filter(words, fn(w) { return w.len() > 5 })
+
+emit {
+  "kind": "evidence",
+  "total": total,
+  "sequence": sequence,
+  "caught": caught,
+  "upper": upper,
+  "long": long,
+  "joined": words.join("-"),
+  "checksum": total * 7 + len(upper) * 11 + caught,
+  "hostname_is_set": sys.hostname().len() > 0,
+  "passwd_readable": fs.exists("/etc/passwd"),
+  "listeners_at_least_zero": len(net.listeners()) >= 0,
+  "processes_at_least_zero": len(proc.list(400)) >= 0
+}
