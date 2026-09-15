@@ -17,26 +17,24 @@ compatibility policy. What is planned next is in the [roadmap](/docs/project/roa
 
 ## [Unreleased]
 
-Three commits after `v1.2.0`: the remaining pages of this site, parity between the
-SvelteKit build and the zero-dependency static builder, and one CLI rendering fix. The
-suite collects 125 tests across nine files
+Commits after `v1.2.0` are documentation and site work — the remaining pages of this site,
+verification passes over the existing ones, and site infrastructure — plus one CLI rendering
+fix. The suite collects 125 tests across nine files
 (`./venv/bin/python -m pytest tests/ --collect-only -q`).
 
 ### Added
 
 - Content pages for getting started, language, runtime, execution, operations, security and
   project sections, each command and output taken from a real run against this tree.
+- A sitemap, `robots.txt` and a 404 page generated from the same navigation manifest as the
+  pages, so a new page cannot be missing from the crawler entry point.
 
 ### Fixed
 
 - Findings render identically on the terminal and through `--json`. Both paths now
   serialise through `to_plain`, so a finding that carries a function no longer prints a
-  dataclass repr (with VM internals) in one view and `<fn <lambda>>` in the other:
-
-  ```text
-  $ ./venv/bin/python -m jocky run /tmp/fnfind.jky
-  {"kind": "fn_finding", "callable": "<fn <lambda>>", "name": "demo"}
-  ```
+  dataclass repr (with VM internals) on one side and `<fn <lambda>>` on the other:
+  `{"kind": "fn_finding", "callable": "<fn <lambda>>", "name": "demo"}`.
 
 ## [1.2.0] — 2026-09-15
 
@@ -49,11 +47,7 @@ suite collects 125 tests across nine files
   forked children; `/proc` and `/etc` stay readable while writes fail with `EACCES`.
 - **Confinement reporting in `jocky doctor`** — a new group reports Landlock availability
   and ABI, so "you are not sandboxed" is never a surprise:
-
-  ```text
-  CONFINEMENT
-    [ok  ] sandbox (Landlock)           Landlock ABI 3 (filesystem rights only; --sandbox=strict adds seccomp)
-  ```
+  `[ok  ] sandbox (Landlock)           Landlock ABI 3 (filesystem rights only; --sandbox=strict adds seccomp)`.
 
 - **Zero-dependency documentation build** — `site/tools/build_static.py` renders the same
   content and stylesheet with only the standard library, for hosts without a JavaScript

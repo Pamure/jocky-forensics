@@ -32,7 +32,8 @@ ciphertext | pad_len:u16le | padding | hmac:16
 ```
 
 The header is `mac_key:32 | header_key:16 | obfuscated JSON`. Measured on a real
-build of `scripts/triage.jky` (probe script, one build):
+build of `scripts/triage.jky` (throwaway probe that parses the envelope fields,
+one build):
 
 ```text
 artifact: /tmp/jdocs/triage.jky.build
@@ -152,6 +153,13 @@ Constants and names are encrypted **as part of the payload**, so nothing about
 the program is readable in the file:
 
 ```text
+$ ./venv/bin/python -c "
+raw = open('/tmp/jdocs/triage.jky.build','rb').read()
+print('raw has b\"det\":', b'det' in raw, '| raw has b\"triage\":', b'triage' in raw)
+from jocky.poly.encoder import PolyEncoder
+header, payload = PolyEncoder._open(raw)
+print('decrypted has b\"triage\":', b'triage' in payload, '| decrypted has b\"severity\":', b'severity' in payload)
+print('opmap sample:', {k: header['opmap'][k] for k in ('CONST','LOADG','CALL','EMIT')})"
 raw has b"det": False | raw has b"triage": False
 decrypted has b"triage": True | decrypted has b"severity": True
 opmap sample: {'CONST': 53, 'LOADG': 32, 'CALL': 207, 'EMIT': 215}

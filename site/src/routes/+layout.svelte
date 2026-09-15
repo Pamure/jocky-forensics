@@ -11,7 +11,7 @@
 
 	let { children } = $props();
 
-	const slug = $derived($page.url.pathname.replace(/^\/docs\/?/, '').replace(/\/$/, ''));
+	const slug = $derived(page.url.pathname.replace(/^\/docs\/?/, '').replace(/\/$/, ''));
 	const current = $derived(slug ? getPage(slug) : undefined);
 	const section = $derived(slug ? sectionOf(slug) : '');
 	const { previous, next } = $derived(neighbours(slug));

@@ -79,14 +79,17 @@ emit {"pid": sys.pid(), "exe": proc.exe(sys.pid()), "argv_len": len(argv),
 
 ```text
 $ ./venv/bin/jocky run /tmp/jdocs/mode_probe.jky
-{"pid": 40859, "exe": "/usr/bin/python3.12", "argv_len": 4, "argv0": "/home/mjonir/f/sih2026/sih148/venv/bin/python3", "has_dash_c": false, "memfd_maps": 0}
-
+{"pid": 51820, "exe": "/usr/bin/python3.12", "argv_len": 4, "argv0": "/home/mjonir/f/sih2026/sih148/venv/bin/python3", "has_dash_c": false, "memfd_maps": 0}
 $ ./venv/bin/jocky exec /tmp/jdocs/mode_probe.jky.build
-{"pid": 40865, "exe": "/usr/bin/python3.12", "argv_len": 4, "argv0": "/home/mjonir/f/sih2026/sih148/venv/bin/python3", "has_dash_c": false, "memfd_maps": 0}
-
+{"pid": 51821, "exe": "/usr/bin/python3.12", "argv_len": 4, "argv0": "/home/mjonir/f/sih2026/sih148/venv/bin/python3", "has_dash_c": false, "memfd_maps": 0}
+# 1 finding(s), 0 error(s), 441 steps, 0.7 ms
 $ ./venv/bin/jocky fileless /tmp/jdocs/mode_probe.jky
-{"pid": 40867, "exe": "/memfd:python3 (deleted)", "argv_len": 3, "argv0": "python3", "has_dash_c": true, "memfd_maps": 5}
+{"pid": 51826, "exe": "/memfd:python3 (deleted)", "argv_len": 3, "argv0": "python3", "has_dash_c": true, "memfd_maps": 5}
+# exit=0 exe=/memfd:python3 (deleted) memfd_maps=4 pid=51826 166 ms
 ```
+
+The `#` lines are the CLI's one-line summaries on stderr (`1 finding(s) …` for
+`exec`, the exit/process-image line for `fileless`).
 
 Source and artifact mode are the same process shape; only the file on disk
 differs. Fileless mode is the only one whose `exe` is not a file on disk — and

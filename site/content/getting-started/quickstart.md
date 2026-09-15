@@ -86,25 +86,9 @@ the output does not.
 ### The same run as structured data
 
 `--json` wraps the findings in the run result instead of printing them as JSON
-lines. The structure, with the findings array elided, is:
-
-```text
-{
-  "findings": [ … the two objects printed above … ],
-  "output": [],
-  "errors": [],
-  "steps": 449,
-  "native_calls": 4,
-  "duration_ms": 639.729,
-  "truncated": false
-}
-```
-
-`findings` is what `emit` produced, `output` is what `print` produced, `steps`
-counts bytecode instructions executed, `native_calls` counts calls into the
-runtime, and `truncated` says whether a budget stopped the run. Without
-`--json`, findings go to stdout and `print` lines follow them; errors go to
-stderr and set exit status 1.
+lines, adding `output` (what `print` produced), `errors`, `steps`,
+`native_calls`, `duration_ms` and `truncated`. It is the same data as above,
+with a wrapper.
 
 ## 3. Filter findings by severity
 
@@ -138,11 +122,11 @@ jocky run /tmp/case/scripts/severity.jky
 ```
 
 ```text
-scanned 93 processes, 95 sockets
+scanned 118 processes, 57 sockets
 critical: 0
 high: 0
-medium: 0
-low: 32
+medium: 30
+low: 27
 info: 1
 ```
 
@@ -182,22 +166,13 @@ jocky build /tmp/case/scripts/hunt.jky --repeat 3 -o /tmp/case/rep.build
     2797,
     2824
   ],
-  "sample": {
-    "build_hash": "e5e207c4376f54e1",
-    "artifact_hash": "bf3e19ce10eabf375284492031ceb7973962ea181f10f56f5eb8f7b2efed370c",
-    "size": 2797,
-    "opmap_size": 50,
-    "nops": 221,
-    "const_count": 37,
-    "proto_count": 1,
-    "seed_hex": "ec2e03f67aff603b14caac7c97b88481153fe27ce998f2cf8ee5ce12e7111b71",
-    "source_sha256": "094b36d0af56e22fdf2a7fed764702097e3971d76ebde993ad014dda9eded385"
-  }
+  "sample": { "build_hash": "e5e207c4376f54e1", "artifact_hash": "bf3e19ce10eabf375284492031ceb7973962ea181f10f56f5eb8f7b2efed370c", "size": 2797, "opmap_size": 50, "nops": 221, "const_count": 37, "proto_count": 1, "seed_hex": "ec2e03f67aff603b14caac7c97b88481153fe27ce998f2cf8ee5ce12e7111b71", "source_sha256": "094b36d0af56e22fdf2a7fed764702097e3971d76ebde993ad014dda9eded385" }
 }
 ```
 
 Three builds, three distinct SHA-256 digests and three different sizes, all
-from one unchanged source file (`source_sha256` is the same in every build).
+from one unchanged source file (`source_sha256` is the same in every build; the
+`sample` object is reflowed onto one line above for width).
 `jocky exec --inspect` reads the header of an artifact without running it:
 
 ```bash
@@ -333,24 +308,15 @@ jocky triage
 ```
 
 ```text
-# info=1, low=32, medium=2, high=1  (962.0 ms, 93 processes)
-[high    ] process 45007 (jky) runs from memory
+# info=1, low=27, medium=30, high=1  (400.8 ms, 122 processes)
+[high    ] process 52407 (jky) runs from memory
 ```
 
-and the severity script from step 3, run while the payload is alive:
-
-```bash
-jocky run /tmp/case/scripts/severity.jky
-```
+The severity script from step 3, run while the payload is alive, puts the same
+finding in the `high` bucket and emits it:
 
 ```text
-{"severity": "high", "check": "fileless_process", "title": "process 45370 (jky) runs from memory"}
-scanned 95 processes, 71 sockets
-critical: 0
-high: 1
-medium: 0
-low: 32
-info: 1
+{"severity": "high", "check": "fileless_process", "title": "process 52407 (jky) runs from memory"}
 ```
 
 The `emit` line appears before the `print` lines because the CLI prints the
@@ -362,7 +328,44 @@ from your own triage. The default is deliberately visible so that the detection
 claim in this quickstart can be reproduced. See
 [Fileless execution](/docs/execution/fileless) for the trade-off.
 
-## 7. Built-in triage without a script
+## 7. Confine a run (optional)
+
+`jocky run` and `jocky exec` accept `--sandbox=off|vm|ro|strict`; the default is
+`off`, which is what every example above used. `vm` keeps full read access and
+grants writes only under the working directory, `ro` grants no writes at all,
+and `strict` additionally denies `socket(2)` through a seccomp filter — a
+script that needs the network has to run with `vm` or `off`:
+
+```bash
+jocky run /tmp/case/scripts/sock.jky --allow syscall --sandbox=strict
+```
+
+```text
+socket syscall: PermissionError: [Errno 1] Operation not permitted
+```
+
+Confinement is deny-by-default and filesystem-only, so it also *reduces what a
+script can see*: under `--sandbox=vm` the confined run could read no other
+process's `/proc/<pid>/maps` or `/proc/<pid>/fd` entries, so `det.triage()` lost
+the `rwx_memory`, `injection_primitive` and `deleted_open_file` checks entirely:
+
+```text
+# jocky run /tmp/case/scripts/severity.jky --sandbox=off
+medium: 30
+low: 27
+# jocky run /tmp/case/scripts/severity.jky --sandbox=vm
+medium: 0
+low: 14
+```
+
+Those numbers come from one host at one moment and move with host activity; the
+direction does not. Use `off` on your own analysis host, where the script is
+yours and you want the whole picture; use `vm` or stricter when running a script
+you have not read, and expect to grant the paths it legitimately needs.
+`jocky doctor` reports kernel support under the `CONFINEMENT` group, and the
+level semantics are also in `jocky run --help`.
+
+## 8. Built-in triage without a script
 
 For a host check with no case directory at all:
 
@@ -371,19 +374,20 @@ jocky triage
 ```
 
 ```text
-# info=1, low=32  (692.4 ms, 93 processes)
+# info=1, low=27, medium=30  (369.8 ms, 118 processes)
 [low     ] rwx region in pid 4219 (omp), 1048576 KiB
 [low     ] tcp listener on port 9993 (unattributed)
-[low     ] pid 4219 holds 6 injection-capable descriptor(s)
-[info    ] only 18% of processes were inspectable (76 of 93 unreadable)
+[low     ] pid 4219 holds 5 injection-capable descriptor(s)
+[info    ] only 36% of processes were inspectable (76 of 118 unreadable)
 ```
 
-The first line is the severity histogram with the scan duration and process
-count. `low` findings are correlation input, not verdicts — `rwx` regions are
-what any JIT looks like, and an unattributed listener is a socket the current
-uid cannot attribute to a process. The `info` line is the honest part: as an
-unprivileged user this scan saw 18% of the host, so a clean result describes
-your own processes, not the machine.
+That is an excerpt from one run that printed 59 lines. The first line is the
+severity histogram with the scan duration and process count. `low` findings are
+correlation input, not verdicts: `rwx` regions are what any JIT looks like, and
+an unattributed listener is a socket the current uid cannot attribute to a
+process. The `info` line is the honest part — as an unprivileged user this scan
+saw 36% of the host, so a clean result describes your own processes, not the
+machine.
 
 `jocky triage --json` emits the full report as one JSON document, and
 `jocky triage --deep` runs the slower checks as well. The complete check list,

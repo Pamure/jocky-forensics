@@ -212,15 +212,19 @@ def render_markdown(markdown: str) -> Tuple[str, List[Dict[str, Any]]]:
     while index < len(lines):
         line = lines[index]
 
-        fence = re.match(r"^```(\w*)\s*$", line)
+        fence = re.match(r"^(\s*)```(\w*)\s*$", line)
         if fence:
             flush_paragraph()
             close_lists()
-            language = fence.group(1).lower()
+            indent = len(fence.group(1))
+            language = fence.group(2).lower()
             index += 1
             code: List[str] = []
-            while index < len(lines) and not lines[index].startswith("```"):
-                code.append(lines[index])
+            while index < len(lines) and not re.match(r"^\s*```\s*$", lines[index]):
+                # fences nested in list items arrive indented: strip that much
+                # indentation so the block renders as code, not as literal text
+                raw = lines[index]
+                code.append(raw[indent:] if raw[:indent].strip() == "" else raw.lstrip())
                 index += 1
             index += 1
             label = language if language in LANGUAGES and language else "text"

@@ -93,7 +93,7 @@ $ echo $?
 ```bash
 $ md5sum site/src/lib/versions.generated.js site/static/versions.json site/content/project/releases.md > /tmp/gen-before.md5
 $ python3 site/tools/gen_versions.py
-gen_versions: current=1.2.0 tags=2 unreleased_commits=3
+gen_versions: current=1.2.0 tags=2 unreleased_commits=8
 $ md5sum -c /tmp/gen-before.md5
 site/src/lib/versions.generated.js: OK
 site/static/versions.json: OK
@@ -113,7 +113,7 @@ when a tag or the package version does.
     {
       "version": "1.2.0",
       "date": "unreleased",
-      "commit": "83629c7",
+      "commit": "8ea8347",
       "subject": "working tree",
       "current": true
     },
@@ -146,17 +146,19 @@ Three things in that file are worth understanding before you trust it:
   date and treats the first row as latest. Both tags in this repository were
   created in the same second, so the sort falls back to refname order and
   `v1.1.0` comes first. The "unreleased" diff is therefore taken against
-  `v1.1.0`, and the generated `/docs/project/releases` page lists three commits —
-  including `fb1f261`, which is the commit `v1.2.0` itself points at. The true
-  count against the newest tag is two. Read the number as "commits after *some*
-  tag", not as a release-blocking count.
+  `v1.1.0`, and the generated `/docs/project/releases` page lists commits that are
+  already inside `v1.2.0` — including `fb1f261`, the commit `v1.2.0` itself points
+  at. Read the number as "commits after *some* tag", not as a release-blocking
+  count.
 * **The `Commit` column shows the tag object.** `%(objectname:short)` on an
   annotated tag is the tag's own hash (`fb59c2d` above), not `fb1f261`, the
   commit `git log` shows. Dereference with `v1.2.0^{commit}` to compare.
 
-The snapshots above were taken at commit `83629c7` on `main`. Every `git show`,
-`gen_versions` and `md5sum` value here changes as soon as the tree moves, which
-is why the generator — not this page — is the source of truth for the banner.
+The snapshots above were taken with the working tree at commit `8ea8347` on
+`main`. The version, the tag rows and the file contents only change when a tag or
+the package version does; the synthetic entry's commit and the unreleased count
+move with every commit, which is why the generator — not this page — is the
+source of truth for the banner.
 
 Two more properties matter if you edit the generator: it writes into existing
 directories rather than creating them (a tree without `site/src/lib` or

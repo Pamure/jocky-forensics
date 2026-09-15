@@ -35,7 +35,7 @@
 	<Search />
 
 	<nav>
-		<a href="/docs/getting-started/installation" class:active={$page.url.pathname.startsWith('/docs')}>Docs</a>
+		<a href="/docs/getting-started/installation" class:active={page.url.pathname.startsWith('/docs')}>Docs</a>
 		<a href="/docs/operations/evidence">Evidence</a>
 		<a href="/docs/project/roadmap">Roadmap</a>
 		<button class="plain" type="button" onclick={toggleTheme} title="Toggle colour theme" aria-label="Toggle colour theme">

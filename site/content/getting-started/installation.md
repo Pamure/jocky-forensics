@@ -36,8 +36,8 @@ python3 -m venv venv
 ```
 
 ```text
-Successfully installed jocky-forensics-1.1.0
-jocky 1.1.0
+Successfully installed jocky-forensics-1.2.0
+jocky 1.2.0
 ```
 
 The editable install (`-e`) means edits to `jocky/*.py` take effect on the next
@@ -55,7 +55,7 @@ python3 -m venv /tmp/jky-venv
 ```text
 Successfully built jocky-forensics
 Installing collected packages: jocky-forensics
-Successfully installed jocky-forensics-1.1.0
+Successfully installed jocky-forensics-1.2.0
 ```
 
 `pip install .` also works into a system or user environment, but a virtual
@@ -71,7 +71,7 @@ pipx install .
 ```
 
 ```text
-  installed package jocky-forensics 1.1.0, installed using Python 3.12.3
+  installed package jocky-forensics 1.2.0, installed using Python 3.12.3
   These apps are now globally available
     - jocky
 ```
@@ -109,7 +109,7 @@ python3 -m jocky --version
 ```
 
 ```text
-jocky 1.1.0
+jocky 1.2.0
 ```
 
 There is no console script in this mode, so every command is
@@ -148,7 +148,7 @@ jocky run /tmp/case/scripts/triage.jky
 ```
 
 ```text
-jocky 1.1.0
+jocky 1.2.0
 ```
 
 ```text
@@ -190,7 +190,7 @@ RUNTIME
 
 PACKAGING
   [ok  ] working directory writable   /home/mjonir/f/sih2026/sih148
-  [ok  ] jocky package importable     version 1.1.0
+  [ok  ] jocky package importable     version 1.2.0
 
 COLLECTION
   [ok  ] procfs mounted               /proc is readable
@@ -201,6 +201,9 @@ COLLECTION
 RUNTIME
   [ok  ] direct syscalls              raw on x86_64
 
+CONFINEMENT
+  [ok  ] sandbox (Landlock)           Landlock ABI 3 (filesystem rights only; --sandbox=strict adds seccomp)
+
 MANAGEMENT
   [ok  ] tls module                   OpenSSL
   [ok  ] openssl binary               /usr/bin/openssl
@@ -210,7 +213,7 @@ FILELESS
   [ok  ] memfd_create                 available
   [ok  ] fileless end-to-end          exe=/memfd:python3 (deleted) memfd_maps=4
 
-ready: 11 ok, 1 warning(s), 0 failure(s) in 280 ms
+ready: 12 ok, 1 warning(s), 0 failure(s) in 228 ms
 ```
 
 What the groups mean:
@@ -226,6 +229,10 @@ What the groups mean:
   runtime can see. **`effective uid`** is a warning by design for non-root
   users: process inventory, socket attribution and `det` checks silently see
   fewer processes.
+- **CONFINEMENT — `sandbox (Landlock)`** reports the Landlock ABI the kernel
+  offers and what it can enforce. Filesystem rights only: `--sandbox=strict`
+  adds a seccomp filter for `socket(2)`, and a kernel without Landlock fails
+  this check, because the sandbox refuses to silently downgrade.
 - **MANAGEMENT** covers the dependencies of `jocky serve` / `jocky agent`:
   the `ssl` module, the `openssl` binary (certificate generation) and
   `sqlite3` (the job/finding store).
@@ -285,7 +292,7 @@ FILELESS
   [FAIL] fileless end-to-end          payload failed
           -> check that executing files from /proc/self/fd is permitted (some hardening policies block it)
 
-NOT ready: 9 ok, 1 warning(s), 3 failure(s) in 46 ms
+NOT ready: 10 ok, 1 warning(s), 3 failure(s) in 31 ms
 ```
 
 (Inside a user namespace the effective uid is 0, which is why the uid check
@@ -306,7 +313,7 @@ MANAGEMENT
   [ok  ] sqlite3                      3.45.1
 
 ...
-ready: 10 ok, 2 warning(s), 0 failure(s) in 286 ms
+ready: 11 ok, 2 warning(s), 0 failure(s) in 224 ms
 ```
 
 ### The non-root warning in practice
@@ -316,8 +323,8 @@ actually read. On the documentation host the coverage line is an `info`
 finding:
 
 ```text
-# info=1, low=32  (692.4 ms, 93 processes)
-[info    ] only 18% of processes were inspectable (76 of 93 unreadable)
+# info=1, low=27, medium=30  (517.2 ms, 120 processes)
+[info    ] only 37% of processes were inspectable (76 of 120 unreadable)
 ```
 
 The first line is the summary `jocky triage` prints; the second is the coverage
@@ -339,10 +346,10 @@ Upgrading an editable install re-reads the metadata and reinstalls the package:
 
 ```text
   Attempting uninstall: jocky-forensics
-    Found existing installation: jocky-forensics 1.0.0
-    Uninstalling jocky-forensics-1.0.0:
-      Successfully uninstalled jocky-forensics-1.0.0
-Successfully installed jocky-forensics-1.1.0
+    Found existing installation: jocky-forensics 1.1.0
+    Uninstalling jocky-forensics-1.1.0:
+      Successfully uninstalled jocky-forensics-1.1.0
+Successfully installed jocky-forensics-1.2.0
 ```
 
 For a pip install, `pip install --upgrade .`; for pipx, `pipx reinstall
@@ -355,9 +362,9 @@ Uninstalling removes the console script along with the package:
 ```
 
 ```text
-Found existing installation: jocky-forensics 1.1.0
-Uninstalling jocky-forensics-1.1.0:
-  Successfully uninstalled jocky-forensics-1.1.0
+Found existing installation: jocky-forensics 1.2.0
+Uninstalling jocky-forensics-1.2.0:
+  Successfully uninstalled jocky-forensics-1.2.0
 ```
 
 After that `jocky` is no longer on `PATH`. Case directories and evidence logs

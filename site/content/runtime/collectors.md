@@ -123,14 +123,16 @@ let fds = proc.fds(sys.pid())
 let kinds = {}
 for fd in fds { set kinds[fd.kind] = (kinds[fd.kind] or 0) + 1 }
 emit {"fds": len(fds), "kinds": kinds, "sample": fds[0]}
+emit {"io": proc.io(sys.pid()), "threads": proc.threads(sys.pid())}
 emit {"socket_inodes": len(proc.socket_map())}
 ```
 
 ```text
-{"pid": 47344, "name": "jocky", "state": "R", "ppid": 4219, "threads": 1, "rss_kb": 20864, "uid": 1000, "exe": "/usr/bin/python3.12", "cwd": "/home/mjonir/f/sih2026/sih148", "memfd_exe": false, "deleted_exe": false, "suspicious_path": false}
-{"mappings": 96, "anonymous": 10, "executable": 17, "first": {"start": 4194304, "end": 4325376, "size_kb": 128, "perms": "r--p", "offset": 0, "inode": 11755, "path": "/usr/bin/python3.12", "rwx": false, "memfd": false, "deleted": false, "anonymous": false}}
-{"fds": 14, "kinds": {"file": 12, "pipe": 2}, "sample": {"fd": 0, "target": "/dev/null", "deleted": false, "kind": "file"}}
-{"socket_inodes": 253}
+{"pid": 52282, "name": "jocky", "state": "R", "ppid": 4219, "threads": 1, "rss_kb": 20864, "uid": 1000, "exe": "/usr/bin/python3.12", "cwd": "/home/mjonir/f/sih2026/sih148", "memfd_exe": false, "deleted_exe": false, "suspicious_path": false}
+{"mappings": 97, "anonymous": 11, "executable": 17, "first": {"start": 4194304, "end": 4325376, "size_kb": 128, "perms": "r--p", "offset": 0, "inode": 11755, "path": "/usr/bin/python3.12", "rwx": false, "memfd": false, "deleted": false, "anonymous": false}}
+{"fds": 13, "kinds": {"file": 11, "pipe": 2}, "sample": {"fd": 0, "target": "/dev/null", "deleted": false, "kind": "file"}}
+{"io": {"rchar": 2097538, "wchar": 0, "syscr": 216, "syscw": 0, "read_bytes": 0, "write_bytes": 0, "cancelled_write_bytes": 0}, "threads": [52282]}
+{"socket_inodes": 214}
 ```
 
 ## netfs — sockets, interfaces, routes
@@ -254,8 +256,7 @@ emit fs.stat("/bin/sh")
 
 Magic signatures, in match order: `elf`, `pe`, `mach-o`, `mach-o-64`,
 `script:<interpreter>` (shebang), `zip`, `gzip`, `bzip2`, `xz`, `7z`, `rar`,
-`pdf`, `png`, `jpeg`, `sqlite`, `zstd`; anything else is `data`, an unreadable
-path is `unreadable`.
+`pdf`, `png`, `jpeg`, `sqlite`, `zstd`; anything else is `data` or `unreadable`.
 
 ### Bounds and cost
 
@@ -265,8 +266,7 @@ path is `unreadable`.
   basename, and every result costs one `lstat` plus a 16-byte read for `magic`.
 * `timeline()` and `special_perms()` each run their own `scan()` with a
   5000-file budget: the cost of a timeline is that scan, not `limit`. The
-  library's `hash_file` accepts `algo`, `chunk` and `max_bytes`; the native
-  `fs.hash` is always whole-file SHA-256.
+  library's `hash_file` takes `algo`/`chunk`/`max_bytes`; `fs.hash` is SHA-256.
 * `path_dirs()` resolves symlinks before reading permissions (a symlink is
   always `0777`) and refuses to call a directory "world-writable" when the
   filesystem does not implement POSIX mode bits — `drvfs`, `9p`, `vboxsf`,
@@ -334,8 +334,8 @@ findings — see [detection checks](/docs/runtime/detection).
 `/proc/modules` lists only loadable ones — comparing the raw views would flag
 hundreds of built-ins (`xen`, `workqueue`, …) as "hidden". JOCKY compares
 `/proc/modules` against the `/sys/module` entries that carry an `initstate`
-attribute (the loadable subset), normalising `-`/`_`. A name present in one view
-and absent from the other is the signal: one kernel view has been tampered with.
+attribute (the loadable subset), normalising `-`/`_`: a name present in one view
+and absent from the other means one kernel view has been tampered with.
 `det.hidden_modules()` promotes it to a finding.
 
 ### Cost and limits

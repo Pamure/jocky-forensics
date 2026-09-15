@@ -2,23 +2,15 @@
 
 A single host with a script is an investigation; several hosts with one operator
 is an operation, and that needs the other half of SIH26148. `jocky serve` is a TLS
-server with token authentication, a SQLite store and a small HTTP API, and
-`jocky agent` is a polling client that enrols once, runs one job at a time with
-the same runtime the CLI uses, and reports findings with the provenance needed to
-reconstruct a report later. Everything below was run against a real server on
-this host; the request and response bodies are quoted as they came back.
+server with token authentication, a SQLite store and a small HTTP API; `jocky
+agent` enrols once, runs one job at a time with the same runtime the CLI uses, and
+reports findings with the provenance needed to reconstruct a report later.
+Everything below was run against a real server on this host, and the bodies are
+quoted as they came back.
 
 All policy lives on the server — which hosts, which checks, which payload, when.
 The agent is deliberately dumb: it runs exactly what it is handed, and journals
-what it did before it reports it.
-
-```text
-operator ── POST /v1/jobs/submit ──▶ server (sqlite: agents, jobs, findings)
-                                     ▲                    │
-                    POST /v1/jobs/result                  │ POST /v1/jobs/poll
-                                     │                    ▼
-                                   agent ──▶ source / fileless run ──▶ findings
-```
+what it did before reporting it.
 
 ## Start the server
 
@@ -35,8 +27,7 @@ operator ── POST /v1/jobs/submit ──▶ server (sqlite: agents, jobs, fin
 | `--state` | `.jockey-server` | State directory: `agent.crt`, `agent.key`, `store.db` |
 
 The certificate is generated on first start by shelling out to `openssl`, so the
-server never needs third-party crypto installed before it can talk TLS. With no
-`--token`, the generated credential is shown exactly once and never logged:
+server needs no third-party crypto, and a generated token is shown exactly once:
 
 ```text
 jocky-server token (generated, shown once): 62gLISSHafI7nKFbJCYu96nNcCShsiLByexFRmAmntU
@@ -56,7 +47,7 @@ X509v3 Subject Alternative Name:
     DNS:localhost, IP Address:127.0.0.1
 ```
 
-Case data is not world-readable — state directory `0700`, key and store `0600`:
+Case data is not world-readable (state dir `0700`, key and store `0600`):
 
 ```text
 700 /tmp/jky-server
@@ -65,16 +56,14 @@ Case data is not world-readable — state directory `0700`, key and store `0600`
 600 /tmp/jky-server/store.db
 ```
 
-Point `--cert`/`--key` at your own pair for a real deployment; when you do, no
-certificate is written into the state directory at all (verified: only
-`store.db` appeared there). The server logs one line per request and one line per
-state change, to stderr:
+Point `--cert`/`--key` at your own pair for a real deployment; then no
+certificate is written into the state directory at all (verified: only `store.db`
+appeared there). One line is logged per request, and per state change:
 
 ```text
-jocky-server: enrolled agent agt_a8049535d4ef35da name='docs-agent' host='stormbreaker'
-jocky-server: 127.0.0.1 POST /v1/jobs/result 409 agent=agt_a8049535d4ef35da 0.5ms
+jocky-server: 127.0.0.1 POST /v1/enroll 200 agent=agt_a8049535d4ef35da 15.8ms
+jocky-server: 127.0.0.1 POST /v1/jobs/poll 200 agent=agt_a8049535d4ef35da 40.2ms
 jocky-server: job job_ef95fdb4a87fa62f finished status=ok
-jocky-server: 127.0.0.1 POST /v1/jobs/submit 413 0.1ms
 ```
 
 ## Enrol an agent
@@ -91,8 +80,8 @@ jocky-agent: job job_ef95fdb4a87fa62f (source) ok, 1 finding(s)
 ```
 
 `--once` performs exactly one poll-and-execute cycle and exits `0` — the mode a
-cron entry or a one-shot collection run uses. Without it the agent polls every
-`--interval` seconds (default `5.0`) until Ctrl-C, which is also a clean exit.
+cron entry or a one-shot run uses. Without it the agent polls every `--interval`
+seconds (default `5.0`) until Ctrl-C, which is also a clean exit.
 
 | Flag | Effect |
 |---|---|
@@ -119,9 +108,9 @@ $ echo $?
 1
 ```
 
-Because the server's certificate is self-signed, authenticity comes from pinning
-rather than from a certificate authority: the fingerprint is recorded at
-enrolment and later runs refuse a different certificate.
+Because the certificate is self-signed, authenticity comes from pinning rather
+than from a certificate authority: the fingerprint is recorded at enrolment and
+later runs refuse a different certificate.
 
 ```json
 {
@@ -157,7 +146,7 @@ passing the new `--pin`) — the trade being made.
 
 Two kinds exist and only two: `source` runs JOCKY source in-process, `fileless`
 runs the same source from anonymous memory on the target. Payloads travel
-base64-encoded because the wire is JSON:
+base64-encoded, because the wire is JSON:
 
 ```bash
 cat > /tmp/jky-docs/asset.jky <<'JKY'
@@ -231,8 +220,8 @@ curl -sk -H 'X-JKY-Token: SECRET' 'https://127.0.0.1:8443/v1/findings?limit=5'
 ```
 
 Every finding keeps its job and agent, which is what makes a report
-reconstructable after the fact. `GET /v1/status` is the operator's single view;
-after the two jobs above and one rejected re-report it read:
+reconstructable. `GET /v1/status` is the operator's single view; after the two
+jobs above and one rejected re-report it read:
 
 ```json
 {"agents": [{"agent_id": "agt_a8049535d4ef35da", "name": "docs-agent", "host": "stormbreaker", "uid": 1000, "kernel": "6.6.87.2-microsoft-standard-WSL2", "enrolled_at": "2026-09-15T17:50:13.354+00:00", "last_seen": "2026-09-15T17:50:14.279+00:00"}, {"agent_id": "agt_b4874e9738633106", "name": "intruder", "host": "workstation", "uid": 0, "kernel": "unknown", "enrolled_at": "2026-09-15T17:50:14.875+00:00", "last_seen": "2026-09-15T17:50:15.171+00:00"}], "jobs": {"queued": 0, "running": 0, "ok": 2, "error": 1, "total": 3}, "findings": {"total": 2, "by_severity": {"info": 2}}, "server_time": "2026-09-15T17:50:16.221+00:00"}
@@ -240,8 +229,7 @@ after the two jobs above and one rejected re-report it read:
 
 Only the findings a script emitted are persisted. Metrics, errors, the raw result
 body and — for fileless jobs — the process-image evidence stay in the agent's
-local journal; the server keeps findings plus provenance. To record the process
-image centrally, emit it from the script.
+local journal. To record the process image centrally, emit it from the script.
 
 ## HTTP API
 
@@ -277,12 +265,11 @@ Result submission is where a plausible-looking call could corrupt an audit trail
 so it validates in three stages: the agent must be enrolled (`404`), the job must
 have been claimed by *that* agent (`409`), and a job that is already finished is
 acknowledged as a duplicate without writing anything (`200`, idempotent).
-Findings are only written when the job actually transitions `running → finished`.
+Findings are written only when the job actually transitions `running → finished`.
 
 ## The SQLite store
 
-State is one file, `<state>/store.db`, so an investigation survives restarts. The
-full schema:
+State is one file, `<state>/store.db`, so an investigation survives restarts:
 
 ```sql
 CREATE TABLE IF NOT EXISTS agents (
@@ -339,18 +326,16 @@ above (`sha16` is the payload digest, truncated for printing):
 `store.db` is migrated in place when it is opened: `_migrate()` reads
 `PRAGMA table_info(jobs)` and `ALTER TABLE`s whatever is missing. Verified on a
 store whose `jobs` table predated both columns — afterwards the column list ended
-`..., payload_sha256, claimed_by` and the legacy row was still readable.
-
-Findings are normalised defensively, because a script may emit anything: the
+`..., payload_sha256, claimed_by` and the legacy row was still readable. Findings
+are normalised defensively, because a script may emit anything: the
 `{severity, check, title, evidence}` shape is understood, a bare string becomes
-`severity=info, check=unknown`, and an exotic evidence value is serialised with
-`default=str` instead of failing the storing request.
+`severity=info, check=unknown`, and an exotic value is serialised with `default=str`.
 
 ## What the agent journals locally
 
-`journal.jsonl` in the agent's state directory is an append-only JSON-lines audit
-record, written *before* the result is reported, so the local record survives an
-unreachable server. The complete journal from the two jobs above:
+`journal.jsonl` is an append-only JSON-lines audit record, written *before* the
+result is reported, so the local record survives an unreachable server. The
+complete journal from the two jobs above:
 
 ```text
 {"event": "job", "job_id": "job_ef95fdb4a87fa62f", "kind": "source", "status": "ok", "duration_ms": 20.255, "findings": 1, "errors": 0, "ts": "2026-09-15T17:50:13.849+00:00"}
@@ -396,19 +381,19 @@ jocky-agent agt_94324050ccae22cc polling https://127.0.0.1:8443 (journal /tmp/jk
 ```
 
 What it cannot do, stated plainly: **it hides nothing by itself.** The TCP
-connection still goes to the address in `--server`, so anyone on the path sees
-the real destination address; only the name inside the TLS handshake differs.
-Real domain fronting needs a CDN whose edge answers for the fronted name,
-terminates TLS for it and forwards to the origin — a third party that must exist,
-be reachable and be willing. Nothing about `--sni` creates that, no CDN is
-involved in a local run, and none is claimed. Treat the flag as a way to test a
-deployment that already has a front, never as a substitute for one. The reasoning
-is in `research/cdn_fronting.md`, and the module docstring says the same thing
-where the code lives.
+connection still goes to the address in `--server`, so anyone on the path sees the
+real destination address; only the name inside the TLS handshake differs. Real
+domain fronting needs a CDN whose edge answers for the fronted name, terminates
+TLS for it and forwards to the origin — a third party that must exist, be
+reachable and be willing. Nothing about `--sni` creates that, no CDN is involved
+in a local run, and none is claimed: treat the flag as a way to test a deployment
+that already has a front, never as a substitute for one. The reasoning is in
+`research/cdn_fronting.md`, and the module docstring says the same thing where
+the code lives.
 
 ## Related pages
 
 * `/docs/operations/cli` — every command and flag.
 * `/docs/operations/evidence` — the harness that measures the runtime's claims.
-* `/docs/execution/fileless` — what the `fileless` job kind actually executes.
-* `/docs/security/threat-model` — what the token and the pin do and do not protect.
+* `/docs/execution/fileless` — what the `fileless` job kind executes, and
+  `/docs/security/threat-model` — what the token and the pin do and do not protect.

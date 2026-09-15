@@ -82,9 +82,9 @@ Step by step:
    parent parses back into a `RunResult`.
 
 The parent (`run_fileless`) passes only the environment it needs — `PATH`,
-`JKY_PKG`, `JKY_PAYLOAD`, `JKY_WALL` and `JKY_ALLOW` — drains the child's
-stdout/stderr through pipes, samples the child's `/proc` state, and enforces the
-timeout.
+`JKY_PKG`, `JKY_PAYLOAD`, `JKY_WALL`, `JKY_ALLOW` and `JKY_DUMPABLE` — drains
+the child's stdout/stderr through pipes, samples the child's `/proc` state, and
+enforces the timeout.
 
 ## How fileless mode differs from the others
 
@@ -150,13 +150,15 @@ $ ./venv/bin/jocky fileless /tmp/jdocs/self_probe.jky
 alive for a few seconds (`sleep(4)`) and look at the child from outside:
 
 ```text
+$ ./venv/bin/jocky fileless /tmp/jdocs/slow6.jky &     # the job sleeps 6 s
+$ PID=51952      # the child's pid, from the job's own output
 $ ls -l /proc/$PID/exe
-lrwxrwxrwx 1 mjonir mjonir 0 Sep 15 23:14 /proc/40890/exe -> /memfd:python3 (deleted)
+lrwxrwxrwx 1 mjonir mjonir 0 Sep 15 23:27 /proc/51952/exe -> /memfd:python3 (deleted)
 
 $ cat /proc/$PID/comm
 jky
 
-$ tr '\0' ' ' < /proc/$PID/cmdline | cut -c1-72
+$ tr '\0' ' ' < /proc/$PID/cmdline | cut -c1-56
 python3 -c import ctypes, json, os, resource, sys
 def _harden():
     try:
@@ -166,14 +168,14 @@ $ grep -c 'memfd:' /proc/$PID/maps
 5
 
 $ grep 'memfd:' /proc/$PID/maps | head -4
-00400000-00420000 r--p 00000000 00:01 24                                 /memfd:python3 (deleted)
-00420000-00703000 r-xp 00020000 00:01 24                                 /memfd:python3 (deleted)
-00703000-00a28000 r--p 00303000 00:01 24                                 /memfd:python3 (deleted)
-00a28000-00a29000 r--p 00627000 00:01 24                                 /memfd:python3 (deleted)
+00400000-00420000 r--p 00000000 00:01 9281                               /memfd:python3 (deleted)
+00420000-00703000 r-xp 00020000 00:01 9281                               /memfd:python3 (deleted)
+00703000-00a28000 r--p 00303000 00:01 9281                               /memfd:python3 (deleted)
+00a28000-00a29000 r--p 00627000 00:01 9281                               /memfd:python3 (deleted)
 
 $ ls -l /proc/$PID/fd | grep 'memfd'
-lrwx------ 1 mjonir mjonir 64 Sep 15 23:23 4 -> /memfd:python3 (deleted)
-lrwx------ 1 mjonir mjonir 64 Sep 15 23:23 6 -> /memfd:slow6.jky-pkg (deleted)
+lrwx------ 1 mjonir mjonir 64 Sep 15 23:27 4 -> /memfd:python3 (deleted)
+lrwx------ 1 mjonir mjonir 64 Sep 15 23:27 6 -> /memfd:slow6.jky-pkg (deleted)
 ```
 
 So the executable image, its mappings and the runtime zip are all memory files;

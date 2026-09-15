@@ -101,8 +101,8 @@ $ ./venv/bin/python -m pytest tests/test_language.py
 ```
 
 `pytest` is configured in `pyproject.toml` (`testpaths = ["tests"]`,
-`addopts = "-q --tb=short"`), which is why the scoped run needs no flags; adding `-q`
-on the command line is belt and braces and suppresses the pass/fail summary line.
+`addopts = "-q --tb=short"`), so the scoped run above needs no flags; adding `-q` again
+suppresses the pass/fail summary line.
 
 Test files are independent and host-scoped: they read the live machine, create their
 own temp files, and clean up. Nothing needs root; a test that genuinely requires a
@@ -201,24 +201,24 @@ matching `jocky/rt/*.py` module.
    dicts/lists and defends against races (a pid can vanish between listing and reading).
    No formatting, no printing, no exceptions for absent data — return `None`, `[]` or an
    empty dict and let the caller decide.
-2. **Register it.** In `namespaces()`, add an entry to the namespace dict:
-
-   ```python
-   proc_ns = {
-       ...
-       "pids": _fn("proc.pids", lambda vm, a: procfs.list_pids(), 0, 0),
-       "threads": _fn("proc.threads", lambda vm, a: procfs.read_threads(_int(a[0])), 1, 1),
-   }
-   ```
-
-   `_fn(name, callable, min_args, max_args)` builds the `NativeFn`; the last two
-   arguments are the VM's arity contract, so `1, 3` means "one to three arguments".
-   Coerce script values with the helpers next to it (`_int`, `_str`, `_bool`, `_list`)
-   rather than trusting the type.
+2. **Register it.** In `namespaces()`, add an entry to the namespace dict — `_fn(name,
+   callable, min_args, max_args)` builds the `NativeFn`, and the last two arguments are the
+   VM's arity contract, so `1, 1` means exactly one argument. Coerce script values with the
+   helpers next to it (`_int`, `_str`, `_bool`, `_list`) rather than trusting the type.
 3. **Guard what needs a grant.** A native that can signal processes or run code is
    deny-by-default: wrap it with `_guarded(fn, capability)` and add the capability and
    its justification to `GUARDED_CAPABILITIES`. `mem.syscall` and `mem.memfd_run` are
    the two current examples; `jocky run --allow syscall` is how a caller grants one.
+
+An entry is one line per call, next to the existing ones:
+
+```python
+proc_ns = {
+    ...
+    "pids": _fn("proc.pids", lambda vm, a: procfs.list_pids(), 0, 0),
+    "threads": _fn("proc.threads", lambda vm, a: procfs.read_threads(_int(a[0])), 1, 1),
+}
+```
 
 The VM enforces arity before your code runs, as a catchable error:
 
@@ -252,13 +252,7 @@ be findable by `jocky/rt/detect.py`.
 2. Add the check to `CHECK_CATALOG` with `check`, `severity`, `source`, `summary` and
    `action`. The catalogue is what the documentation renders, so a check that is emitted
    without an entry is a check the reference page cannot describe; the two are expected
-   to move together. In the current tree the two sets are exactly equal:
-
-   ```text
-   emitted not in catalog: []
-   catalog not emitted  : []
-   ```
-
+   to move together.
 3. Add the function to the tuple in `triage()`. Only cheap checks belong there: the
    expensive ones (`memfd_mappings`, `persistence`) run behind `deep=True`, and
    everything in the default path runs on every `det.triage()` call. `triage()` catches
@@ -274,6 +268,15 @@ be findable by `jocky/rt/detect.py`.
    development host until the finding set was explainable: the hidden-module check, for
    instance, compares `/proc/modules` against the *loadable* subset of `/sys/module`,
    because built-in subsystems never appear in `/proc/modules`.
+
+Step 2 is what keeps the reference page honest: every name passed to `_finding()` in
+`jocky/rt/detect.py` must have a catalogue entry, and the current tree has no name on one
+side missing from the other.
+
+```text
+emitted not in catalog: []
+catalog not emitted  : []
+```
 
 ## Adding a language feature
 
@@ -321,8 +324,7 @@ same findings hash as the source.
 
 ## Working on the documentation site
 
-The site is SvelteKit with `marked`, prerendered to static files. Content is plain
-markdown under `site/content/`, served at `/docs/<slug>`:
+The site is SvelteKit with `marked`, prerendered to static files; content is plain markdown under `site/content/`, served at `/docs/<slug>`:
 
 ```bash
 $ cd site && npm run gen
