@@ -1,17 +1,19 @@
 # Reference
 
-Normative summary of JOCKY 1.2.0 as implemented in this repository: the grammar
-from `jocky/lang/parser.py`, lexical rules from `jocky/lang/lexer.py`, and the
+Normative summary of JOCKY as implemented in this repository: the grammar from
+`jocky/lang/parser.py`, lexical rules from `jocky/lang/lexer.py`, and the
 instruction set from `jocky/lang/compiler.py` (`OPCODES`) with execution
 semantics in `jocky/lang/vm.py`. Anything the parser rejects is not in the
 grammar below; every example shown here was executed against the built CLI.
+The version printed at the time of writing was `jocky 1.3.0` —
+[Versioning & releases](/docs/project/releases) is the authoritative list, and
+`jocky --version` is the authoritative answer for the build in front of you.
 
 ## Lexical structure
 
-* **Source** is UTF-8 text. `#` starts a comment that runs to the end of the
-  line. Space, tab, carriage return and line feed separate tokens and are
-  otherwise insignificant — statements have no terminator and newlines carry no
-  meaning (see the `return` caveat in [Functions & errors](/docs/language/functions-errors)).
+* **Source** is UTF-8 text; `#` starts a comment running to end of line. Space,
+  tab, CR and LF separate tokens and are otherwise insignificant — statements
+  have no terminator, so mind the `return` caveat in [Functions & errors](/docs/language/functions-errors).
 * **Identifiers** start with a letter or `_` and continue with letters, digits
   or `_`. The test is Python's Unicode-aware `isalpha`/`isalnum`, so `café` is a
   valid name.
@@ -187,12 +189,11 @@ Level 6 **folds left** instead of behaving like Python's chained comparisons:
 
 ## Bytecode
 
-The compiler emits a flat stream of `(opcode, operand)` pairs. `jocky disasm`
+The compiler emits a flat stream of `(opcode, operand)` pairs; `jocky disasm`
 prints the constant pool, the name table and one listing per function proto.
-There are 50 opcode names: the 42 below plus the eight `NOP` slots. The
-polymorphic encoder renames and permutes opcodes per build (see
-[Polymorphic artifacts](/docs/execution/artifacts)), so these canonical names
-describe what the compiler and VM use, not the bytes stored in an artifact.
+There are 50 opcode names: the 42 below plus eight `NOP` slots. The polymorpher
+renames and permutes them per build (see [Polymorphic artifacts](/docs/execution/artifacts)),
+so these are the canonical names, not the bytes stored in an artifact.
 
 | Opcode | Operand | Effect |
 |---|---|---|
@@ -304,8 +305,8 @@ jocky disasm hitcount.jky
 Reading it: slots 0 and 1 hold `limit` and `hits`, slot 2 the loop variable;
 `ITER_NEXT 21` jumps past the loop when the iterator is empty and `JMP 9`
 closes it; the `if` body is `LOADL/LOADL/GT` and `JMPF 20`; the `emit` map is
-built by pushing keys and values then `MK_MAP 2`; `print` is global name 0, so
-the last call is `LOADG 0 / CONST 7 / LOADL 1 / ADD / CALL 1 / POP`.
+built by pushing keys and values then `MK_MAP 2`; the last call is
+`LOADG 0 / CONST 7 / LOADL 1 / ADD / CALL 1 / POP`.
 
 Closures and handlers produce the interesting opcodes — `PUSH_CELL`,
 `LOAD_CELL`, `MK_FN` and the `TRY_ENTER` tuple, with the protected region
@@ -383,10 +384,9 @@ handlers: [(7, 14, 14, 1)]
 In `make`, the parameter arrives as `LOADL 0`, but the local `n` was captured
 by the lambda, so slot 1 is a cell: `STORE_CELL 1` writes it, `PUSH_CELL 1`
 hands the box to `MK_FN 0`, and the lambda reads and writes the same box with
-`LOAD_CELL 0` / `STORE_CELL 0`. The trailing `CONST None / RET` in every proto
-is the implicit `nil` return. An error raised deeper in a call stack unwinds
-frames until one has a protected region covering the failing instruction, then
-jumps to that handler with the message string pushed on the frame's stack.
+`LOAD_CELL 0` / `STORE_CELL 0`. The `CONST None / RET` at the end of each proto
+is the implicit `nil` return; an error raised deeper in the stack unwinds frames
+until one covers the failing instruction, then jumps to that handler.
 
 ## Related pages
 

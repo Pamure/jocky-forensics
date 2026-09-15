@@ -7,8 +7,10 @@ module system — scripts call into the built-in runtime namespaces (`proc`,
 `net`, `fs`, `sys`, `det`, `ioc`, `mem`) and push structured findings out with
 `emit`.
 
-Everything on this page was executed with this repository's CLI
-(`jocky 1.2.0`); the output blocks are verbatim.
+Every example on this page was run against this repository's CLI; the output
+blocks are verbatim. The version at the time of writing was `jocky 1.3.0` —
+[Versioning & releases](/docs/project/releases) is the authoritative list, and
+`jocky --version` is the authoritative answer for the build in front of you.
 
 ## Running a script
 

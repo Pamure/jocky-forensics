@@ -11,22 +11,22 @@ The version string lives in exactly one place:
 
 ```python
 # jocky/__init__.py
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 ```
 
 Everything else reads it. Nothing in the tree hardcodes a version number:
 
 | Consumer | How it uses the string |
 |---|---|
-| `jocky --version` | `jocky 1.2.0` |
+| `jocky --version` | `jocky 1.3.0` |
 | `pyproject.toml` | `dynamic = ["version"]` with `[tool.setuptools.dynamic] version = { attr = "jocky.__version__" }` |
-| `jocky doctor` | the `jocky package importable` check reports `version 1.2.0` |
-| `jocky serve` | the `Server:` response header and `GET /v1/health` both report it (`jocky-management/1.2.0`) |
+| `jocky doctor` | the `jocky package importable` check reports `version 1.3.0` |
+| `jocky serve` | the `Server:` response header and `GET /v1/health` both report it (`jocky-management/1.3.0`) |
 | `site/tools/gen_versions.py` | reads it back out of `jocky/__init__.py` with a regex and publishes it in the docs banner |
 
 ```bash
 $ ./venv/bin/jocky --version
-jocky 1.2.0
+jocky 1.3.0
 ```
 
 ## Releases are git tags
@@ -35,13 +35,16 @@ A release is an annotated git tag on `main`, named `v<package version>`:
 
 ```bash
 $ git tag --list
+docs-2026-09-15
 v1.1.0
 v1.2.0
-$ git log --oneline --decorate -3 v1.2.0
-fb1f261 (tag: v1.2.0) v1.2.0: Landlock sandbox, docs site and release versioning
-67d5945 (tag: v1.1.0) JOCKY v1.1.0: forensic scripting runtime, hardening and evidence
-$ git rev-parse --short v1.2.0^{commit}
-fb1f261
+v1.3.0
+$ git log --oneline --decorate -3 v1.3.0
+df0fd63 (tag: v1.3.0) v1.3.0: agent state hardening, serve --token-file, correct syscall name
+c0b862a docs: final security/limits edit from the verification pass
+bc55377 (tag: docs-2026-09-15) site: docs index route rendered real markup; complete, verified production build
+$ git rev-parse --short v1.3.0^{commit}
+df0fd63
 ```
 
 Quoting `v1.2.0` rather than `HEAD` in the log command keeps the output stable:
@@ -93,7 +96,7 @@ $ echo $?
 ```bash
 $ md5sum site/src/lib/versions.generated.js site/static/versions.json site/content/project/releases.md > /tmp/gen-before.md5
 $ python3 site/tools/gen_versions.py
-gen_versions: current=1.2.0 tags=2 unreleased_commits=8
+gen_versions: current=1.3.0 tags=4 unreleased_commits=1
 $ md5sum -c /tmp/gen-before.md5
 site/src/lib/versions.generated.js: OK
 site/static/versions.json: OK
@@ -315,10 +318,10 @@ wheel is the artefact you host and pin against — an internal index or a
 content can be inspected without touching your working tree:
 
 ```bash
-$ git rev-parse v1.2.0^{commit}
-fb1f261830c80e8a608765cfc169527899872c2f
-$ git show v1.2.0:jocky/__init__.py | sed -n '13p'
-__version__ = "1.2.0"
+$ git rev-parse v1.3.0^{commit}
+df0fd63d7ce8b7c264ee2712be0694b3c8bd5c70
+$ git show v1.3.0:jocky/__init__.py | sed -n '13p'
+__version__ = "1.3.0"
 $ git show v1.1.0:jocky/__init__.py | sed -n '13p'
 __version__ = "1.1.0"
 ```
@@ -347,7 +350,7 @@ authoritative answers come from the package and the tag:
 
 ```bash
 $ ./venv/bin/jocky --version
-jocky 1.2.0
+jocky 1.3.0
 $ git rev-parse --short v1.2.0^{commit}
 fb1f261
 ```

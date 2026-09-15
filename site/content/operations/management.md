@@ -12,6 +12,11 @@ All policy lives on the server — which hosts, which checks, which payload, whe
 The agent is deliberately dumb: it runs exactly what it is handed, and journals
 what it did before reporting it.
 
+Version strings and command output here are what the release printed when this
+page was written (1.3.0). `/docs/project/releases` is authoritative for the
+version list, and `jocky --version` for the build in front of you; the request
+and response bodies below are quoted from real sessions against it.
+
 ## Start the server
 
 ```bash
@@ -23,17 +28,13 @@ what it did before reporting it.
 | `--host` | `127.0.0.1` | Bind address. Anything but loopback exposes the API to the network |
 | `--port` | `8443` | TCP port; `0` binds an ephemeral port and the banner prints the real one |
 | `--token` | generated | Shared secret. Omitted, a URL-safe token is printed **once** to stderr |
+| `--token-file` | — | Read the token from a file; `JOCKY_TOKEN` works too. Preferred, because argv is world-readable in `/proc/<pid>/cmdline` (mode `0444`) |
 | `--cert`, `--key` | generated | PEM certificate and key; omitted, a self-signed pair is created under `--state` |
 | `--state` | `.jockey-server` | State directory: `agent.crt`, `agent.key`, `store.db` |
 
 The certificate is generated on first start by shelling out to `openssl`, so the
-server needs no third-party crypto, and a generated token is shown exactly once:
-
-```text
-jocky-server token (generated, shown once): 62gLISSHafI7nKFbJCYu96nNcCShsiLByexFRmAmntU
-jocky-server: generated self-signed certificate at /tmp/jky-docs/state/agent.crt
-jocky-server listening on https://127.0.0.1:19446
-```
+server needs no third-party crypto. With no token at all it generates one and
+prints it exactly once: `jocky-server token (generated, shown once): 62gLISSHafI7nKFbJCYu96nNcCShsiLByexFRmAmntU`.
 
 The generated certificate is self-signed, valid for 365 days, and carries a SAN
 so the same file works for loopback and for a locally named host:
@@ -47,13 +48,17 @@ X509v3 Subject Alternative Name:
     DNS:localhost, IP Address:127.0.0.1
 ```
 
-Case data is not world-readable (state dir `0700`, key and store `0600`):
+Case data is not world-readable on either side: server state directory `0700` with
+key and store `0600`, agent directory `0700` with identity and journal `0600`:
 
 ```text
 700 /tmp/jky-server
 644 /tmp/jky-server/agent.crt
 600 /tmp/jky-server/agent.key
 600 /tmp/jky-server/store.db
+700 /tmp/jky-docs/agent-13
+600 /tmp/jky-docs/agent-13/agent.json
+600 /tmp/jky-docs/agent-13/journal.jsonl
 ```
 
 Point `--cert`/`--key` at your own pair for a real deployment; then no
@@ -138,15 +143,13 @@ $ echo $?
 ```
 
 That is what makes a self-signed certificate usable: the agent does not need a CA
-to trust, it needs the certificate to be the one it saw the first time. It also
-means rotating the server certificate requires re-enrolling the agents (or
-passing the new `--pin`) — the trade being made.
+to trust, only the certificate it saw first. It also means rotating the server
+certificate requires re-enrolling the agents (or passing the new `--pin`).
 
 ## Submit a job
 
 Two kinds exist and only two: `source` runs JOCKY source in-process, `fileless`
-runs the same source from anonymous memory on the target. Payloads travel
-base64-encoded, because the wire is JSON:
+runs the same source from anonymous memory on the target. Payloads are base64:
 
 ```bash
 cat > /tmp/jky-docs/asset.jky <<'JKY'
@@ -196,18 +199,16 @@ digest so a client can check it before executing:
 }
 ```
 
-The bundled agent does not currently re-check that digest client-side; it is
-stored with the job and echoed back on the result so both sides can be reconciled
-afterwards. Any other kind is accepted by the server and rejected by the agent at
-execution time — an artifact is not a job kind:
+The bundled agent does not currently re-check that digest client-side; it is stored
+with the job and echoed back on the result so both sides can be reconciled. Any
+other kind is accepted by the server and refused by the agent at execution time:
 
 ```text
 jocky-agent: job job_8c92a06a0a49fd2e (exec) error, 0 finding(s)
 ```
 
 Execution limits are the runtime's own: 60 000 ms wall clock and 50 000 000 VM
-steps per job, plus a 120 s timeout around the fileless child, so a runaway
-payload is cut off rather than allowed to pin the host.
+steps per job, plus a 120 s fileless timeout, so a runaway payload is cut off.
 
 ## Read findings
 
@@ -220,16 +221,15 @@ curl -sk -H 'X-JKY-Token: SECRET' 'https://127.0.0.1:8443/v1/findings?limit=5'
 ```
 
 Every finding keeps its job and agent, which is what makes a report
-reconstructable. `GET /v1/status` is the operator's single view; after the two
-jobs above and one rejected re-report it read:
+reconstructable. `GET /v1/status` is the operator's single view:
 
 ```json
 {"agents": [{"agent_id": "agt_a8049535d4ef35da", "name": "docs-agent", "host": "stormbreaker", "uid": 1000, "kernel": "6.6.87.2-microsoft-standard-WSL2", "enrolled_at": "2026-09-15T17:50:13.354+00:00", "last_seen": "2026-09-15T17:50:14.279+00:00"}, {"agent_id": "agt_b4874e9738633106", "name": "intruder", "host": "workstation", "uid": 0, "kernel": "unknown", "enrolled_at": "2026-09-15T17:50:14.875+00:00", "last_seen": "2026-09-15T17:50:15.171+00:00"}], "jobs": {"queued": 0, "running": 0, "ok": 2, "error": 1, "total": 3}, "findings": {"total": 2, "by_severity": {"info": 2}}, "server_time": "2026-09-15T17:50:16.221+00:00"}
 ```
 
 Only the findings a script emitted are persisted. Metrics, errors, the raw result
-body and — for fileless jobs — the process-image evidence stay in the agent's
-local journal. To record the process image centrally, emit it from the script.
+body and — for fileless jobs — the process-image evidence stay in the agent's local
+journal; to record the process image centrally, emit it from the script.
 
 ## HTTP API
 
@@ -240,7 +240,7 @@ JSON fields are rejected instead of ignored.
 
 | Method | Path | Body | Success |
 |---|---|---|---|
-| `GET` | `/v1/health` | — | `200 {"status":"ok","version":"1.2.0"}` — no token needed |
+| `GET` | `/v1/health` | — | `200 {"status":"ok","version":"1.3.0"}` — no token needed |
 | `POST` | `/v1/enroll` | `name`, `host`, optional `uid`, `kernel` | `200 {"agent_id":"agt_…"}` |
 | `POST` | `/v1/jobs/submit` | `kind`, `payload_b64`, optional `target` | `200 {"job_id":"job_…"}` |
 | `POST` | `/v1/jobs/poll` | `agent_id` | `200 {job_id, kind, payload_b64, payload_sha256}`, or `204` when the queue is empty |
