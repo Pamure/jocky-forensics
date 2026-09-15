@@ -155,9 +155,10 @@ kernel-mode boundary itself is out of scope on [Roadmap](/docs/project/roadmap).
 A finding is one read of a moving target.
 
 * The advice for a fileless finding is "dump `/proc/<pid>/exe` before the process
-  exits". A live process produced a finding at pid 42054; after it exited,
-  `/proc/42054/exe` raised `FileNotFoundError`. The advice is right and the
-  runtime cannot follow it — memory acquisition is a roadmap item.
+  exits". The measurement on `/docs/security/limits` is the same story: a live
+  pid's `exe` link read fine and was copied, and seconds later the same path
+  raised `FileNotFoundError`. The advice is right and the runtime cannot follow
+  it — memory acquisition is a roadmap item.
 * Consecutive `jocky triage --json` runs on a quiet host reported `processes 126 /
   findings 82` and `processes 125 / findings 83`, finding sets identical: `False`.
 * As a non-root uid most processes are not inspectable at all (coverage 0.36–0.40
@@ -275,8 +276,7 @@ hand.
 `MITIGATION MISSING` — **first contact is unauthenticated** (trust on first use):
 an attacker answering that socket during enrolment is pinned as the server, reads
 the token, and hands the agent jobs of their choosing. No CA, no revocation, no
-rotation, no expiry handling beyond the 365-day certificate, and the private key
-is unencrypted.
+rotation, no expiry beyond the 365-day certificate; the private key is unencrypted.
 
 `ROADMAP` — a certificate lifecycle is proposed in
 `research/findings/lim-security.md`; the roadmap's non-symmetric signing item is
@@ -351,7 +351,7 @@ per-file SHA-256 manifest plus a chain head, `jocky verify` recomputes both, and
 
 `MITIGATION AVAILABLE TODAY` — detection of missing, extra and modified files, of
 a manifest edited after writing, of a mismatched head, and of a signature made
-with another key; `--anchor` can keep the head outside the case directory so an
+with another key; `--anchor` keeps the head outside the case directory, so an
 attacker who owns the directory cannot rewrite both; signing is analyst-side, so
 collection still measures "0 child processes".
 
@@ -367,7 +367,7 @@ no artifact provenance, since anyone can re-encode any script.
 A script's read scope is the process's read scope: `fs.read` on `/etc/passwd`
 returns the file, `fs.hash`/`fs.scan`/`fs.timeline` walk any readable tree,
 `proc.*`/`net.*` see what the uid sees (about 40% of processes here as uid 1000).
-No per-script read allowlist, no case-scoped root.
+There is no per-script read allowlist and no case-scoped root.
 
 `MITIGATION AVAILABLE TODAY` — reads only: no write, `socket` or subprocess
 primitive in the native set, so a script that never asks for a capability cannot
@@ -379,7 +379,7 @@ two natives that could, and the refusal names the capability and the risk;
 
 `MITIGATION MISSING` — capability policy is per *run*, not per script, so a
 playbook cannot declare what it needs and be rejected before it runs; the agent
-does not sandbox jobs (B3); `off` is the default sandbox level.
+does not sandbox jobs (B3); `off` is the default level for `run`/`exec`.
 
 `ROADMAP` — a module system with `needs` declarations and sandbox levels as the
 default for untrusted scripts (`research/findings/res-dsl-design.md`,

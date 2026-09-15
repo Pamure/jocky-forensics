@@ -10,6 +10,25 @@ compatibility policy (see `docs/DESIGN.md` and the versioning page):
 * **minor** — backwards-compatible features (new natives, new checks);
 * **patch** — fixes only.
 
+## [1.3.0] — 2026-09-15
+
+### Added
+- `jocky serve --token-file` (and `JOCKY_TOKEN`), matching the agent: passing a
+  token in `argv` exposes it to every local user through
+  `/proc/<pid>/cmdline`, which is mode `0444` by default.
+
+### Changed
+- Agent state is owner-only: the state directory is created `0700` and
+  `agent.json` plus `journal.jsonl` are `0600`. They hold the pinned server
+  fingerprint and the job journal — provenance material, not public data.
+
+### Fixed
+- Documentation named the wrong syscall. `README.md` and the
+  `jocky/exec/fileless.py` docstring said `execveat`; an independent ptrace
+  counter showed `execve` 2, `execveat` 0, because the runtime calls
+  `os.execve()` against `/proc/self/fd/<fd>`. The claim was right, the syscall
+  name was wrong.
+
 ## [1.2.0] — 2026-09-15
 
 ### Added

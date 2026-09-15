@@ -277,7 +277,15 @@ def cmd_evidence(args: argparse.Namespace) -> int:
 
 def cmd_serve(args: argparse.Namespace) -> int:
     from jocky.agent import server
-    return server.serve(host=args.host, port=args.port, token=args.token,
+    token = args.token or os.environ.get("JOCKY_TOKEN")
+    if args.token_file:
+        try:
+            with open(args.token_file, "r", encoding="utf-8") as handle:
+                token = handle.read().strip()
+        except OSError as exc:
+            print(f"jocky: cannot read --token-file: {exc}", file=sys.stderr)
+            return 2
+    return server.serve(host=args.host, port=args.port, token=token,
                         cert=args.cert, key=args.key, state_dir=args.state)
 
 
@@ -416,7 +424,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve = sub.add_parser("serve", help="run the central management server")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8443)
-    p_serve.add_argument("--token", default=None)
+    p_serve.add_argument("--token", default=None,
+                         help="management token (or set JOCKY_TOKEN / --token-file)")
+    p_serve.add_argument("--token-file", default=None,
+                         help="file containing the token — preferred, because argv is "
+                              "world-readable in /proc/<pid>/cmdline")
     p_serve.add_argument("--cert", default=None)
     p_serve.add_argument("--key", default=None)
     p_serve.add_argument("--state", default=".jocky-server")

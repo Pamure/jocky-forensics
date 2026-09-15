@@ -61,6 +61,19 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
+def _harden_path(path: str, mode: int) -> None:
+    """Best-effort permission tightening for agent state.
+
+    The state directory holds the server fingerprint, the agent identity and the
+    job journal — provenance material that a second local user has no business
+    reading. Failures are ignored: the filesystem may not implement POSIX modes.
+    """
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
 def _journal(path: str, entry: Dict[str, Any]) -> None:
     """Append one JSON line to the local audit journal.
 
@@ -71,6 +84,7 @@ def _journal(path: str, entry: Dict[str, Any]) -> None:
     try:
         with open(path, "a", encoding="utf-8") as handle:
             handle.write(json.dumps(entry, default=str) + "\n")
+        _harden_path(path, 0o600)
     except OSError as exc:  # a broken journal must not stop collection
         print(f"jocky-agent: journal write failed: {exc}", file=sys.stderr)
 
@@ -273,6 +287,7 @@ class Identity:
         try:
             with open(path, "w", encoding="utf-8") as handle:
                 json.dump(asdict(self), handle, indent=2)
+            _harden_path(path, 0o600)
         except OSError as exc:
             print(f"jocky-agent: could not persist identity: {exc}", file=sys.stderr)
 
@@ -375,7 +390,8 @@ def run(server: str, token: str, interval: float = 5.0, once: bool = False,
     appropriate on a lab network.
     """
     state_dir = os.path.abspath(state_dir)
-    os.makedirs(state_dir, exist_ok=True)
+    os.makedirs(state_dir, exist_ok=True, mode=0o700)
+    _harden_path(state_dir, 0o700)
     identity_path = os.path.join(state_dir, IDENTITY_NAME)
     journal_path = os.path.join(state_dir, JOURNAL_NAME)
 

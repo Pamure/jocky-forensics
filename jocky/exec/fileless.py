@@ -14,7 +14,7 @@ Measured facts this module is built on (probe output is reproduced in
 Consequence: no program text, no runtime module and no interpreter path is
 written to the target's filesystem.  What *is* still observable — and the
 runtime does not pretend otherwise — is process creation, the
-``memfd_create``/``execveat`` syscalls themselves, and the live process image
+``memfd_create``/``execve`` syscalls themselves, and the live process image
 (which is exactly why :mod:`jocky.rt.detect` can find this technique).
 """
 from __future__ import annotations

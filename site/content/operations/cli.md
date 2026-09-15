@@ -232,14 +232,16 @@ usage: jocky run [-h] [--json] [--wall-ms WALL_MS] [--max-steps MAX_STEPS]
 
 ```text
 usage: jocky serve [-h] [--host HOST] [--port PORT] [--token TOKEN]
-                   [--cert CERT] [--key KEY] [--state STATE]
+                   [--token-file TOKEN_FILE] [--cert CERT] [--key KEY]
+                   [--state STATE]
 ```
 
 | Option | Description |
 |---|---|
 | `--host` |  (default: `127.0.0.1`) |
 | `--port` |  (default: `8443`) |
-| `--token` |  |
+| `--token` | management token (or set JOCKY_TOKEN / --token-file) |
+| `--token-file` | file containing the token — preferred, because argv is world-readable in /proc/<pid>/cmdline |
 | `--cert` |  |
 | `--key` |  |
 | `--state` |  (default: `.jocky-server`) |

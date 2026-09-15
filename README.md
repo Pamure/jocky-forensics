@@ -110,9 +110,9 @@ Measured by the evidence harness, not asserted:
 ## Honest limits (what this does *not* claim)
 
 * Kernel-level telemetry (eBPF/kprobes, LSM/auditd rules) still sees
-  `memfd_create`, `execveat` and the file reads. Nothing user-space can hide
-  those from a privileged observer; what JOCKY removes is the *noisy, noisy-by-
-  convention* part (spawning tools, writing files, mangling argv).
+  `memfd_create`, the `execve` of `/proc/self/fd/N` and the file reads. Nothing
+  user-space can hide those from a privileged observer; what JOCKY removes is the
+  *noisy, noisy-by-convention* part (spawning tools, writing files, mangling argv).
 * In-memory payloads remain visible in `/proc/<pid>/maps` while they run —
   which is exactly why the same runtime ships the detector that finds them.
 * Domain fronting needs a real CDN; the client implements the *frontable*

@@ -58,6 +58,12 @@ npx vercel deploy --prod --yes
 npx vercel deploy --prod --yes --token "$VERCEL_TOKEN"
 ```
 
+Before deploying a new release, refresh any page that quotes version-specific
+output (`jocky --version`, `doctor` transcripts, build metadata). The version
+banner and `project/releases` regenerate themselves from `git tag`; prose does
+not. Where a quote is illustrative, label it as "at the time of writing" so a
+later bump does not turn the page into a false statement.
+
 `vercel.json` pins the contract: `npm run build`, output directory `build/`,
 `cleanUrls` on, long-lived caching for hashed assets. The repository root is
 *not* the project root — deploy from `site/`, or point Vercel at it as the Root

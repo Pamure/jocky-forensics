@@ -9,7 +9,9 @@ finding stored with provenance.  Nothing about the network is mocked.
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import re
 import socket
 import ssl
 import sys
@@ -189,6 +191,76 @@ def test_poll_without_work_returns_no_content(management_server):
     status, body = api(management_server, "/v1/jobs/poll", token=TOKEN,
                        payload={"agent_id": agent["agent_id"]})
     assert status == 204 and body is None
+
+
+def test_agent_state_is_owner_only(management_server, tmp_path):
+    """The state directory holds the pinned fingerprint and the job journal."""
+    import stat as stat_mod
+
+    state = tmp_path / "hardened-state"
+    code = client.run(server=management_server["url"], token=TOKEN, once=True,
+                      name=f"perm-agent-{time.time_ns() % 100000}", state_dir=str(state))
+    assert code == 0, "agent run failed, cannot judge permissions"
+
+    mode = stat_mod.S_IMODE(os.stat(state).st_mode)
+    assert mode == 0o700, oct(mode)
+
+    identity = state / "agent.json"
+    assert identity.exists()
+    assert stat_mod.S_IMODE(os.stat(identity).st_mode) == 0o600
+    payload = json.loads(identity.read_text())
+    assert payload["agent_id"], payload
+    assert payload.get("fingerprint"), "server certificate was not pinned at enrolment"
+
+
+def test_pinned_transport_refuses_a_different_certificate(management_server):
+    """A pin mismatch must be reported, not raise from inside http.client."""
+    wrong = "0" * 64
+    transport = client._Transport(management_server["url"], TOKEN, pin=wrong)
+    response = transport.request("GET", "/v1/health")
+    assert not response.ok
+    assert response.status == 0
+    assert "fingerprint mismatch" in (response.error or ""), response.error
+
+
+def test_serving_with_a_token_file(management_server):
+    """`jocky serve --token-file` must accept the same token as --token."""
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as directory:
+        token_path = os.path.join(directory, "token")
+        with open(token_path, "w", encoding="utf-8") as handle:
+            handle.write("token-from-a-file\n")
+        process = subprocess.Popen(
+            [sys.executable, "-m", "jocky", "serve", "--host", "127.0.0.1", "--port", "0",
+             "--token-file", token_path, "--state", os.path.join(directory, "srv")],
+            cwd=str(REPO), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        try:
+            port = None
+            deadline = time.time() + 30
+            while time.time() < deadline and port is None:
+                line = process.stdout.readline()
+                if not line:
+                    if process.poll() is not None:
+                        break
+                    continue
+                match = re.search(r"127\.0\.0\.1:(\d+)", line)
+                if match:
+                    port = int(match.group(1))
+            assert port, "serve never reported a bound port"
+            status, body = api({"url": f"https://127.0.0.1:{port}", "port": port},
+                               "/v1/status", token="token-from-a-file")
+            assert status == 200, body
+            status_denied, _ = api({"url": f"https://127.0.0.1:{port}", "port": port},
+                                   "/v1/status", token="wrong")
+            assert status_denied == 401
+        finally:
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
 
 
 def _b64(text: str) -> str:

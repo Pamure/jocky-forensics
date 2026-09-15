@@ -107,16 +107,18 @@ them; it claims not to *need* the noisy conventions they are usually tuned to.
 job than the tool would like:
 
 ```text
-pid=42054
+pid=54775
 exe link      : /memfd:python3 (deleted)
 comm          : jky                          # PR_SET_NAME, see fileless.py
 argv count    : 3
-memfd maps    : 5                            # /memfd:python3 (deleted), r-xp among them
+environ       : ['PATH=/usr/bin:/bin', 'PYTHONDONTWRITEBYTECODE=1', 'JKY_PKG=5',
+                'JKY_PAYLOAD=6', 'JKY_WALL=60000.0', 'JKY_ALLOW=', 'JKY_DUMPABLE=1']
+memfd maps    : 5                            # r--p, r-xp, r--p, r--p, rw-p
 fds           : 4 -> /memfd:python3 (deleted)
                 5 -> /memfd:dwell.jky-pkg (deleted)
                 6 -> /memfd:dwell.jky-payload (deleted)
-environ       : PATH=/usr/bin:/bin, PYTHONDONTWRITEBYTECODE=1, JKY_PKG=5,
-                JKY_PAYLOAD=6, JKY_WALL=60000.0, JKY_ALLOW=, JKY_DUMPABLE=1
+copied exe    : 8020928 bytes sha256 e50d468e8b0adfb05733f5b87b3cff34 …
+after exit    : /proc/54775/exe -> FileNotFoundError: [Errno 2] No such file or directory
 ```
 
 Those file descriptors are readable by the owning user, and they hand over the
@@ -139,9 +141,10 @@ program decodes with no key, because the artifact carries its own key material.
 
 The harness's own sampler reports one less mapping than an independent read
 (`memfd_maps=4` in `evidence/report.md` and in the quick run, five `memfd:` lines
-in the read above). Both are true: the harness stores at most four paths
-(`maps[:4]` in `_watch_proc`) and counts at a single sampled instant, and the
-mapping set changes as the interpreter starts up.
+in the read above). The count is not truncated — `memfd_map_count` is `len(maps)`
+— but the stored path list is capped at four entries (`maps[:4]` in
+`_watch_proc`), and both readings took their sample at a different instant in the
+interpreter's startup, when the mapping set is still settling.
 
 `--private` exists and does exactly one thing: it sets `PR_SET_DUMPABLE=0`, which
 makes `/proc/<pid>/*` root-only. Measured as the same uid, with a longer-running
@@ -174,6 +177,8 @@ mode `444`:
 ```text
 $ stat -c '%a %n' /proc/50285/cmdline        # the management server from this session
 444 /proc/50285/cmdline
+$ stat -c '%a %n' /proc/54905/cmdline        # a fileless child, same host, uid 1000
+444 /proc/54905/cmdline
 $ tr '\0' ' ' < /proc/50285/cmdline
 /home/mjonir/f/sih2026/sih148/venv/bin/python3 … jocky serve --host 127.0.0.1
   --port 19543 --token sec-demo-token --state /tmp/jky-sec/state
@@ -338,8 +343,8 @@ rewrite `argv` after startup.
 Findings are observations with timestamps on the raw logs, not proof. Three
 measured reasons:
 
-* **Processes move.** A live fileless process produced a finding at pid 42054;
-  after it exited, `/proc/42054/exe` raised `FileNotFoundError`. The detector's
+* **Processes move.** The probe above read a live pid's `exe` link and copied the
+  image; after it exited, `/proc/54775/exe` raised `FileNotFoundError`. The detector's
   own recommendation says "dump `/proc/<pid>/exe` before the process exits", and
   the runtime cannot do that for you — memory acquisition
   (`/proc/<pid>/mem`, `process_vm_readv`) is a tier-1 roadmap item, not a
@@ -366,7 +371,7 @@ measured reasons:
 | "No shell, no `ps`/`ss`/`lsof`" | 0 `fork`/`clone`/`execve` in an independent ptrace trace of `jocky triage`; 1905 `openat`, 3068 `read` | scratch ptrace counter |
 | "In memory, not on disk" | `/proc/<pid>/exe` = `/memfd:python3 (deleted)`; 4–5 memfd-backed mappings; interpreter, runtime zip and payload all present as memfds | `evidence/report.md` §5; `/proc/<pid>/{exe,maps,fd}` read |
 | "The detector finds the technique" | 1 memfd process observed while the job ran; finding `process 51186 (jky) runs from memory` | `evidence/report.md` §5 |
-| "Hidden from kernel telemetry" | **not claimed, and false** — `memfd_create` (6×), `execve` (2×) and 520 `openat` calls are visible to an unprivileged ptrace observer; the privileged rules are in `res-ebpf-detect.md` | scratch ptrace counter |
+| "Hidden from kernel telemetry" | **not claimed, and false** — `memfd_create` (6×), `execve` (2×) and 696 `openat` calls are visible to an unprivileged ptrace observer; the privileged rules are in `res-ebpf-detect.md` | scratch ptrace counter |
 | "`execveat` is used" | **wrong** — measured `execve` 2, `execveat` 0; the prose in `README.md` and `fileless.py` names the wrong syscall | scratch ptrace counter |
 | "The payload is not recoverable" | **not claimed** — the payload memfd is the artifact byte for byte, and `decode()` recovers every string constant with no key | scratch recovery probe, artifact decoder |
 | "The artifact is tamper-proof" | **false as authentication**: footer is an HMAC under a key stored in the same file; tamper + recompute is accepted, and the tampered artifact runs | scratch tamper probe |
