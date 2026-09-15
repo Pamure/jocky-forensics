@@ -154,11 +154,22 @@ prints the same fingerprint with colons and uppercase, so it can be compared by
 hand. Note that `--insecure` still *records* the fingerprint it saw, but the
 transport drops the pin, so nothing is enforced on that run.
 
-Known defect in this release: a deliberate pin mismatch fails with
-`jocky: NameError: name 'CertificatePinError' is not defined` (exit `2`) instead
-of the intended fingerprint-mismatch message. The socket is closed before that
-error is raised, so a mismatched pin still refuses to talk to the server — the
-failure is in the error path, not in the enforcement.
+A pin that does not match is refused before any job is accepted — the connection
+is closed as soon as the presented certificate disagrees with the expected one:
+
+```text
+$ ./venv/bin/jocky agent --server https://127.0.0.1:8443 --token SECRET --once \
+      --pin 0000000000000000000000000000000000000000000000000000000000000000 \
+      --name pin-agent2 --state /tmp/jky-docs/agent-pin2
+jocky-agent: enrolment failed: server certificate fingerprint mismatch: expected 0000000000000000…, got a3ebf074317b95bc…
+$ echo $?
+1
+```
+
+That is the property that makes a self-signed certificate usable: the agent does
+not need a CA to trust, it needs the certificate to be the same one it saw the
+first time. It also means rotating the server certificate requires re-enrolling
+the agents (or passing the new `--pin`), which is the trade being made.
 
 ## Submit a job
 

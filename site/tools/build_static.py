@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import os
 import re
 import shutil
 import sys
@@ -501,6 +502,30 @@ def build(out_dir: Path) -> Dict[str, Any]:
         json.dumps(search_index, ensure_ascii=False), encoding="utf-8"
     )
     (out_dir / "assets" / "site.js").write_text(CLIENT_JS, encoding="utf-8")
+
+    # Publisability: a crawler entry point, a sitemap built from the same
+    # manifest the navigation uses, and a 404 page so a mistyped URL does not
+    # land on the host's default error screen.
+    base = os.environ.get("DOCS_BASE_URL", "https://jocky.vercel.app").rstrip("/")
+    urls = [f"{base}/"] + [f"{base}/docs/{item['slug']}" for _s, item in flat
+                           if item["slug"] in pages]
+    (out_dir / "sitemap.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        + "\n".join(f"  <url><loc>{url}</loc></url>" for url in urls)
+        + "\n</urlset>\n",
+        encoding="utf-8",
+    )
+    (out_dir / "robots.txt").write_text(
+        f"User-agent: *\nAllow: /\nSitemap: {base}/sitemap.xml\n", encoding="utf-8"
+    )
+    (out_dir / "404.html").write_text(
+        render_page("404", "Page not found",
+                    "<h1>Page not found</h1><p>That documentation page does not exist. "
+                    'Start from the <a href="/">overview</a> or use the search box.</p>',
+                    [], None, None, __version__),
+        encoding="utf-8",
+    )
 
     return {
         "out": str(out_dir),

@@ -2,9 +2,9 @@
 
 How to work on JOCKY: the layout of the tree, the edit-run-test loop, the kind of test this project expects, and how to add a native, a check or a language feature.
 
-The runtime is Python 3.12 with the standard library only — `pyproject.toml` declares
-`dependencies = []`, and that is a design constraint, not an accident: a collection tool
-that needs a package index is one that fails on a target host.
+The runtime is Python 3.12 with the standard library only: `pyproject.toml` declares
+`dependencies = []`, and a collection tool that needs a package index is one that fails on
+a target host. Everything runs on Linux and reads `/proc`, `/proc/net` and `/sys` directly.
 
 ## Repository layout
 
@@ -240,9 +240,8 @@ page in memory:
 ['| `pid_count` | 0..0 |']
 ```
 
-Add a test to `tests/test_runtime.py` for the collector's behaviour — call it against the
-live host and assert the shape and the invariant, exactly as the existing collector tests
-do.
+Add a test to `tests/test_runtime.py` for the collector's behaviour: call it against the
+live host and assert the shape and the invariant, as the existing collector tests do.
 
 ## Adding a detection check
 
@@ -357,20 +356,20 @@ overwrites them:
 Everything else in `site/content/` is written by hand:
 
 - no frontmatter: the page title is the first `#` heading, and the sidebar and search
-  description come from the first paragraph, so keep that paragraph a real summary and
-  on one line;
+  description come from the first paragraph, so keep that paragraph a real summary on one
+  line;
 - tag fenced code blocks (`jocky`, `bash`, `python`, `json`, `text`); the highlighter in
-  `site/src/lib/highlight.js` maps `jky`→`jocky`, `py`→`python` and `sh`→`bash`, and
-  falls back to plain text for anything else;
-- link between pages with absolute slugs: `[Fileless execution](/docs/execution/fileless)`;
-- register a new page in `site/src/lib/nav.js`. A page listed there that does not exist
-  fails the build (`site/src/routes/docs/[...slug]/+page.js` throws before rendering), and
-  a content file that is not listed is reported as orphaned by `validate()` in
+  `site/src/lib/highlight.js` maps `jky`→`jocky`, `py`→`python`, `sh`→`bash` and falls back
+  to plain text otherwise;
+- link between pages with absolute slugs, as in `[Fileless execution](/docs/execution/fileless)`;
+- register a new page in `site/src/lib/nav.js`. A listed page that does not exist fails the
+  build (`site/src/routes/docs/[...slug]/+page.js` throws before rendering), and a content
+  file that is not listed is reported as orphaned by `validate()` in
   `site/src/lib/content.js`.
 
-Every command and output on a page should be one you actually ran on a checkout. Treat a
-quoted terminal session the way you treat a test assertion — it is a claim that has to
-keep being true.
+Every command and output on a page should be one you actually ran on a checkout: treat a
+quoted terminal session the way you treat a test assertion, as a claim that has to keep
+being true.
 
 ## Commits and releases
 
@@ -378,22 +377,25 @@ The version string has one home: `jocky/__init__.py`. `pyproject.toml` reads it
 dynamically, `jocky --version` prints it, and the site's version banner is generated from
 it plus `git tag`.
 
-The repository currently has no commits and no tags, so the conventions below come from
-the tooling (`site/tools/gen_versions.py` documents the release procedure it expects)
-rather than from a history to imitate. Keep a change reviewable on its own: one behaviour
-change, its tests, and — if you touched a native, a check, a CLI flag or the version — the
-regenerated documentation in the same commit. Release commits are named `release: vX.Y.Z`.
+Releases in this repository are annotated tags — `git tag -l` currently lists `v1.1.0` and
+`v1.2.0`, both dated 2026-09-15, with the commit each tag dereferences to shown on the
+[releases page](/docs/project/releases). The release commit names the version it ships
+(`v1.2.0: Landlock sandbox, docs site and release versioning`), and the tag annotation is a
+one-line summary of the same release.
 
-Cutting a release, in the order the tooling assumes:
+Keep a change reviewable on its own: one behaviour change, its tests, and — if you touched
+a native, a check, a CLI flag or the version — the regenerated documentation in the same
+commit. Prose changes go in both `CHANGELOG.md` (the file of record) and
+`site/content/project/changelog.md` (this site's copy), newest release first, under
+`Added` / `Changed` / `Fixed` / `Security`.
+
+Cutting a release, in the order the tooling and the tag history assume:
 
 1. bump `__version__` in `jocky/__init__.py`;
 2. run the suite (`./venv/bin/python -m pytest tests/ -q`);
 3. regenerate the evidence bundle (`./venv/bin/python -m jocky evidence --iterations 1000 --out evidence`) and re-read `evidence/report.md` — the numbers on the site are these
    numbers;
-4. write the changelog entry in `site/content/project/changelog.md` (newest first,
-   `Added` / `Changed` / `Fixed` / `Security`) and regenerate the site;
-5. commit, then create an annotated tag `vX.Y.Z` with a one-line summary and push the
-   tag; the tag is what `project/releases.md` and the version banner read.
-
-Steps 1–4 are the part you can verify locally; 5 is the maintainer's act, and nothing in
-the build depends on it until the tag exists.
+4. write the release section in `CHANGELOG.md` and in
+   `site/content/project/changelog.md`, then regenerate the site (`cd site && npm run gen`);
+5. commit with the version in the subject, create the annotated tag `vX.Y.Z`, and push
+   both — the tag is what `project/releases.md` and the version banner read.

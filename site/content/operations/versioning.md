@@ -210,10 +210,10 @@ and users experience them as one thing.
   produces is MINOR even if the diff is one line, because downstream reports
   change.
 
-`1.0.0` was the first release of the runtime; `1.1.0` added the security
-hardening, the integrity tooling and the release tooling; `1.2.0` added the
-Landlock sandbox and this documentation site. The package version says nothing
-about the other two contracts, on purpose.
+`1.0.0` was the first release of the runtime and was never tagged — the tag list
+starts at `v1.1.0`, which added the security hardening, the integrity tooling and
+the release tooling; `v1.2.0` added the Landlock sandbox and this documentation
+site. The package version says nothing about the other two contracts, on purpose.
 
 ### Artifact format
 
