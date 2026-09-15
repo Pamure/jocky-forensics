@@ -16,8 +16,7 @@ a target host. Everything runs on Linux and reads `/proc`, `/proc/net` and `/sys
 | `jocky/exec/`, `jocky/agent/` | memfd primitives and fileless execution; TLS management server (sqlite job/finding store) and polling agent |
 | `jocky/runner.py`, `jocky/cli.py` | the execution entry point (source, artifact, fileless) and the `jocky <command>` surface |
 | `jocky/evidence.py`, `jocky/diagnostics.py`, `jocky/scaffold.py`, `jocky/case.py`, `jocky/canon.py` | proof harness, `doctor`, `init`, and case-directory integrity |
-| `scripts/`, `jocky/examples/` | the bundled JOCKY scripts (`jocky examples` lists them) |
-| `tests/`, `evidence/` | the behavioural suite and the generated proof bundle (raw logs + `report.md`) |
+| `scripts/`, `jocky/examples/`, `tests/`, `evidence/` | bundled JOCKY scripts; the behavioural suite; the generated proof bundle (raw logs + `report.md`) |
 | `site/`, `docs/DESIGN.md`, `research/` | the documentation site; the design notes (language spec, artifact format, telemetry matrix); the background research |
 
 ## The development loop
@@ -59,15 +58,13 @@ $ ./venv/bin/python -m jocky exec /tmp/smoke.jky.build
 # 1 finding(s), 0 error(s), 467 steps, 20.1 ms
 ```
 
-The artifact size and digest differ on every build — that is the encoder doing its job,
-not a regression. Findings go to stdout as one JSON object per line, with a one-line
-summary after them; `--json` (accepted by `exec`, `fileless` and `memfd`) prints the
-whole run result instead, which is what you want when checking `errors`, `steps` or
-`truncated`.
+The artifact size and digest differ on every build — that is the encoder doing its job, not
+a regression. Findings go to stdout as one JSON object per line; `exec` adds a one-line
+summary, `run` does not, and `--json` prints the whole run result instead, which is what you
+want when checking `errors`, `steps` or `truncated`.
 
-`jocky disasm <script>` shows the bytecode the compiler produced — the fastest way to
-see whether a language change reached the compiler. Compile something small you can
-reason about rather than a full script:
+`jocky disasm <script>` shows the bytecode the compiler produced, which is the fastest way
+to see whether a language change reached the compiler:
 
 ```text
 $ cat /tmp/snippet.jky
