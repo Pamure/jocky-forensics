@@ -81,6 +81,9 @@ three language-consistency fixes the corpus exposed.
 | **Expectation files instead of inline values** — rustc keeps `.stderr` goldens with `--bless`; JOCKY's corpus asserts inline, so a deliberate change rewrites the test by hand | snapshot brittleness is a known failure mode (blind blessing) | M | `cap-language-testing.md` |
 | **Grammar-based fuzzing of the parser/VM** — wasm-smith's always-valid generator is the model; JOCKY has no fuzzing at all | the lexer's `KeyError` on a trailing `0` was found by reading, not by a fuzzer | M | `cap-language-testing.md` |
 | **Mutation testing** — mutants proxy real faults at equal coverage; diff-scoped mutation keeps it affordable | nothing measures whether the suite *would* catch a change | L | `cap-language-testing.md` |
+| **Merged `/proc` snapshot per run** — `det.triage()` performs four full `list_processes()` walks plus two fd sweeps; a shared snapshot measures ~2× on repeated passes | measured 4,696–5,257 syscalls per triage, 14.2 ms per walk on 118 pids | M | `cap-performance-envelope.md` |
+| **Byte-level reads** — `fs.read` decodes with `errors="replace"` (46 MB/s on binary vs 2.2 GB/s raw) and has no offset, so binary scanning is impossible; `fs.read_bytes` + an offset would fix both | the language has no byte type today | S | `cap-forensic-features.md`, `cap-performance-envelope.md` |
+| **Resource watchdog for collection** — osquery enforces duration/CPU/memory caps by default (0.8/1/3 s thresholds, 10% CPU, 12 s, 200 MB) and Velociraptor caps rows and ops per second; JOCKY has step and wall-clock budgets but no row, byte or CPU ceiling | a runaway `fs.scan` can still exhaust memory "within budget" | M | `cap-performance-envelope.md` |
 
 Closest external analogue: **Velociraptor VQL** — a host-native query language
 with versioned artifacts served from a central server; JOCKY's namespaces mirror

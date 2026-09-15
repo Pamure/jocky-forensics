@@ -136,6 +136,25 @@ def test_expect_throws_can_require_a_message(tmp_path):
     assert "wrong message" in detail and "does not contain" in detail, detail
 
 
+def test_cli_streams_ndjson(tmp_path):
+    """--ndjson keeps memory flat: one object per line, summary last."""
+    script = tmp_path / "many.jky"
+    script.write_text('for n in range(50) { emit {"kind": "row", "n": n} }\n', encoding="utf-8")
+    finished = subprocess.run(
+        [sys.executable, "-m", "jocky", "run", str(script), "--ndjson"],
+        cwd=str(REPO), capture_output=True, text=True, timeout=120)
+    assert finished.returncode == 0, finished.stderr
+    lines = [json.loads(line) for line in finished.stdout.splitlines() if line.strip()]
+    assert len(lines) == 51, "50 findings plus the summary line"
+    assert [line["kind"] for line in lines[:3]] == ["finding", "finding", "finding"]
+    assert lines[0]["value"] == {"kind": "row", "n": 0}
+    summary = lines[-1]
+    assert summary["kind"] == "summary"
+    assert summary["findings"] == 50
+    assert summary["truncated"] is False
+    assert "permissions" in summary and "denials" in summary
+
+
 def test_missing_path_is_reported_by_the_cli():
     finished = _run(["/definitely/not/a/directory"])
     assert finished.returncode == 2

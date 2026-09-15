@@ -12,11 +12,25 @@ compatibility policy (see `docs/DESIGN.md` and the versioning page):
 
 ## [Unreleased]
 
+### Added
+- `--ndjson` on `run` and `exec`: findings stream as one JSON object per line with
+  a summary line last. The `--json` path materialises every finding into a single
+  document (a measured 300k-finding run costs ~400 MB and one giant `json.dumps`);
+  NDJSON keeps memory flat.
+
 ### Changed
 - `expect_throws(closure, label, substring)` can require the error text to
   contain `substring`: "something raised" is a weak assertion when the
   interesting part is *which* error came back. A mismatch reports the actual
   message (`raised 'division by zero', which does not contain 'modulo by zero'`).
+
+### Fixed
+- **A single long native could overrun the wall-clock budget silently.** The
+  deadline was sampled only between VM steps, so `ioc.match(…, "/usr", 4000)`
+  ran 380 ms under `--wall-ms 20` and still reported `truncated: false`. The
+  deadline is now also checked when a native returns, so the overrun is reported
+  as an uncatchable limit (measured: the same call now reports
+  `truncated: true` at 97 ms instead of running to completion).
 
 ## [1.4.0] — 2026-09-15
 

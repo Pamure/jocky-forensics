@@ -314,6 +314,13 @@ def test_wall_clock_budget_is_enforced():
     assert result.truncated
 
 
+def test_a_long_native_cannot_silently_overrun_the_budget():
+    """Regression: the deadline was sampled only between VM steps, so one long
+    native ran past the budget and still reported truncated: false."""
+    result = run('emit ioc.match({"names": ["nothing"]}, "/usr", 4000)', wall_clock_ms=5)
+    assert result.truncated, "a native that outlives the budget must be reported"
+
+
 # ------------------------------------------------------- front-end regressions
 def test_trailing_zero_literal_parses():
     """Regression: `0` at end of input crashed the lexer with a KeyError."""

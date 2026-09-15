@@ -138,7 +138,7 @@ usage: jocky examples [-h] [--json]
 ## exec
 
 ```text
-usage: jocky exec [-h] [--json] [--inspect] [--wall-ms WALL_MS]
+usage: jocky exec [-h] [--json] [--ndjson] [--inspect] [--wall-ms WALL_MS]
                   [--allow ALLOW] [--sandbox {off,vm,ro,strict}]
                   artifact
 ```
@@ -147,6 +147,7 @@ usage: jocky exec [-h] [--json] [--inspect] [--wall-ms WALL_MS]
 |---|---|
 | `artifact` |  |
 | `--json` |  |
+| `--ndjson` | stream findings as one JSON object per line (flat memory) |
 | `--inspect` |  |
 | `--wall-ms` |  (default: `60000.0`) |
 | `--allow` | grant privileged capabilities (comma list: syscall,exec) |
@@ -214,8 +215,9 @@ usage: jocky memfd [-h] [--json] [--wall-ms WALL_MS] [--timeout TIMEOUT]
 ## run
 
 ```text
-usage: jocky run [-h] [--json] [--wall-ms WALL_MS] [--max-steps MAX_STEPS]
-                 [--allow ALLOW] [--sandbox {off,vm,ro,strict}]
+usage: jocky run [-h] [--json] [--ndjson] [--wall-ms WALL_MS]
+                 [--max-steps MAX_STEPS] [--allow ALLOW]
+                 [--sandbox {off,vm,ro,strict}]
                  script
 ```
 
@@ -223,6 +225,7 @@ usage: jocky run [-h] [--json] [--wall-ms WALL_MS] [--max-steps MAX_STEPS]
 |---|---|
 | `script` |  |
 | `--json` |  |
+| `--ndjson` | stream findings as one JSON object per line (flat memory) |
 | `--wall-ms` |  (default: `60000.0`) |
 | `--max-steps` |  (default: `50000000`) |
 | `--allow` | grant privileged capabilities (comma list: syscall,exec) |

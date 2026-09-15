@@ -298,6 +298,11 @@ class VM:
         if self.frames:
             self.frames[-1].stack.append(value)
 
+    def _check_deadline(self) -> None:
+        """Raise if the wall-clock budget has already elapsed (uncatchable)."""
+        if self._deadline is not None and time.perf_counter() > self._deadline:
+            raise JockyLimitError("wall-clock budget exceeded")
+
     def call_value(self, fn: Any, args: List[Any]) -> Any:
         """Call a script function or native from host code.
 
@@ -602,6 +607,12 @@ class VM:
                     f"{callee.name}() expects at most {callee.max_args} argument(s), got {len(args)}"
                 )
             frame.stack.append(callee(self, args))
+            # A native can run for a long time (a filesystem scan, a socket
+            # correlation). The interpreter only samples the deadline between
+            # instructions, so one long call used to overrun the budget silently
+            # and still report `truncated: false`. Checking here makes that
+            # overrun honest.
+            self._check_deadline()
             return
         if isinstance(callee, JFn):
             proto = callee.proto

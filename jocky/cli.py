@@ -55,6 +55,37 @@ def _print_findings(findings: Iterable[Any]) -> None:
               if isinstance(plain, (dict, list)) else plain)
 
 
+def _print_ndjson(result: Any) -> None:
+    """Stream a run as one JSON object per line.
+
+    The ``--json`` path materialises every finding into a single document: a
+    measured 300k-finding run costs ~400 MB and one giant ``json.dumps``. NDJSON
+    keeps memory flat and is line-oriented, so a reader can process findings as
+    they arrive.
+    """
+    for finding in result.findings:
+        print(json.dumps({"kind": "finding", "value": to_plain(finding)},
+                         ensure_ascii=False, default=str))
+    for line in result.output:
+        print(json.dumps({"kind": "output", "value": line}, ensure_ascii=False))
+    for error in result.errors:
+        print(json.dumps({"kind": "error", "value": error}, ensure_ascii=False))
+    for check in result.checks:
+        print(json.dumps({"kind": "check", **check}, ensure_ascii=False, default=str))
+    print(json.dumps({
+        "kind": "summary",
+        "findings": len(result.findings),
+        "errors": len(result.errors),
+        "checks": len(result.checks),
+        "denials": result.denials,
+        "permissions": result.permissions,
+        "steps": result.steps,
+        "native_calls": result.native_calls,
+        "duration_ms": round(result.duration_ms, 3),
+        "truncated": result.truncated,
+    }, ensure_ascii=False, default=str))
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     source = _read(args.script)
     try:
@@ -65,7 +96,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     result = runner.run_source(source, wall_clock_ms=args.wall_ms,
                                max_steps=args.max_steps, ctx=ctx,
                                sandbox=args.sandbox)
-    if args.json:
+    if args.ndjson:
+        _print_ndjson(result)
+    elif args.json:
         _emit(result.to_dict(), True)
     else:
         _print_findings(result.findings)
@@ -89,8 +122,10 @@ def cmd_exec(args: argparse.Namespace) -> int:
         return 2
     result = runner.run_artifact(artifact, wall_clock_ms=args.wall_ms, ctx=ctx,
                                  sandbox=args.sandbox)
-    _emit(result.to_dict(), True) if args.json else None
-    if not args.json:
+    _emit(result.to_dict(), True) if (args.json and not args.ndjson) else None
+    if args.ndjson:
+        _print_ndjson(result)
+    elif not args.json:
         _print_findings(result.findings)
         print(f"# {runner.result_summary(result)}", file=sys.stderr)
     return 0 if not result.errors else 1
@@ -335,6 +370,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="execute a JOCKY script")
     p_run.add_argument("script")
     p_run.add_argument("--json", action="store_true")
+    p_run.add_argument("--ndjson", action="store_true",
+                       help="stream findings as one JSON object per line (flat memory)")
     p_run.add_argument("--wall-ms", type=float, default=runner.DEFAULT_WALL_MS)
     p_run.add_argument("--max-steps", type=int, default=runner.DEFAULT_MAX_STEPS)
     p_run.add_argument("--allow", default=None,
@@ -346,6 +383,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_exec = sub.add_parser("exec", help="execute a compiled artifact")
     p_exec.add_argument("artifact")
     p_exec.add_argument("--json", action="store_true")
+    p_exec.add_argument("--ndjson", action="store_true",
+                        help="stream findings as one JSON object per line (flat memory)")
     p_exec.add_argument("--inspect", action="store_true")
     p_exec.add_argument("--wall-ms", type=float, default=runner.DEFAULT_WALL_MS)
     p_exec.add_argument("--allow", default=None,

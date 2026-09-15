@@ -13,6 +13,12 @@ tagged commit, and `jocky --version` reports the same string.
 | `v1.1.0` | 2026-09-15 | `a34a5f6` | v1.1.0 — forensic runtime hardening, integrity and installation tooling |
 | `v1.2.0` | 2026-09-15 | `fb59c2d` | v1.2.0 — Landlock sandbox, documentation site, release versioning |
 
+## Unreleased
+
+Commits after the latest tag:
+
+- `6830c25 test: expect_throws can require an error message; roadmap from the testing study`
+
 ## Cutting a release
 
 ```bash
