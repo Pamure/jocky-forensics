@@ -35,9 +35,14 @@ python3 -m venv venv
 ```
 
 ```text
-Successfully installed jocky-forensics-1.2.0
-jocky 1.2.0
+Successfully installed jocky-forensics-1.3.0
+jocky 1.3.0
 ```
+
+Version strings quoted on this page are what the release printed **at the time of
+writing** (1.3.0); [Versioning & releases](/docs/project/releases) is the
+authoritative list, and `jocky --version` is the authoritative answer for the
+build in front of you.
 
 The editable install (`-e`) means edits to `jocky/*.py` take effect on the next
 command with no reinstall, which is what you want while writing scripts.
@@ -54,30 +59,29 @@ python3 -m venv /tmp/jky-venv
 ```text
 Successfully built jocky-forensics
 Installing collected packages: jocky-forensics
-Successfully installed jocky-forensics-1.2.0
+Successfully installed jocky-forensics-1.3.0
 ```
 
-`pip install .` also works into a system or user environment, but a virtual
-environment keeps the console script isolated from other tooling.
+`pip install .` also works into a system or user environment; a virtual
+environment just keeps the console script isolated.
 
 ## Install with pipx
 
-pipx puts `jocky` on your `PATH` in its own environment, which suits an analyst
-workstation that is not a development checkout:
+pipx puts `jocky` on your `PATH` in its own environment, which suits a workstation
+that is not a development checkout:
 
 ```bash
 pipx install .
 ```
 
 ```text
-  installed package jocky-forensics 1.2.0, installed using Python 3.12.3
+  installed package jocky-forensics 1.3.0, installed using Python 3.12.3
   These apps are now globally available
     - jocky
 ```
 
-The run quoted here used `PIPX_HOME`/`PIPX_BIN_DIR` overrides so the
-documentation host's real pipx environment was untouched; with the defaults the
-script lands in `~/.local/bin`.
+The run quoted here used `PIPX_HOME`/`PIPX_BIN_DIR` overrides so the host's
+real pipx environment was untouched; by default the script lands in `~/.local/bin`.
 
 ## Docker
 
@@ -89,11 +93,10 @@ docker run --rm -v "$PWD/case:/case" jocky init /case
 ```
 
 The image is `python:3.12-slim` plus `openssl` and `ca-certificates`, and
-nothing else. `procps` is deliberately **not** installed, so the image contains
-no `ps`, `ss` or `lsof` — JOCKY reads `/proc` itself, and a container without
-those tools proves the claim at run time rather than asserting it. The image
-runs as the unprivileged user `analyst` (uid 10001) with
-`PYTHONDONTWRITEBYTECODE=1`, and its entrypoint is the `jocky` console script.
+nothing else: `procps` is deliberately **not** installed, so it contains no
+`ps`, `ss` or `lsof`, and a container without those tools proves the
+no-external-binaries claim at run time rather than asserting it. It runs as the
+unprivileged user `analyst` (uid 10001) with `PYTHONDONTWRITEBYTECODE=1`.
 
 Docker is not installed on the host that produced this page, so the image was
 not built here; the statements above are read from the `Dockerfile` in the
@@ -108,20 +111,13 @@ python3 -m jocky --version
 ```
 
 ```text
-jocky 1.2.0
+jocky 1.3.0
 ```
 
 There is no console script in this mode, so every command is
-`python3 -m jocky <command>`. It only works while the repository root is on
-`sys.path`; from anywhere else the import fails:
-
-```bash
-cd /tmp && python3 -m jocky --version
-```
-
-```text
-/usr/bin/python3: No module named jocky
-```
+`python3 -m jocky <command>`. It works only while the repository root is on
+`sys.path`; from `/tmp` the same command fails with
+`/usr/bin/python3: No module named jocky`.
 
 ## The console script
 
@@ -136,8 +132,8 @@ Full flags for each command are in the [CLI reference](/docs/operations/cli).
 
 ## Verify the installation
 
-These four commands are the whole smoke test, and they are the same sequence
-this page was written from:
+These four commands are the whole smoke test, and the sequence this page was
+written from:
 
 ```bash
 jocky --version
@@ -147,7 +143,7 @@ jocky run /tmp/case/scripts/triage.jky
 ```
 
 ```text
-jocky 1.2.0
+jocky 1.3.0
 ```
 
 ```text
@@ -189,7 +185,7 @@ RUNTIME
 
 PACKAGING
   [ok  ] working directory writable   /home/mjonir/f/sih2026/sih148
-  [ok  ] jocky package importable     version 1.2.0
+  [ok  ] jocky package importable     version 1.3.0
 
 COLLECTION
   [ok  ] procfs mounted               /proc is readable
@@ -212,7 +208,7 @@ FILELESS
   [ok  ] memfd_create                 available
   [ok  ] fileless end-to-end          exe=/memfd:python3 (deleted) memfd_maps=4
 
-ready: 12 ok, 1 warning(s), 0 failure(s) in 228 ms
+ready: 12 ok, 1 warning(s), 0 failure(s) in 169 ms
 ```
 
 What the groups mean:
@@ -240,13 +236,9 @@ What the groups mean:
   of memfd-backed mappings the runner observed.
 
 Exit status is `0` when there are no failures (warnings are allowed) and `1`
-when any check fails, so it can gate a deployment script. Two flags help in
-scripts and on slow hosts:
-
-```bash
-jocky doctor --json     # machine-readable report: ok, counts, host, checks[]
-jocky doctor --quick    # skip the end-to-end fileless probe
-```
+when any check fails, so it can gate a deployment script. `jocky doctor --json`
+emits the machine-readable report (`ok`, `counts`, `host`, `checks[]`) and
+`jocky doctor --quick` skips the end-to-end fileless probe.
 
 `--quick` on the same host prints `ready: 10 ok, 1 warning(s), 0 failure(s) in 3 ms`
 — the fileless probe is the expensive part.
@@ -280,17 +272,11 @@ COLLECTION
   [FAIL] procfs mounted               /proc missing
           -> collection requires Linux procfs; run inside a Linux host or container with /proc mounted
   [warn] network tables               /proc/net not readable
-          -> socket inventory will be empty; check container networking
   [ok  ] effective uid                0 (root)
-
-...
 FILELESS
-  [ok  ] memfd_create                 available
   [FAIL] /proc/self/fd execution      not available
-          -> fileless mode executes through /proc/self/fd
   [FAIL] fileless end-to-end          payload failed
           -> check that executing files from /proc/self/fd is permitted (some hardening policies block it)
-
 NOT ready: 10 ok, 1 warning(s), 3 failure(s) in 31 ms
 ```
 
@@ -332,7 +318,6 @@ finding in the list below it.
 A "clean" triage from an unprivileged account is therefore a statement about
 the processes you own, not about the host. The `scanned.coverage` field in the
 `det.triage()` report carries the same number for scripts; see
-[Detection checks](/docs/runtime/detection) and
 [Honest limits](/docs/security/limits).
 
 ## Upgrading and uninstalling
@@ -345,10 +330,10 @@ Upgrading an editable install re-reads the metadata and reinstalls the package:
 
 ```text
   Attempting uninstall: jocky-forensics
-    Found existing installation: jocky-forensics 1.1.0
-    Uninstalling jocky-forensics-1.1.0:
-      Successfully uninstalled jocky-forensics-1.1.0
-Successfully installed jocky-forensics-1.2.0
+    Found existing installation: jocky-forensics 1.2.0
+    Uninstalling jocky-forensics-1.2.0:
+      Successfully uninstalled jocky-forensics-1.2.0
+Successfully installed jocky-forensics-1.3.0
 ```
 
 For a pip install, `pip install --upgrade .`; for pipx, `pipx reinstall
@@ -361,36 +346,47 @@ Uninstalling removes the console script along with the package:
 ```
 
 ```text
-Found existing installation: jocky-forensics 1.2.0
-Uninstalling jocky-forensics-1.2.0:
-  Successfully uninstalled jocky-forensics-1.2.0
+Found existing installation: jocky-forensics 1.3.0
+Uninstalling jocky-forensics-1.3.0:
+  Successfully uninstalled jocky-forensics-1.3.0
 ```
 
-After that `jocky` is no longer on `PATH`. Case directories and evidence logs
-are plain files under the directories you chose, so they are unaffected.
+After that `jocky` is no longer on `PATH`; case directories and evidence logs are
+plain files under the directories you chose and are unaffected.
 
 ## Building the documentation site
 
-Two build paths exist for this site, both from the repository root. The primary
-one is the SvelteKit build that `site/package.json` defines:
-
-```bash
-cd site && npm run build
-```
-
-It needs Node and npm. The zero-dependency alternative renders the same
-`site/content/**/*.md` files, navigation manifest and stylesheet into plain
-HTML with the standard library only — the offline path for an air-gapped
-reviewer:
+Two build paths exist, both from the repository root: `cd site && npm run build`
+(the SvelteKit build that `site/package.json` defines, needing Node and npm) and
 
 ```bash
 ./venv/bin/python site/tools/build_static.py --out site/dist
 ```
 
-The static builder owns nothing interactive: search runs client-side against
-`assets/search-index.json` and there is no client-side router. It validates the
-navigation manifest and prints a warning for every page listed in the manifest
-that has no content file yet, which is how this page was checked.
+which renders the same `site/content/**/*.md`, navigation manifest and
+stylesheet into plain HTML with the standard library only — the offline path for
+an air-gapped reviewer. The static builder validates the navigation manifest and
+warns about every listed page that has no content file yet; it is how this page
+was checked.
+
+## Management server and agents
+
+`jocky serve` and `jocky agent` are installed with everything else, but they need
+a token, and passing it as an argument is the wrong default:
+
+```text
+  --token TOKEN         management token (or set JOCKY_TOKEN / --token-file)
+  --token-file TOKEN_FILE
+                        file containing the token — preferred, because argv is
+                        world-readable in /proc/<pid>/cmdline
+```
+
+Both commands accept `--token-file`, `--token` or `JOCKY_TOKEN`; the file
+variant exists because any local process can read another process's
+`/proc/<pid>/cmdline`. The agent keeps its state directory owner-only (`0700`,
+with `agent.json` and `journal.jsonl` at `0600`), so enrolled credentials and the
+job journal are not world-readable either. See
+[Server & agents](/docs/operations/management) for the protocol.
 
 ## Next steps
 

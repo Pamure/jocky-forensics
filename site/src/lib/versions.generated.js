@@ -3,9 +3,16 @@ export default [
   {
     "version": "1.3.0",
     "date": "unreleased",
-    "commit": "c0b862a",
+    "commit": "df0fd63",
     "subject": "working tree",
     "current": true
+  },
+  {
+    "version": "v1.3.0",
+    "date": "2026-09-15",
+    "commit": "73f56c5",
+    "subject": "v1.3.0 \u2014 agent state hardening, serve --token-file, corrected syscall name",
+    "current": false
   },
   {
     "version": "docs-2026-09-15",
