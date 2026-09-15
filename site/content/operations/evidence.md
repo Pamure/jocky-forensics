@@ -231,7 +231,8 @@ than as a silent pass.
 
 ## Measured results
 
-From `evidence/report.md` (full mode, `stormbreaker`, kernel
+From `evidence/report.md` — the committed bundle is a 1.2.0-era run, generated
+`2026-09-15 19:14:23` (full mode, `stormbreaker`, kernel
 `6.6.87.2-microsoft-standard-WSL2`, Python 3.12.3):
 
 | Measurement | Result | Backing log |

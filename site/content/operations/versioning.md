@@ -47,19 +47,19 @@ $ git rev-parse --short v1.3.0^{commit}
 df0fd63
 ```
 
-Quoting `v1.2.0` rather than `HEAD` in the log command keeps the output stable:
+Quoting `v1.3.0` rather than `HEAD` in the log command keeps the output stable:
 tags do not move, `HEAD` does. `git describe --tags` is the command to run
 against the working tree when you want "tag plus commits since"; the number in
 the middle changes with every commit, so record it, not this page.
 
-The tags are annotated, so `git cat-file -t v1.2.0` answers `tag`, not `commit`.
+The tags are annotated, so `git cat-file -t v1.3.0` answers `tag`, not `commit`.
 The tag *object* and the commit it points at are different hashes — use the
 dereference form when you need the commit, for example to reproduce an
 investigation from source:
 
 ```bash
-$ git rev-parse v1.2.0^{commit}
-fb1f261830c80e8a608765cfc169527899872c2f
+$ git rev-parse v1.3.0^{commit}
+df0fd63d7ce8b7c264ee2712be0694b3c8bd5c70
 ```
 
 The documentation site is published from the tagged commit, so the version
@@ -111,14 +111,28 @@ when a tag or the package version does.
 
 ```json
 {
-  "current": "1.2.0",
+  "current": "1.3.0",
   "versions": [
     {
-      "version": "1.2.0",
+      "version": "1.3.0",
       "date": "unreleased",
-      "commit": "8ea8347",
+      "commit": "ed50df5",
       "subject": "working tree",
       "current": true
+    },
+    {
+      "version": "v1.3.0",
+      "date": "2026-09-15",
+      "commit": "73f56c5",
+      "subject": "v1.3.0 — agent state hardening, serve --token-file, corrected syscall name",
+      "current": false
+    },
+    {
+      "version": "docs-2026-09-15",
+      "date": "2026-09-15",
+      "commit": "a76df4c",
+      "subject": "Documentation site complete: 24 pages, both build paths verified",
+      "current": false
     },
     {
       "version": "v1.1.0",
@@ -141,23 +155,23 @@ when a tag or the package version does.
 Three things in that file are worth understanding before you trust it:
 
 * **The `current` entry is synthetic.** The generator compares the package
-  version against the newest tag *as strings*; the package says `1.2.0` and the
-  tag says `v1.2.0`, so they never match and a `{"date": "unreleased",
+  version against the newest tag *as strings*; the package says `1.3.0` and the
+  tag says `v1.3.0`, so they never match and a `{"date": "unreleased",
   "subject": "working tree"}` entry is always prepended. It is the version the
   working tree declares, regardless of tagging.
-* **`unreleased_commits` can be phantom.** The generator sorts tags by creation
-  date and treats the first row as latest. Both tags in this repository were
-  created in the same second, so the sort falls back to refname order and
-  `v1.1.0` comes first. The "unreleased" diff is therefore taken against
-  `v1.1.0`, and the generated `/docs/project/releases` page lists commits that are
-  already inside `v1.2.0` — including `fb1f261`, the commit `v1.2.0` itself points
-  at. Read the number as "commits after *some* tag", not as a release-blocking
-  count.
+* **That table lists every tag, not just releases.** `docs-2026-09-15` is a
+  documentation milestone, not a release, and it appears as a row because the
+  generator does not filter by name.
+* **`unreleased_commits` follows the newest tag by creation date.** With `v1.3.0`
+  created last that is correct — one commit on top of the tag. It counted wrongly
+  while two tags shared a creation second, because the sort then falls back to
+  refname order; treat the number as "commits after *some* tag" if you add tags in
+  a batch.
 * **The `Commit` column shows the tag object.** `%(objectname:short)` on an
-  annotated tag is the tag's own hash (`fb59c2d` above), not `fb1f261`, the
-  commit `git log` shows. Dereference with `v1.2.0^{commit}` to compare.
+  annotated tag is the tag's own hash (`73f56c5` above), not `df0fd63`, the commit
+  `git log` shows. Dereference with `v1.3.0^{commit}` to compare.
 
-The snapshots above were taken with the working tree at commit `8ea8347` on
+The snapshots above were taken with the working tree at commit `ed50df5` on
 `main`. The version, the tag rows and the file contents only change when a tag or
 the package version does; the synthetic entry's commit and the unreleased count
 move with every commit, which is why the generator — not this page — is the
@@ -171,7 +185,7 @@ hand edits there are lost on the next build.
 
 ## Release checklist
 
-This is the sequence the `v1.1.0` and `v1.2.0` tags were cut with, and the same
+This is the sequence the `v1.1.0`, `v1.2.0` and `v1.3.0` tags were cut with, and the same
 one the generator prints at the bottom of the releases page:
 
 ```bash
@@ -218,7 +232,8 @@ and users experience them as one thing.
 `1.0.0` was the first release of the runtime and was never tagged — the tag list
 starts at `v1.1.0`, which added the security hardening, the integrity tooling and
 the release tooling; `v1.2.0` added the Landlock sandbox and this documentation
-site. The package version says nothing about the other two contracts, on purpose.
+site; `v1.3.0` hardened agent state and gave `serve` a `--token-file`. The package
+version says nothing about the other two contracts, on purpose.
 
 ### Artifact format
 
@@ -257,15 +272,16 @@ package version changed. You can check that claim against the history rather tha
 trust it — the format constant is visible at every tag:
 
 ```bash
-$ for tag in v1.1.0 v1.2.0; do echo -n "$tag: "; git show $tag:jocky/poly/encoder.py | grep -m1 '^ARTIFACT_VERSION'; done
+$ for tag in v1.1.0 v1.2.0 v1.3.0; do echo -n "$tag: "; git show $tag:jocky/poly/encoder.py | grep -m1 '^ARTIFACT_VERSION'; done
 v1.1.0: ARTIFACT_VERSION = 1
 v1.2.0: ARTIFACT_VERSION = 1
+v1.3.0: ARTIFACT_VERSION = 1
 $ git show v1.1.0:jocky/poly/wire.py | grep -m1 '^WIRE_VERSION'
 WIRE_VERSION = 1
 ```
 
-So the artifact format did not move between 1.1.0 and 1.2.0, and a payload built
-by either decodes under the other. A format change is a breaking change for every
+So the artifact format did not move between 1.1.0 and 1.3.0, and a payload built
+by any of them decodes under the others. A format change is a breaking change for every
 artifact built by an older release, so it is announced in the release notes and
 expects at least a MINOR bump of the package version.
 
@@ -295,20 +311,20 @@ the package version, because `pyproject.toml` reads it dynamically:
 
 ```bash
 $ ./venv/bin/python -m pip wheel --no-deps -w /tmp/wheel .
-  Created wheel for jocky-forensics: filename=jocky_forensics-1.2.0-py3-none-any.whl size=130008 sha256=eb0e447fd033f14987c3d16dc55d88d81b6d12dbf1e2da94c6c4d07aada9baf0
+  Created wheel for jocky-forensics: filename=jocky_forensics-1.3.0-py3-none-any.whl size=130580 sha256=df3c6cd89f61395b5ffbd6b1da02720a7b68e422f4f4e48cd26c087d383f9220
 Successfully built jocky-forensics
 $ ls /tmp/wheel
-jocky_forensics-1.2.0-py3-none-any.whl
-$ ./venv/bin/python -m pip install --dry-run --no-index --find-links=/tmp/wheel "jocky-forensics==1.2.0"
+jocky_forensics-1.3.0-py3-none-any.whl
+$ ./venv/bin/python -m pip install --dry-run --no-index --no-deps --ignore-installed --find-links=/tmp/wheel "jocky-forensics==1.3.0"
 Looking in links: /tmp/wheel
-Processing /tmp/wheel/jocky_forensics-1.2.0-py3-none-any.whl
-Would install jocky-forensics-1.2.0
+Processing /tmp/wheel/jocky_forensics-1.3.0-py3-none-any.whl
+Would install jocky-forensics-1.3.0
 ```
 
 (pip also prints the ephemeral cache directory it staged the wheel in; that path
 is noise. The sha256 above is of the wheel this tree produced.)
 
-The pin is exact and enforced by pip's resolver: `==1.2.0` matches the 1.2.0
+The pin is exact and enforced by pip's resolver: `==1.3.0` matches the 1.3.0
 wheel and nothing else. There is no published index for this project yet
 (`project.urls` in `pyproject.toml` still carries placeholder URLs), so the
 wheel is the artefact you host and pin against — an internal index or a
@@ -326,13 +342,13 @@ $ git show v1.1.0:jocky/__init__.py | sed -n '13p'
 __version__ = "1.1.0"
 ```
 
-Building the pinned source is then `git checkout v1.2.0` followed by installing
+Building the pinned source is then `git checkout v1.3.0` followed by installing
 that tree — the identity of the tag, its commit and the version string inside it
 are the three things to record together.
 
 **A container image.** The `Dockerfile` installs the tree it is given
 (`RUN pip install --no-cache-dir .`), so an image's version is the checkout's
-version; building is `docker build -t jocky:1.2.0 .`.
+version; building is `docker build -t jocky:1.3.0 .`.
 
 This image build is **not verified in this environment** — there is no Docker
 daemon available here. What *was* checked is the two things that previously
@@ -343,16 +359,15 @@ Because the dependency set is empty and `procps` is deliberately absent from the
 image, an image that behaves differently from the host would be obvious
 immediately.
 
-**Which string to cite.** One caveat about a development venv: an editable
-install records the version it was installed at, so `pip show jocky-forensics`
-can lag the source — it reported `1.1.0` while the tree declared `1.2.0`. The
+**Which string to cite.** An editable install records the version it was installed
+at, so `pip show jocky-forensics` can lag the source after a version bump; the
 authoritative answers come from the package and the tag:
 
 ```bash
 $ ./venv/bin/jocky --version
 jocky 1.3.0
-$ git rev-parse --short v1.2.0^{commit}
-fb1f261
+$ git rev-parse --short v1.3.0^{commit}
+df0fd63
 ```
 
 For a report, quote the tag; for a machine, quote the wheel filename.
