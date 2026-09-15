@@ -138,7 +138,7 @@ usage: jocky examples [-h] [--json]
 
 ```text
 usage: jocky exec [-h] [--json] [--inspect] [--wall-ms WALL_MS]
-                  [--allow ALLOW]
+                  [--allow ALLOW] [--sandbox {off,vm,ro,strict}]
                   artifact
 ```
 
@@ -149,6 +149,7 @@ usage: jocky exec [-h] [--json] [--inspect] [--wall-ms WALL_MS]
 | `--inspect` |  |
 | `--wall-ms` |  (default: `60000.0`) |
 | `--allow` | grant privileged capabilities (comma list: syscall,exec) |
+| `--sandbox` | Landlock confinement level for the artifact (default: off) (default: `off`) |
 
 
 ## fileless
@@ -213,7 +214,7 @@ usage: jocky memfd [-h] [--json] [--wall-ms WALL_MS] [--timeout TIMEOUT]
 
 ```text
 usage: jocky run [-h] [--json] [--wall-ms WALL_MS] [--max-steps MAX_STEPS]
-                 [--allow ALLOW]
+                 [--allow ALLOW] [--sandbox {off,vm,ro,strict}]
                  script
 ```
 
@@ -224,6 +225,7 @@ usage: jocky run [-h] [--json] [--wall-ms WALL_MS] [--max-steps MAX_STEPS]
 | `--wall-ms` |  (default: `60000.0`) |
 | `--max-steps` |  (default: `50000000`) |
 | `--allow` | grant privileged capabilities (comma list: syscall,exec) |
+| `--sandbox` | Landlock confinement level for the script (default: off) (default: `off`) |
 
 
 ## serve

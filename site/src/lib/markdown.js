@@ -39,12 +39,18 @@ const renderer = {
 		return `<a href="${href}"${titleAttr}${attrs}>${text}</a>`;
 	},
 	table(token) {
-		// wrap tables so wide evidence tables scroll instead of breaking layout
-		const header = `<thead>${this.parser.parseInline(token.header.map((cell) => `<th>${this.parser.parseInline(cell.tokens)}</th>`).join(''))}</thead>`;
+		// wrap tables so wide evidence tables scroll instead of breaking layout.
+		// parseInline() takes a token array — building the cells first and then
+		// parsing the concatenation would feed it strings and throw.
+		const header = `<thead><tr>${token.header
+			.map((cell) => `<th>${this.parser.parseInline(cell.tokens)}</th>`)
+			.join('')}</tr></thead>`;
 		const body = `<tbody>${token.rows
 			.map(
 				(row) =>
-					`<tr>${row.map((cell) => `<td>${this.parser.parseInline(cell.tokens)}</td>`).join('')}</tr>`
+					`<tr>${row
+						.map((cell) => `<td>${this.parser.parseInline(cell.tokens)}</td>`)
+						.join('')}</tr>`
 			)
 			.join('')}</tbody>`;
 		return `<div class="table-wrap"><table>${header}${body}</table></div>\n`;

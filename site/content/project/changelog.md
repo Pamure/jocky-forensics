@@ -1,28 +1,30 @@
 # Changelog
 
-Notable changes to JOCKY, in [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
-form. The version string lives in `jocky/__init__.py` — `pyproject.toml` reads it
-dynamically, `jocky --version` prints it, and the site builds its version banner from
-it plus `git tag`.
+Notable changes to JOCKY, newest first, in Keep a Changelog form: the working tree declares `1.2.0`; `1.0.0` was the initial runtime release.
+
+The version string lives in `jocky/__init__.py`: `pyproject.toml` reads it dynamically,
+`jocky --version` prints it, and the site builds its version banner from it and `git tag`.
 
 ```bash
 $ ./venv/bin/jocky --version
-jocky 1.1.0
+jocky 1.2.0
 ```
 
-The repository has no tags yet (`git tag` is empty; the site generator reports
-`tags=0`), so neither entry below carries a release date. Version numbers and the
-generated [releases page](/docs/project/releases) are explained in
+The repository has no tags yet (`git tag` is empty; the site generator reports `tags=0`),
+so neither entry below carries a release date, and an untagged bump to `1.1.0` that
+happened during the same development cycle is folded into the newer section rather than
+given a heading of its own. Version numbers and the generated
+[releases page](/docs/project/releases) are explained in
 [Versioning & releases](/docs/operations/versioning); what is planned next is in the
 [roadmap](/docs/project/roadmap).
 
-## [1.1.0]
+## [1.2.0]
 
-The version in the working tree. It closes the gaps a twenty-agent review found in
-the 1.0.0 runtime: privileged natives a script could use to kill processes, TLS
-verification that was off by default, unhashed evidence, non-deterministic builds,
-detection checks that missed memfd scripts, and a diagnostics/scaffolding story that
-made installation guesswork.
+The version in the working tree. It closes the gaps a twenty-agent review found in the
+1.0.0 runtime: privileged natives a script could use to kill processes, TLS verification
+that was off by default, unhashed evidence, non-deterministic builds, detection checks
+that missed memfd scripts, and a diagnostics/scaffolding story that made installation
+guesswork.
 
 ### Added
 

@@ -260,9 +260,8 @@ a nil iterable runs the body zero times
 
 A list is iterated **live** — appending during the loop extends the loop
 (above, the pushed `9` is visited). A map is snapshotted at loop entry, so the
-entry added inside the loop is not visited. Neither is a bug in the language
-so much as a fact to rely on: mutate a map while iterating it and you see the
-pre-loop contents.
+entry added inside the loop is not visited. The iterator holds the list itself,
+while a map iterator is built from a snapshot of its items taken at loop entry.
 
 ## Operators
 
@@ -312,7 +311,7 @@ Behaviour that is easy to get wrong:
 ## Truthiness
 
 `nil`, `false`, the numbers `0`/`0.0`, `""`, `[]` and `{}` are falsy;
-everything else is truthy — including `" "`, `[false]` and `{"k": nil}`.
+everything else is truthy — including `" "`, `["x"]` and `{"k": nil}`.
 
 ```jocky
 let values = [nil, false, "", [], {}, " ", ["x"], {"k": nil}, -1]
@@ -363,37 +362,13 @@ human line second
 ```
 
 Findings are emitted to the result, not to the terminal, so their position in
-the file does not affect where they appear. With `--json` you get the whole
-result, which is also where `steps`, `errors` and `truncated` live:
+the file does not affect where they appear. `jocky run --json` prints the whole
+result object — `findings`, `output`, `errors`, `steps`, `truncated`; see
+[Functions & errors](/docs/language/functions-errors) for a complete example.
 
-```bash
-jocky run output.jky --json
-```
-
-```text
-{
-  "findings": [
-    {
-      "kind": "fileless_process",
-      "pid": 42
-    },
-    "plain string finding"
-  ],
-  "output": [
-    "human line first",
-    "human line second"
-  ],
-  "errors": [],
-  "steps": 17,
-  "native_calls": 2,
-  "duration_ms": 0.075,
-  "truncated": false
-}
-```
-
-`json_encode`/`json_decode` convert between script values and JSON text; the
-`to_plain` conversion used for findings renders functions as
-`"<fn name>"` and maps with string keys.
+`json_encode`/`json_decode` convert between script values and JSON text.
+Findings are converted to plain host data first, which renders a function as a
+string such as `"<fn <lambda>>"` and stringifies map keys.
 
 ## Syntax rules that surprise people
 

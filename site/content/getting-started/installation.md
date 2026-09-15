@@ -173,8 +173,17 @@ next steps:
 ```
 
 `jocky init` copies the five bundled example scripts (list them with
-`jocky examples`) into a case directory and adds a `README.md` and a
-`.gitignore` that ignores `.jocky-server/`, `.jocky-agent/` and build outputs.
+`jocky examples`) into a case directory and adds a `README.md` plus a
+`.gitignore` for the artefacts a case produces:
+
+```text
+# jocky case directory
+.jocky-server/
+.jocky-agent/
+*.jky.build
+*.jky.artifact
+evidence/
+```
 
 ```text
 {"kind": "summary", "host": "stormbreaker", "kernel": "6.6.87.2-microsoft-standard-WSL2", "processes": 94, "sockets": 92, "counts": {"info": 1, "low": 32, "medium": 0, "high": 0, "critical": 0}, "duration_ms": 586.093}
@@ -247,7 +256,7 @@ jocky doctor --json     # machine-readable report: ok, counts, host, checks[]
 jocky doctor --quick    # skip the end-to-end fileless probe
 ```
 
-`--quick` on the same host prints `ready: 9 ok, 1 warning(s), 0 failure(s) in 1 ms`
+`--quick` on the same host prints `ready: 10 ok, 1 warning(s), 0 failure(s) in 3 ms`
 — the fileless probe is the expensive part.
 
 ## Troubleshooting
@@ -321,14 +330,12 @@ actually read. On the documentation host the coverage line is an `info`
 finding:
 
 ```text
-# info=1, low=32  (1328.1 ms, 95 processes)
+# info=1, low=32  (692.4 ms, 93 processes)
+[info    ] only 18% of processes were inspectable (76 of 93 unreadable)
 ```
 
-and `jocky triage` lists it among the findings:
-
-```text
-[info    ] only 17% of processes were inspectable (76 of 92 unreadable)
-```
+The first line is the summary `jocky triage` prints; the second is the coverage
+finding in the list below it.
 
 A "clean" triage from an unprivileged account is therefore a statement about
 the processes you own, not about the host. The `scanned.coverage` field in the
@@ -372,22 +379,26 @@ are plain files under the directories you chose, so they are unaffected.
 
 ## Building the documentation site
 
-Two build paths exist for this site, both from the repository root:
+Two build paths exist for this site, both from the repository root. The primary
+one is the SvelteKit build that `site/package.json` defines:
 
 ```bash
 cd site && npm run build
 ```
 
-uses SvelteKit (needs Node and npm), while
+It needs Node and npm. The zero-dependency alternative renders the same
+`site/content/**/*.md` files, navigation manifest and stylesheet into plain
+HTML with the standard library only — the offline path for an air-gapped
+reviewer:
 
 ```bash
 ./venv/bin/python site/tools/build_static.py --out site/dist
 ```
 
-renders the same `site/content/**/*.md` files, navigation manifest and
-stylesheet into plain HTML with the standard library only — the offline path
-for an air-gapped reviewer. The static builder validates the navigation
-manifest and warns when a listed page has no content file.
+The static builder owns nothing interactive: search runs client-side against
+`assets/search-index.json` and there is no client-side router. It validates the
+navigation manifest and prints a warning for every page listed in the manifest
+that has no content file yet, which is how this page was checked.
 
 ## Next steps
 

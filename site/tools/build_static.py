@@ -34,6 +34,93 @@ CSS = SITE_DIR / "src" / "app.css"
 
 LANGUAGES = {"jocky", "python", "bash", "sh", "json", "text", "console", ""}
 
+KEYWORDS = {
+    "jocky": {"let", "set", "if", "elif", "else", "while", "for", "in", "fn", "return",
+              "break", "continue", "emit", "try", "catch", "and", "or", "not",
+              "true", "false", "nil"},
+    "python": {"def", "class", "import", "from", "as", "if", "elif", "else", "while",
+               "for", "in", "return", "yield", "try", "except", "finally", "with",
+               "lambda", "not", "and", "or", "is", "None", "True", "False", "self",
+               "raise", "pass", "async", "await", "match", "case"},
+    "bash": {"if", "then", "else", "fi", "for", "while", "do", "done", "case", "esac",
+             "export", "local", "echo", "cd", "set", "sudo", "curl", "wget", "grep",
+             "sed", "awk", "cat", "chmod", "mkdir", "rm", "git", "npm", "python3",
+             "pip", "docker", "vercel", "tar", "kill", "find", "xargs"},
+}
+NAMESPACES = {"proc", "net", "fs", "sys", "det", "ioc", "mem"}
+TOKEN_CLASSES = {
+    "comment": "tok-comment", "string": "tok-string", "number": "tok-number",
+    "keyword": "tok-keyword", "namespace": "tok-builtin", "call": "tok-func",
+    "property": "tok-property", "punct": "tok-punct",
+}
+
+
+def _span(kind: str, text: str) -> str:
+    return f'<span class="{TOKEN_CLASSES[kind]}">{html.escape(text)}</span>'
+
+
+def highlight(code: str, language: str) -> str:
+    """Minimal, dependency-free highlighter mirroring `src/lib/highlight.js`.
+
+    Both build paths must produce the same-looking page, so the token vocabulary
+    lives here too: comments, strings, numbers, keywords, namespaces, call sites
+    and assignment targets — enough for documentation snippets.
+    """
+    names = KEYWORDS.get(language, set())
+    namespace_pattern = re.compile(r"^(?:" + "|".join(sorted(NAMESPACES)) + r")\b")
+    comment_pattern = re.compile(r"^#[^\n]*")
+    string_pattern = re.compile(r'^"""(?:.|\n)*?"""|^"(?:[^"\\]|\\.)*"|^\'(?:[^\'\\]|\\.)*\'')
+    word_pattern = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*")
+    number_pattern = re.compile(r"^\d+(?:\.\d+)?")
+    punct_pattern = re.compile(r"^[{}()\[\];:,.]")
+
+    out: List[str] = []
+    index = 0
+    while index < len(code):
+        rest = code[index:]
+        match = comment_pattern.match(rest)
+        if match:
+            out.append(_span("comment", match.group(0)))
+            index += len(match.group(0))
+            continue
+        match = string_pattern.match(rest)
+        if match:
+            out.append(_span("string", match.group(0)))
+            index += len(match.group(0))
+            continue
+        match = namespace_pattern.match(rest)
+        if match:
+            out.append(_span("namespace", match.group(0)))
+            index += len(match.group(0))
+            continue
+        match = word_pattern.match(rest)
+        if match:
+            word = match.group(0)
+            following = rest[len(word):].lstrip()
+            if word in names:
+                out.append(_span("keyword", word))
+            elif following.startswith("("):
+                out.append(_span("call", word))
+            elif following.startswith(("=", ":")) and language != "bash":
+                out.append(_span("property", word))
+            else:
+                out.append(html.escape(word))
+            index += len(word)
+            continue
+        match = number_pattern.match(rest)
+        if match:
+            out.append(_span("number", match.group(0)))
+            index += len(match.group(0))
+            continue
+        match = punct_pattern.match(rest)
+        if match:
+            out.append(_span("punct", match.group(0)))
+            index += 1
+            continue
+        out.append(html.escape(code[index]))
+        index += 1
+    return "".join(out)
+
 
 # --------------------------------------------------------------------- markdown
 def slugify(text: str) -> str:
@@ -44,7 +131,12 @@ def slugify(text: str) -> str:
 
 
 def inline(text: str) -> str:
-    """Escape HTML, then apply inline markdown (code, links, emphasis)."""
+    """Escape HTML, then apply inline markdown (code, links, emphasis).
+
+    A small set of inline HTML tags is preserved verbatim: the documentation uses
+    ``<strong>``/``<em>``/``<code>`` inside markdown on purpose, and escaping them
+    would show the tags to the reader.
+    """
     stash: List[str] = []
 
     def keep(snippet: str) -> str:
@@ -61,11 +153,18 @@ def inline(text: str) -> str:
         ),
         text,
     )
-    text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
-    text = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", text)
+    text = re.sub(r"</?(?:strong|em|b|i|code|kbd|br|sub|sup)\s*/?>", lambda m: keep(m.group(0)), text)
+    # emphasis is inserted through the stash as well: escaping runs afterwards,
+    # and tags inserted before it would be shown to the reader as literal text
+    text = re.sub(r"\*\*([^*]+)\*\*",
+                  lambda m: keep(f"<strong>{html.escape(m.group(1))}</strong>"), text)
+    text = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)",
+                  lambda m: keep(f"<em>{html.escape(m.group(1))}</em>"), text)
     text = html.escape(text)
-    for index, snippet in enumerate(stash):
-        text = text.replace(f"\x00{index}\x00", snippet)
+    # restore in reverse: an outer snippet can contain the placeholder of an
+    # inner one, and replacing the inner one first would strand a marker
+    for index in range(len(stash) - 1, -1, -1):
+        text = text.replace(f"\x00{index}\x00", stash[index])
     return text
 
 
@@ -87,6 +186,9 @@ def render_table(rows: List[str]) -> str:
 
 def render_markdown(markdown: str) -> Tuple[str, List[Dict[str, Any]]]:
     """Render the markdown subset used by this documentation."""
+    # generated pages carry an HTML comment telling maintainers not to edit them;
+    # rendered literally it would be shown to the reader
+    markdown = re.sub(r"<!--.*?-->", "", markdown, flags=re.DOTALL)
     lines = markdown.replace("\r\n", "\n").split("\n")
     out: List[str] = []
     toc: List[Dict[str, Any]] = []
@@ -121,7 +223,8 @@ def render_markdown(markdown: str) -> Tuple[str, List[Dict[str, Any]]]:
                 index += 1
             index += 1
             label = language if language in LANGUAGES and language else "text"
-            body = html.escape("\n".join(code))
+            source = "\n".join(code)
+            body = html.escape(source) if label in ("text", "console") else highlight(source, label)
             out.append(f'<pre data-lang="{label}"><code class="language-{label}">{body}</code></pre>')
             continue
 
@@ -343,7 +446,8 @@ def build(out_dir: Path) -> Dict[str, Any]:
     if favicon.exists():
         shutil.copyfile(favicon, out_dir / "favicon.svg")
 
-    for index, (slug, item) in enumerate(flat):
+    for index, (_section_title, item) in enumerate(flat):
+        slug = item["slug"]
         if slug not in pages:
             continue
         previous = flat[index - 1][1] if index > 0 else None
@@ -356,6 +460,7 @@ def build(out_dir: Path) -> Dict[str, Any]:
                         previous, following, __version__),
             encoding="utf-8",
         )
+    written = sorted(str(path.relative_to(out_dir)) for path in (out_dir / "docs").rglob("*.html"))
 
     index_html = f"""<!doctype html>
 <html lang="en" data-theme="dark"><head><meta charset="utf-8" />
@@ -400,6 +505,7 @@ def build(out_dir: Path) -> Dict[str, Any]:
     return {
         "out": str(out_dir),
         "pages": len(pages),
+        "written": written,
         "missing": missing,
         "orphaned": orphaned,
         "bytes": sum(path.stat().st_size for path in out_dir.rglob("*") if path.is_file()),

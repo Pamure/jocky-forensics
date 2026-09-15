@@ -1,11 +1,10 @@
 # Reference
 
-Normative summary of JOCKY 1.0.0 as implemented in this repository. The
-grammar is derived from `jocky/lang/parser.py`, the lexical rules from
-`jocky/lang/lexer.py`, and the instruction set from
-`jocky/lang/compiler.py` (`OPCODES`) with the execution semantics in
-`jocky/lang/vm.py`. Anything the parser rejects is not in the grammar below;
-everything shown here was executed against the built CLI.
+Normative summary of JOCKY 1.0.0 as implemented in this repository: the grammar
+from `jocky/lang/parser.py`, lexical rules from `jocky/lang/lexer.py`, and the
+instruction set from `jocky/lang/compiler.py` (`OPCODES`) with execution
+semantics in `jocky/lang/vm.py`. Anything the parser rejects is not in the
+grammar below; every example shown here was executed against the built CLI.
 
 ## Lexical structure
 
@@ -52,8 +51,8 @@ string, `\` introduces one of:
 | `\xNN` | one byte from two hex digits (`\x41` → `A`) |
 | any other `\X` | **kept verbatim**, backslash included |
 
-The last rule is deliberate: `"\d+"` is the two characters `\d+`, so regex-style
-detection patterns survive.
+The last rule is deliberate, not a fallback: `"\d+"` is the two characters
+`\d+`, so a detection pattern keeps matching what it was written to match.
 
 `{expr}` interpolates any expression into the string; nested braces and nested
 strings inside the expression are matched by the lexer, and the fragment is
@@ -175,7 +174,7 @@ Level 6 **folds left** instead of behaving like Python's chained comparisons:
 | `fn` binding | A named declaration stores the closure in an existing local slot of that name, otherwise in the globals. |
 | Truthiness | `nil`, `false`, `0`, `0.0`, `""`, `[]`, `{}` are falsy; everything else (including `" "`, `{"k": nil}`) is truthy. |
 | `and` / `or` | Short-circuit and evaluate to an operand, not a coerced boolean; `not` always returns a boolean. |
-| Equality | `==`/`!=` are structural for lists and maps and numeric across `int`/`float`. Closures compare **structurally** — proto plus captured cells — so two lambdas with identical bodies are `==` even though they are distinct objects; a named function never equals a lambda (the proto name differs). |
+| Equality | `==`/`!=` are structural for lists and maps and numeric across `int`/`float`. Closures compare **structurally** — proto plus captured cells — so two lambdas with identical bodies are `==` even though they are distinct objects; a named function does not equal a lambda (the proto name differs). |
 | Ordering | `<`, `<=`, `>`, `>=` accept two numbers or two strings; anything else raises `cannot compare X < Y`. |
 | Numbers | `int` is arbitrary precision, `float` is a double; `/` is true division; `%` takes the sign of the divisor; division or modulo by zero is a catchable error. |
 | `+` / `*` | `+` concatenates when either operand is a string (the other is stringified) and concatenates two lists. `*` repeats `string`/`list` by an `int`; the reverse order (`2 * "ab"`) is an error. |
@@ -385,10 +384,9 @@ In `make`, the parameter arrives as `LOADL 0`, but the local `n` was captured
 by the lambda, so slot 1 is a cell: `STORE_CELL 1` writes it, `PUSH_CELL 1`
 hands the box to `MK_FN 0`, and the lambda reads and writes the same box with
 `LOAD_CELL 0` / `STORE_CELL 0`. The trailing `CONST None / RET` in every proto
-is the implicit `nil` return. Handlers are per-frame; an error raised deeper in
-a call stack unwinds frames until it finds a frame whose protected region
-covers the failing instruction, then jumps to the handler with the message
-string pushed on that frame's stack.
+is the implicit `nil` return. An error raised deeper in a call stack unwinds
+frames until one has a protected region covering the failing instruction, then
+jumps to that handler with the message string pushed on the frame's stack.
 
 ## Related pages
 

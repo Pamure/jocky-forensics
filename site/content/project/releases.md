@@ -5,7 +5,16 @@
 Every release is a git tag. The documentation site is published from the
 tagged commit, and `jocky --version` reports the same string.
 
-_No tags yet — the repository is pre-release._
+| Version | Date | Commit | Notes |
+|---|---|---|---|
+| `v1.1.0` | 2026-09-15 | `a34a5f6` | v1.1.0 — forensic runtime hardening, integrity and installation tooling |
+| `v1.2.0` | 2026-09-15 | `fb59c2d` | v1.2.0 — Landlock sandbox, documentation site, release versioning |
+
+## Unreleased
+
+Commits after the latest tag:
+
+- `fb1f261 v1.2.0: Landlock sandbox, docs site and release versioning`
 
 ## Cutting a release
 

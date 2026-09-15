@@ -81,8 +81,8 @@ for item in proc.deleted_open() {
 
 * Unprivileged collection sees its own UID's processes fully; foreign
   credentials are readable only as far as the kernel's ptrace check allows
-  (`CAP_SYS_PTRACE` for the rest). The readers return what the kernel gives
-  them instead of raising:
+  (`CAP_SYS_PTRACE` beyond that). The readers return what the kernel gives
+  them:
 
 ```jocky
 emit {"pid1_exe": proc.exe(1), "pid1_io": proc.io(1),
@@ -127,10 +127,10 @@ emit {"socket_inodes": len(proc.socket_map())}
 ```
 
 ```text
-{"pid": 36179, "name": "jocky", "state": "R", "ppid": 4219, "threads": 1, "rss_kb": 20736, "uid": 1000, "exe": "/usr/bin/python3.12", "cwd": "/tmp/jdocs", "memfd_exe": false, "deleted_exe": false, "suspicious_path": false}
-{"mappings": 95, "anonymous": 9, "executable": 17, "first": {"start": 4194304, "end": 4325376, "size_kb": 128, "perms": "r--p", "offset": 0, "inode": 11755, "path": "/usr/bin/python3.12", "rwx": false, "memfd": false, "deleted": false, "anonymous": false}}
-{"fds": 36, "kinds": {"file": 34, "pipe": 2}, "sample": {"fd": 0, "target": "/dev/null", "deleted": false, "kind": "file"}}
-{"socket_inodes": 177}
+{"pid": 47344, "name": "jocky", "state": "R", "ppid": 4219, "threads": 1, "rss_kb": 20864, "uid": 1000, "exe": "/usr/bin/python3.12", "cwd": "/home/mjonir/f/sih2026/sih148", "memfd_exe": false, "deleted_exe": false, "suspicious_path": false}
+{"mappings": 96, "anonymous": 10, "executable": 17, "first": {"start": 4194304, "end": 4325376, "size_kb": 128, "perms": "r--p", "offset": 0, "inode": 11755, "path": "/usr/bin/python3.12", "rwx": false, "memfd": false, "deleted": false, "anonymous": false}}
+{"fds": 14, "kinds": {"file": 12, "pipe": 2}, "sample": {"fd": 0, "target": "/dev/null", "deleted": false, "kind": "file"}}
+{"socket_inodes": 253}
 ```
 
 ## netfs — sockets, interfaces, routes
@@ -165,18 +165,15 @@ with `/proc/net/dev` counters (`rx_bytes`, `rx_packets`, `tx_bytes`,
 ### Cost and limits
 
 * `connections()` with `with_process=true` costs one `readlink` per open
-  descriptor of every visible process — the most expensive call in the `net`
-  namespace. Pass `false` when the PID is not needed.
+  descriptor of every visible process — the most expensive `net` call.
 * `unix` sockets have no addresses/ports; `listening` on a unix row means
   `type == 0001` (SOCK_STREAM) with state `01`.
-* The baseline for `unusual_listeners()` is a fixed set (`22, 53, 80, 123, 443,
-  631, 853, 3000, 3306, 5432, 6379, 8000, 8080, 8443, 9090, 27017`); anything
-  else is reported, so a `low` finding means "outside the baseline", not
-  "malicious".
+* The `unusual_listeners()` baseline is a fixed set (`22, 53, 80, 123, 443,
+  631, 853, 3000, 3306, 5432, 6379, 8000, 8080, 8443, 9090, 27017`): anything
+  else is reported, so `low` means "outside the baseline", not "malicious".
 * UDP sockets are listed but never marked `listening` — the file has no such
-  state; use the port and `uid` instead.
-* `/proc/net/raw` is the IPv4 raw table; there is no `raw6` view.
-* `net.routes()` is IPv4 only (`/proc/net/route`); IPv6 routes are not collected.
+  state; use port and `uid` instead. `/proc/net/raw` is the IPv4 raw table:
+  there is no `raw6` view, and `net.routes()` is IPv4 only.
 * All tables are snapshots: a connection can close between the table read and
   the descriptor sweep, in which case the row simply has no owner.
 
@@ -257,8 +254,8 @@ emit fs.stat("/bin/sh")
 
 Magic signatures, in match order: `elf`, `pe`, `mach-o`, `mach-o-64`,
 `script:<interpreter>` (shebang), `zip`, `gzip`, `bzip2`, `xz`, `7z`, `rar`,
-`pdf`, `png`, `jpeg`, `sqlite`, `zstd`; anything else is `data`, and an
-unreadable path is `unreadable`.
+`pdf`, `png`, `jpeg`, `sqlite`, `zstd`; anything else is `data`, an unreadable
+path is `unreadable`.
 
 ### Bounds and cost
 
@@ -274,9 +271,8 @@ unreadable path is `unreadable`.
   always `0777`) and refuses to call a directory "world-writable" when the
   filesystem does not implement POSIX mode bits — `drvfs`, `9p`, `vboxsf`,
   `cifs`, `smb3`, `nfs`, `nfs4`, `fuse`, `fuseblk`, `ntfs`, `ntfs3` are marked
-  `opaque_permissions` instead. A `$PATH` directory that does not exist returns
-  only `{path, resolved, exists: false}`: scripts must check `exists` before
-  reading `fstype`/`hijackable`.
+  `opaque_permissions` instead. A missing `$PATH` directory returns only
+  `{path, resolved, exists: false}`: check `exists` before `fstype`/`hijackable`.
 
 ```jocky
 let hits = fs.scan("/etc", 40, "passwd", 2)
@@ -329,8 +325,8 @@ findings — see [detection checks](/docs/runtime/detection).
 | `sys.users()` / `sys.kallsyms_visible()` | `/proc` scan / `/proc/kallsyms` | processes with a non-zero `tty` (`pid`, `name`, `tty`, `uid`, `start_epoch`) / true when addresses are non-zero |
 | `sys.info()` | all of the above | single-call inventory used by scripts and the agent |
 
-`sys.memory()` normalises to bytes: `MemTotal`, `MemFree`, `MemAvailable`,
-`Buffers`, `Cached`, `SwapTotal`, `SwapFree`, `Dirty`, `Writeback`.
+`sys.memory()` normalises to bytes (`MemTotal`, `MemFree`, `MemAvailable`,
+`Buffers`, `Cached`, `SwapTotal`, `SwapFree`, `Dirty`, `Writeback`).
 
 ### The hidden-module diff
 
@@ -345,9 +341,8 @@ and absent from the other is the signal: one kernel view has been tampered with.
 ### Cost and limits
 
 * Every call is a single small file read, except `sys.users()` (one `/proc`
-  sweep) and `sys.info()` (which performs all of them).
-* `kallsyms_visible()` is false for an unprivileged process because the kernel
-  zeroes the addresses — verified on this host (`uid 1000`):
+  sweep) and `sys.info()` (all of them). `kallsyms_visible()` is false for an
+  unprivileged process because the kernel zeroes the addresses:
 
 ```text
 $ head -1 /proc/kallsyms
@@ -385,23 +380,21 @@ emit {"loaded_modules": len(sys.modules()), "hidden_modules": sys.hidden_modules
 ```text
 {"hostname": "stormbreaker", "release": "6.6.87.2-microsoft-standard-WSL2", "machine": "x86_64", "wsl": true, "kallsyms_visible": false, "container": {"docker": false, "podman": false, "cgroup_hint": "0::/init.scope", "namespaced": true}}
 {"distro": "Ubuntu 24.04.3 LTS", "cpus": 16, "model": "13th Gen Intel(R) Core(TM) i7-13620H"}
-{"mem_total_kb": 7979192, "mem_available_kb": 4436912, "swap_total_kb": 2097152}
-{"loadavg": [1.26, 1.51, 1.02], "uptime_s": 22678, "boot_time": 1789471738.0, "home": "/home/mjonir", "path_entries": 66}
-{"mounts": 58, "noexec": 11, "nosuid": 22}
+{"mem_total_kb": 7979192, "mem_available_kb": 3652868, "swap_total_kb": 2097152}
+{"loadavg": [1.73, 1.58, 1.15], "uptime_s": 22922, "boot_time": 1789471738.0, "home": "/home/mjonir", "path_entries": 66}
+{"mounts": 60, "noexec": 11, "nosuid": 24}
 {"mountpoint": "/", "fstype": "ext4", "options": "rw,relatime,discard,errors=remount-ro,data=ordered"}
 {"loaded_modules": 29, "hidden_modules": {"in_proc_not_sys": [], "in_sys_not_proc": []}}
 ```
 
 ## Cross-cutting limits
 
-* **Linux only.** All four collectors target procfs/sysfs; the language,
-  encoder and agent protocol are platform-neutral but there is no Windows or
-  macOS collection path.
+* **Linux only.** All four collectors target procfs/sysfs; the language and
+  encoder are portable but there is no Windows or macOS collection path.
 * **Snapshots, not streams.** Nothing here is event-driven: each call reads the
   kernel's current state, so short-lived processes and connections between two
   calls are missed. Repeat runs (see `watch.jky`) instead of expecting coverage.
-* **Read-only, no external processes.** No collector writes, deletes, mounts,
-  kills or signals anything; nothing requires root, and what requires privilege
-  is reported as empty. The only cost of a collection is the reads themselves —
-  measured at 0 child processes and 0 write-mode opens in the
-  [evidence harness](/docs/operations/evidence).
+  No collector writes, deletes, mounts, kills or signals anything; nothing
+  requires root, and what requires privilege is reported as empty. The reads
+  are the only cost: 0 child processes, 0 write-mode opens (see the
+  [evidence harness](/docs/operations/evidence)).

@@ -44,8 +44,9 @@ fn fn
 * A named `fn` declaration binds where a local of that name already exists (a
   parameter, or an earlier `let` in the same function); otherwise the closure
   is stored under that name in the globals. A `fn` declared inside another
-  function is therefore visible outside it unless shadowed — the compiled
-  listing shows `STOREG` for the first case and `STOREL` for the second.
+  function is therefore callable from outside it unless the name was already a
+  local — the compiled listing shows `STOREG` in the first case and `STOREL`
+  in the second.
 
 ## `return`, and the newline trap
 
@@ -247,9 +248,9 @@ not iterable: cannot iterate over int
 
 Note the host type names (`NoneType`, `int`, `str`) in the messages: the
 runtime is Python underneath and does not translate them. Errors raised by
-native functions surface the host exception with its class as a prefix, e.g.
-`"abc".to_int()` produces `ValueError: invalid literal for int() with base 10:
-'abc'`.
+native functions surface the host exception with its class as a prefix — for
+example `"abc".to_int()` yields a catchable
+`ValueError: invalid literal for int() with base 10: 'abc'`.
 
 `error(message)` raises your own catchable error, and an error raised inside a
 callee is caught by the **caller's** handler — the unwinder discards the callee
@@ -378,11 +379,10 @@ Two details that matter when you size a budget:
 * The step budget is exact: the run stops at the first instruction that takes
   the count past the limit, which is why the counter above reads `50001`.
 * The wall-clock budget is only **sampled every 1024 VM instructions**, and
-  only between instructions. A single long-running native call is not
-  interrupted: `sleep(0.4)` under `--wall-ms 100` prints both of its lines and
-  exits `0` after roughly 0.6 s of wall time. Collection calls that read large
-  trees (a deep `fs` scan) behave the same way — the deadline is noticed after
-  the call returns, not during it.
+  only between instructions. A single long-running call is not interrupted:
+  `sleep(0.4)` under `--wall-ms 100` prints both of its lines and exits `0`
+  after roughly 0.6 s of wall time. A call is one instruction, so a deadline
+  that passes while it runs is noticed after it returns, not during it.
 
 ## Related pages
 
