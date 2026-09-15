@@ -36,7 +36,8 @@ primary    := INT | FLOAT | STRING | 'true' | 'false' | 'nil' | IDENT
 
 Literals: decimal/hex/bin/octal ints with `_` separators, floats, double-quoted
 strings with `\n \t \r \0 \\ \" \{ \} \xNN` escapes and `{expr}` interpolation
-(`{{`/`}}` escape literal braces).  Maps use identifier-or-string keys:
+(`{{`/`}}` escape literal braces), and raw strings (`r"…"`) that decode nothing
+at all.  Maps use identifier-or-string keys:
 `{"kind": "x", count: 3}`.
 
 Comments run from `#` to end of line.  Newlines are insignificant.
@@ -60,6 +61,41 @@ Comments run from `#` to end of line.  Newlines are insignificant.
 limit raises an *uncatchable* `JockyLimitError` and marks the result
 `truncated=True`, so a hostile or broken script cannot hang a collection run or
 paper over the limit in a `catch`.
+
+The matcher has its own budget: a single `re.*` call that exceeds 4,000,000
+thread-steps raises a *catchable* error, because a script that searches
+attacker-authored text must not be able to wedge the run it is part of.
+
+The front end reports its own recursion limit rather than letting the
+interpreter's stack decide: source that nests deeper than Python can recurse
+(`"(" * 200 + "1" + ")" * 200`, a 600-link `.to_str()` chain, nested
+`{interpolation}`) raises `JockySyntaxError`/`JockyCompileError` with a "nests
+too deeply" message.  Without that guard a host `RecursionError` escaped
+`compile_source`, which meant a script could take the process down with a
+traceback instead of a diagnostic — found by the fuzz harness in
+`tests/fuzz_language.py`, pinned in `tests/test_language.py`.
+
+### 1.4 Patterns
+
+`re.*` and `fs.grep` run JOCKY's own matcher (`jocky/rt/pattern.py`): the
+pattern is parsed, compiled to an NFA, and simulated over the input, so the cost
+is `O(len(text) × len(pattern))` whatever the pattern looks like.  The text
+being matched is attacker-authored — command lines, file names, log lines — and
+a backtracking engine turns that into a denial-of-service primitive: `(a+)+b`
+against 20,000 `a`s never returns under the host `re`, and answers in ~50 ms
+here.
+
+Unsupported by design, each a syntax error naming the offset: lazy quantifiers,
+back-references, look-around.  Where an engine's semantics could differ, the
+choice is documented and tested rather than incidental — matching is
+leftmost-longest (POSIX-like, so "does this text contain the shape?" always
+answers the same way), and `\w`/`\b` are ASCII.
+
+Correctness rests on differential testing against the host `re` over the
+supported subset — more than 8,000 comparisons of both the verdict *and* the
+match span in `tests/test_pattern.py` — not on spot checks.  Patterns are
+written as raw strings (`r"^\d{2}:\d{2}$"`), since a repeat count inside a
+normal string is interpolation.
 
 ---
 
@@ -170,6 +206,22 @@ Aggregation (`det.triage`) runs every check, counts by severity, and reports
 scanned process/socket totals so a "clean" result is distinguishable from a
 failed run.  `ioc.match` correlates indicator sets against live processes,
 sockets and (optionally) files with hashing.
+
+A finding is a map — `{"check", "severity", "title", "evidence",
+"recommendation"}` — with no time of its own; `--stamp-findings` adds a `ts`
+when one is missing (`runner.stamp_findings`), which is what lets a run be
+correlated with journald/auditd output through `time.iso` and `tl.merge`.
+Script-set values are never overwritten: a script that watched an event knows
+when it happened, the runner only knows when it collected.
+
+Process checks share one collection pass (`det.Snapshot`): each of them used to
+walk `/proc` on its own, which cost five sweeps of the same data per run
+(measured: 752 ms → 290 ms internal on the development host, same findings).
+Every check is still callable on its own, and then collects its own minimum.
+The `$PATH` audit is likewise one pass per entry: it resolves each entry once,
+skips duplicate entries, and does not resolve entries on filesystems whose mode
+bits are already meaningless (drvfs/9p/network mounts), which on WSL took the
+check from 591 ms to 89 ms.
 
 False positives are treated as defects: each check was tuned against the
 development host until the finding set was explainable, and the module-view

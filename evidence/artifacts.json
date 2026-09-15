@@ -9,7 +9,7 @@
   },
   "source_mode_cold": {
     "returncode": 0,
-    "bytecode_cache_files": 74
+    "bytecode_cache_files": 85
   },
   "fileless_mode": {
     "created": [],
@@ -25,5 +25,5 @@
   },
   "fileless_code_created_nothing": true,
   "interpreter_bytes": 8020928,
-  "runtime_zip_bytes": 94110
+  "runtime_zip_bytes": 167247
 }

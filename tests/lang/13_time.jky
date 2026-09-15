@@ -1,0 +1,120 @@
+# Time arithmetic and timeline shaping (`time.*` / `tl.*`).
+#
+# Every timestamp below is a literal (2024-01-01T12:00:45Z = 1704110445) and the
+# only host value is `/proc/self/stat`, which a running Linux always has, so the
+# file is portable across hosts and CI. The focus is the *degraded* paths too:
+# a timeline full of unreadable rows must still sort, count and merge without
+# raising, because that is what collected data actually looks like.
+
+# --- parsing ---------------------------------------------------------------
+expect(type(time.now()), "float", "time.now() is a float")
+assert(time.now() > 1704110445, "now() is a plausible epoch")
+
+expect(time.parse("2024-01-01T12:00:45Z"), 1704110445, "ISO-8601 with Z parses")
+expect(time.parse("2024-01-01T12:00:45"), 1704110445, "a missing Z is read as UTC")
+expect(time.parse("2024-01-01 12:00:45"), 1704110445, "a space separator parses")
+expect(time.parse("2024-01-01T17:30:45+05:30"), 1704110445, "an explicit offset is honoured")
+expect(time.parse("2024-01-01T12:00:45.500Z"), 1704110445.5, "fractional seconds are kept")
+expect(time.parse("2024-01-01"), 1704067200, "a bare date is midnight UTC")
+expect(time.parse("1704110445"), 1704110445, "an epoch string parses")
+expect(time.parse("1704110445.5"), 1704110445.5, "a fractional epoch string parses")
+
+expect(time.parse("not a time"), nil, "unparseable text returns nil")
+expect(time.parse(""), nil, "empty text returns nil")
+expect(time.parse("12:00:45"), nil, "a time of day is not a date")
+expect(time.parse(nil), nil, "nil returns nil instead of raising")
+
+# --- rendering -------------------------------------------------------------
+expect(time.iso(1704110445), "2024-01-01T12:00:45Z", "iso() renders UTC with a Z suffix")
+expect(time.iso(1704110445.9), "2024-01-01T12:00:45Z", "iso() is seconds precision")
+expect(time.iso("1704110445"), "2024-01-01T12:00:45Z", "iso() accepts an epoch string")
+expect(time.iso("2024-01-01T12:00:45Z"), "2024-01-01T12:00:45Z", "iso() round-trips its own output")
+expect(time.iso(nil), nil, "iso(nil) returns nil")
+expect(time.iso("garbage"), nil, "garbage in, nil out")
+assert(time.iso().contains("Z"), "iso() with no argument renders now() in UTC")
+assert(time.delta(time.parse(time.iso()), time.now()) < 5, "iso() round-trips to about now")
+
+expect(time.format(1704110445, "%Y-%m-%d %H:%M:%S"), "2024-01-01 12:00:45", "a layout fills its fields")
+expect(time.format(1704110445, "%F %T"), "2024-01-01 12:00:45", "%F and %T are shorthands")
+expect(time.format(1704110445, "%a %b %e %Y"), "Mon Jan  1 2024", "names are English, %e is space padded")
+expect(time.format(1704110445, "%j %p %Z"), "001 PM UTC", "day of year, meridiem, zone")
+expect(time.format(1704110445, "%s"), "1704110445", "%s is the epoch as text")
+expect(time.format(1704110445.25, "%f"), "250000", "%f is microseconds")
+expect(time.format(1704110445, "100%%"), "100%", "%% is a literal percent")
+expect(time.format(1704110445, "%Q"), "%Q", "unknown directives pass through")
+expect(time.format("garbage", "%Y"), nil, "an unusable epoch yields nil")
+expect_throws(fn() { return time.format(1704110445, 5) },
+              "a non-string layout is a caller bug", "string layout")
+
+# --- file timestamps -------------------------------------------------------
+let stamps = time.filetime("/proc/self/stat")
+expect(type(stamps), "map", "filetime returns a map")
+expect(type(stamps.mtime), "float", "mtime is a number")
+expect(type(stamps.ctime), "float", "ctime is a number")
+expect(type(stamps.atime), "float", "atime is a number")
+assert(stamps.mtime > 0, "a real file has a real mtime")
+expect(time.filetime("/definitely-not-here-9f3a"), nil, "a missing path yields nil, not an error")
+
+# --- deltas ----------------------------------------------------------------
+expect(time.delta(1704110445, 1704110505), 60, "delta() is b - a")
+expect(time.delta(1704110505, 1704110445), -60, "delta() is signed")
+expect(time.delta(1704110445, 1704110445), 0, "one instant is zero apart")
+expect(time.delta("2024-01-01T12:00:45Z", "2024-01-01T12:01:45Z"), 60, "delta() reads ISO strings")
+expect(time.delta("garbage", 1704110445), nil, "an unusable side yields nil")
+
+# --- merging ---------------------------------------------------------------
+let events = [{"name": "late",    "at": "2024-01-01T12:02:00Z"},
+              {"name": "first",   "at": 1704110400.0},
+              {"name": "mid",     "at": "2024-01-01 12:01:00"},
+              {"name": "undated"},
+              {"name": "bad",     "at": "yesterday"}]
+let merged = tl.merge(events, "at")
+
+expect(len(merged), 5, "unreadable rows survive the merge")
+expect(transform(merged, fn(e) { return e.name }), ["first", "mid", "late", "undated", "bad"],
+       "readable rows sort by time, unreadable ones keep their order at the end")
+expect(merged[0].tl_index, 0, "tl_index is the merged position")
+expect(merged[2].tl_index, 2, "tl_index counts the merged order, not the input order")
+expect(merged[2].tl_source, 0, "tl_source is the input position")
+expect(merged[3].tl_source, 3, "a missing time keeps its source index")
+expect(contains("tl_index", merged[0]), true, "merged rows carry their position")
+expect(contains("tl_index", events[0]), false, "merge annotates copies, not the caller's maps")
+
+let tied = tl.merge([{"id": "a", "at": 1000}, {"id": "b", "at": 1000}], "at")
+expect(transform(tied, fn(e) { return e.id }), ["a", "b"], "equal timestamps keep input order")
+
+let defaulted = tl.merge([{"time": 20}, {"time": 10}])
+expect(defaulted[0].time, 10, "the key defaults to \"time\"")
+
+let mixed = tl.merge([{"at": 30}, 5, "2024-01-01T00:00:00Z"], "at")
+expect(mixed[0].at, 30, "a map sorts by its key")
+expect(mixed[1].value, 5, "a non-map row is kept as a value")
+expect(mixed[1].tl_index, 1, "and still receives its position")
+expect(tl.merge([], "at"), [], "merging nothing yields nothing")
+expect_throws(fn() { return tl.merge("nope", "at") }, "merge needs a list", "list of events")
+
+# --- sliding windows -------------------------------------------------------
+let hits = [1000.0, 1005.0, 1010.0, 1200.0]
+expect(tl.window(hits, 10), 3, "a 10 s window spans its own two ends")
+expect(tl.window(hits, 9), 2, "9 s does not reach the far edge")
+expect(tl.window([1010, 1000, 1005], 10), 3, "input order does not matter")
+expect(tl.window([], 60), 0, "no events, no window")
+expect(tl.window(["2024-01-01T12:00:00Z", "2024-01-01T12:00:30Z", "2024-01-01T12:05:00Z"], 60), 2,
+       "ISO strings are timestamps too")
+expect(tl.window([1, "junk", 3], 5), 2, "an unreadable entry cannot be inside a window")
+expect(tl.window(merged, 120, "at"), 3, "window() reads a map key when given one")
+expect_throws(fn() { return tl.window(hits, 0) }, "a zero window is a caller bug", "positive number of seconds")
+expect_throws(fn() { return tl.window(hits, "abc") }, "a non-numeric window is a caller bug", "positive number of seconds")
+
+# --- bucketing -------------------------------------------------------------
+let buckets = tl.bucket([1704110445.0, 1704110446.0, 1704110505.0], 60)
+expect(type(buckets), "map", "bucket() returns a map")
+expect(keys(buckets).sort(), ["1704110400", "1704110460"], "buckets are aligned to the epoch")
+expect(buckets["1704110400"], 2, "the first minute holds two events")
+expect(buckets["1704110460"], 1, "the second holds one")
+expect(count(values(buckets)), 2, "one bucket per distinct minute")
+expect(buckets["1704110400"] + buckets["1704110460"], 3, "every event lands in exactly one bucket")
+expect(tl.bucket([-30, -10], 60)["-60"], 2, "buckets floor toward minus infinity")
+expect(tl.bucket(merged, 600, "at")["1704110400"], 3, "bucket() counts a map key when given one")
+expect(tl.bucket([], 60), {}, "no events, no buckets")
+expect_throws(fn() { return tl.bucket("nope", 60) }, "bucket needs a list", "list of events")

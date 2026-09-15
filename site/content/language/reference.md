@@ -56,6 +56,24 @@ string, `\` introduces one of:
 The last rule is deliberate, not a fallback: `"\d+"` is the two characters
 `\d+`, so a detection pattern keeps matching what it was written to match.
 
+#### Raw strings
+
+A string prefixed with `r` (or `R`) is taken verbatim — no escape decoding, no
+interpolation:
+
+```jky
+let ipv4  = r"^\d{1,3}(\.\d{1,3}){3}$"   # the pattern, character for character
+let parts = r"[^\d]+"                     # a backslash is data, not an escape
+let label = "hits={n}"                    # interpolation still works in normal strings
+```
+
+`r"…"` ends at the first `"`; a backslash escapes nothing inside it, so a raw
+string cannot contain a double quote. Use it for anything where the backslash
+is data rather than an escape — patterns, Windows paths, `\xNN` sequences.
+Without it both failure modes bite at once: backslashes need doubling
+(`"\\d{1,3}"`) and a repeat count is read as interpolation, so `"\d{1,3}"` is
+`trailing input in interpolation` rather than a pattern.
+
 `{expr}` interpolates any expression into the string; nested braces and nested
 strings inside the expression are matched by the lexer, and the fragment is
 parsed as a full expression. `{{` and `}}` emit literal braces. `{}` with an

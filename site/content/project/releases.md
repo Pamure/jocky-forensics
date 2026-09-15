@@ -17,6 +17,7 @@ tagged commit, and `jocky --version` reports the same string.
 
 Commits after the latest tag:
 
+- `fe5c159 fix: report wall-clock overrun from a long native; add --ndjson streaming`
 - `6830c25 test: expect_throws can require an error message; roadmap from the testing study`
 
 ## Cutting a release

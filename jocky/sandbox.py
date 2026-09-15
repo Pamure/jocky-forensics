@@ -71,9 +71,13 @@ WRITE_ACCESS = (
 )
 ALL_ACCESS = READ_ONLY | WRITE_ACCESS
 
-#: Directories a collection script legitimately needs to read.
+#: Directories a collection script legitimately needs to read. The drop zones
+#: are here on purpose: dropped executables and staged payloads live in /tmp,
+#: /var/tmp and /dev/shm, and confining a triage script away from them would
+#: hide the artefacts it exists to find (reading them widens no privilege).
 READ_ROOTS = ("/proc", "/sys", "/dev", "/usr", "/lib", "/lib64", "/etc", "/bin",
-              "/sbin", "/run", "/var/log", "/snap")
+              "/sbin", "/run", "/var/log", "/snap",
+              "/tmp", "/var/tmp", "/dev/shm")
 
 #: The runtime's own package directory. A confined interpreter still has to be
 #: able to import its own modules — several natives import lazily inside the
@@ -85,7 +89,30 @@ WRITE_ROOTS = ("/tmp", "/var/tmp", "/dev/shm")
 
 # --- seccomp (strict level) --------------------------------------------------
 SYS_SOCKET = 41
+SYS_PTRACE = 101
+SYS_REBOOT = 169
+SYS_KEXEC_LOAD = 246
+SYS_PROCESS_VM_READV = 310
+SYS_PROCESS_VM_WRITEV = 311
 SYS_SECCOMP = 317
+SYS_KEXEC_FILE_LOAD = 320
+SYS_IO_URING_SETUP = 425
+SYS_IO_URING_ENTER = 426
+SYS_IO_URING_REGISTER = 427
+
+BLOCKED_SYSCALLS = (
+    SYS_SOCKET,
+    SYS_PTRACE,
+    SYS_REBOOT,
+    SYS_KEXEC_LOAD,
+    SYS_PROCESS_VM_READV,
+    SYS_PROCESS_VM_WRITEV,
+    SYS_KEXEC_FILE_LOAD,
+    SYS_IO_URING_SETUP,
+    SYS_IO_URING_ENTER,
+    SYS_IO_URING_REGISTER,
+)
+
 SECCOMP_SET_MODE_FILTER = 1
 BPF_LD = 0x00
 BPF_W = 0x00
@@ -98,7 +125,6 @@ SECCOMP_RET_ERRNO = 0x00050000
 SECCOMP_RET_ALLOW = 0x7FFF0000
 EPERM = 1
 AUDIT_ARCH_X86_64 = 0xC000003E
-
 #: Offsets inside ``struct seccomp_data`` (arch, nr, args…).
 OFFSET_NR = 0
 OFFSET_ARCH = 4
@@ -113,6 +139,9 @@ class SandboxReport:
     abi: Optional[int] = None
     reason: str = ""
     rules: List[Tuple[str, int]] = field(default_factory=list)
+    #: Paths a rule was asked for but could not be installed on (missing or
+    #: unreachable). Reporting them keeps "the confinement in force" honest.
+    rules_skipped: List[Tuple[str, int]] = field(default_factory=list)
     seccomp: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
@@ -121,6 +150,7 @@ class SandboxReport:
             "applied": self.applied,
             "abi": self.abi,
             "reason": self.reason,
+            "rules_skipped": list(self.rules_skipped),
             "rules": [{"path": path, "access": access} for path, access in self.rules],
             "network_blocked": self.seccomp,
         }
@@ -174,12 +204,17 @@ def _access_for(abi: int, write: bool) -> int:
     return access
 
 
-def _add_path_rule(ruleset_fd: int, path: str, access: int) -> None:
-    """Grant ``access`` beneath ``path`` (silently skips absent paths)."""
+def _add_path_rule(ruleset_fd: int, path: str, access: int) -> bool:
+    """Grant ``access`` beneath ``path``; report whether a rule was installed.
+
+    The return value matters: the report is what an operator reads to decide
+    whether the confinement they asked for is real, so a path that could not be
+    opened (missing, or denied) must not appear as a granted rule.
+    """
     try:
         parent = os.open(path, os.O_PATH | os.O_CLOEXEC)
     except OSError:
-        return
+        return False
     try:
         # struct landlock_path_beneath_attr { __u64 allowed_access; __s32 parent_fd; }
         # (packed: 12 bytes, which is what "<Qi" produces). The buffer must stay
@@ -187,28 +222,34 @@ def _add_path_rule(ruleset_fd: int, path: str, access: int) -> None:
         # sends the kernel a dangling pointer and lands on EINVAL.
         attr = struct.pack("<Qi", access, parent)
         attr_buffer = ctypes.create_string_buffer(attr, len(attr))
-        _raw_syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd, LANDLOCK_RULE_PATH_BENEATH,
-                     ctypes.addressof(attr_buffer), 0)
+        result = _raw_syscall(SYS_LANDLOCK_ADD_RULE, ruleset_fd,
+                              LANDLOCK_RULE_PATH_BENEATH,
+                              ctypes.addressof(attr_buffer), 0)
+        return result == 0
     finally:
         os.close(parent)
 
 
 def _install_socket_filter() -> bool:
-    """Deny ``socket(2)`` with EPERM using a hand-built classic BPF program.
+    """Deny dangerous attack primitives (socket, ptrace, io_uring, kexec) with EPERM.
 
-    Jump semantics: the next instruction is ``index + 1 + jt`` on match and
-    ``index + 1 + jf`` otherwise, so the two conditional jumps below either skip
-    the allow-branch or fall onto it.
+    Constructs a linear BPF dispatch over ``BLOCKED_SYSCALLS``, falling onto
+    SECCOMP_RET_ALLOW if no hazardous syscall is invoked.
     """
     program = [
         (BPF_LD | BPF_W | BPF_ABS, 0, 0, OFFSET_ARCH),
         (BPF_JMP | BPF_JEQ | BPF_K, 1, 0, AUDIT_ARCH_X86_64),   # match -> nr load
         (BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW),             # other arch: allow
         (BPF_LD | BPF_W | BPF_ABS, 0, 0, OFFSET_NR),
-        (BPF_JMP | BPF_JEQ | BPF_K, 1, 0, SYS_SOCKET),          # match -> EPERM
-        (BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW),
-        (BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | EPERM),
     ]
+    n_blocked = len(BLOCKED_SYSCALLS)
+    for i, nr in enumerate(BLOCKED_SYSCALLS):
+        jt = (n_blocked - 1 - i) + 1
+        jf = 0
+        program.append((BPF_JMP | BPF_JEQ | BPF_K, jt, jf, nr))
+
+    program.append((BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ALLOW))
+    program.append((BPF_RET | BPF_K, 0, 0, SECCOMP_RET_ERRNO | EPERM))
     blob = b"".join(struct.pack("<HBBI", code, jt, jf, k) for code, jt, jf, k in program)
     buffer = ctypes.create_string_buffer(blob, len(blob))
     # struct sock_fprog { unsigned short len; struct sock_filter *filter; } is
@@ -268,21 +309,26 @@ def apply(level: str, extra_write: Optional[List[str]] = None,
 
     read_access = _access_for(abi, write=False)
     write_access = _access_for(abi, write=True)
+    def grant(path: str, access: int) -> None:
+        if _add_path_rule(ruleset_fd, path, access):
+            report.rules.append((path, access))
+        else:
+            report.rules_skipped.append((path, access))
+
     for root in READ_ROOTS + (PACKAGE_ROOT,):
-        _add_path_rule(ruleset_fd, root, read_access)
-        report.rules.append((root, read_access))
+        grant(root, read_access)
     for root in extra_read or ():
-        _add_path_rule(ruleset_fd, root, read_access)
-        report.rules.append((root, read_access))
+        grant(root, read_access)
     for root in tuple(WRITE_ROOTS) + tuple(extra_write or ()):
         if level in ("vm",):
-            _add_path_rule(ruleset_fd, root, write_access)
-            report.rules.append((root, write_access))
+            grant(root, write_access)
     # the working directory is where collection output goes
     if level == "vm":
-        _add_path_rule(ruleset_fd, os.getcwd(), write_access)
-        report.rules.append((os.getcwd(), write_access))
+        grant(os.getcwd(), write_access)
 
+    # PR_SET_DUMPABLE=0 forbids /proc/self/mem modifications and unprivileged ptrace
+    PR_SET_DUMPABLE = 4
+    _raw_syscall(SYS_PRCTL, PR_SET_DUMPABLE, 0, 0, 0, 0)
     # PR_SET_NO_NEW_PRIVS is a hard prerequisite for landlock_restrict_self
     _raw_syscall(SYS_PRCTL, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)
     _raw_syscall(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd, 0)

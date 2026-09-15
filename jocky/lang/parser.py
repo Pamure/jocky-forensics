@@ -424,6 +424,19 @@ class Parser:
 
 
 def parse(source: str) -> N.Program:
-    """Parse a JOCKY source string into an AST."""
-    tokens = Lexer(source).tokenize()
-    return Parser(tokens, source).parse_program()
+    """Parse a JOCKY source string into an AST.
+
+    Deeply nested input (`'(' * 500 + '1' + ')' * 500`, a chain of 500 method
+    calls) runs the recursive-descent parser out of interpreter stack. That is
+    a *front-end limit*, not a crash the caller should see as a traceback, so a
+    ``RecursionError`` becomes the same syntax error every other bad input
+    produces. The limit is the interpreter's, not a language constant: it is
+    roughly 90 nested groups on a default CPython stack.
+    """
+    try:
+        tokens = Lexer(source).tokenize()
+        return Parser(tokens, source).parse_program()
+    except RecursionError:
+        raise JockySyntaxError(
+            "source nests too deeply to parse (expression or statement nesting)",
+            source=source) from None

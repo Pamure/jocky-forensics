@@ -1,0 +1,87 @@
+# 05_sigma_yara_production_hunt.jky
+# Production Threat Hunt: Linear-Time Industry Rule Matching and Binary Inspection.
+# Solves DFIR Problems 17–32 & 33–48.
+
+# 1. Linear-Time Sigma Rule Evaluation Over Running Process Table
+# Guaranteed immune to exponential regular expression backtracking (ReDoS)
+let sigma_rule = join([
+  "title: Download Piped to Shell",
+  "level: high",
+  "detection:",
+  "  selection:",
+  "    CommandLine|contains:",
+  "      - 'curl'",
+  "      - 'wget'",
+  "  pipe:",
+  r"    CommandLine|re: '\|\s*(ba)?sh\b'",
+  "  condition: selection and pipe"
+], "\n")
+
+let procs = proc.list(400)
+for p in procs {
+  if sigma.check(sigma_rule, {"CommandLine": p.cmdline}) {
+    emit {
+      "kind": "sigma_detection_hit",
+      "severity": "high",
+      "rule": sigma.summary(sigma_rule).title,
+      "pid": p.pid,
+      "cmdline": p.cmdline,
+      "recommendation": "Interactive shell execution spawned directly from network downloader stream"
+    }
+  }
+}
+
+# 2. Binary Entropy and Packer Inspection in World-Writable Drop Zones
+let drop_zones = ["/tmp", "/dev/shm", "/var/tmp"]
+for zone in drop_zones {
+  if fs.exists(zone) {
+    let files = fs.scan(zone, 50, nil, 2)
+    for f in files {
+      if f.is_file and f.executable {
+        # Calculate Shannon entropy (packed/encrypted payloads score near 8.0)
+        let ent = fs.entropy(f.path, 0, 65536)
+        if ent.packed_likely {
+          emit {
+            "kind": "high_entropy_dropzone_payload",
+            "severity": "high",
+            "path": f.path,
+            "entropy": ent.entropy,
+            "unique_bytes": ent.unique_bytes,
+            "recommendation": "Executable in temporary drop zone exhibits high Shannon entropy indicating runtime packing/encryption"
+          }
+        }
+      }
+    }
+  }
+}
+
+# 3. YARA Signature Matching Over Memory-Resident Payloads
+let yara_rule = join([
+  r"rule WebShell_or_ELF {",
+  r"  strings:",
+  r"    $elf = { 7F 45 4C 46 }",
+  "    $php = \"<?php\" nocase",
+  "    $jsp = \"<%\" nocase",
+  r"  condition:",
+  r"    any of them",
+  r"}"
+], "\n")
+
+# Verify suspicious open deleted files with YARA
+for df in proc.deleted_open() {
+  let fd_path = "/proc/" + str(df.pid) + "/fd/" + str(df.fds[0])
+  if fs.exists(fd_path) {
+    let head_bytes = fs.read_bytes(fd_path, 0, 1024)
+    if yara.check(yara_rule, head_bytes) {
+      emit {
+        "kind": "yara_signature_in_deleted_fd",
+        "severity": "critical",
+        "pid": df.pid,
+        "fd_path": fd_path,
+        "original_path": df.path,
+        "rule": yara.summary(yara_rule).rule,
+        "recommendation": "Unlinked open file descriptor matches signature for executable or web shell"
+      }
+    }
+  }
+}

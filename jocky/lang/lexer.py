@@ -127,7 +127,7 @@ class Lexer:
         except ValueError:
             self._error(f"malformed numeric literal {clean!r}", line, col)
 
-    def _string(self, line: int, col: int) -> Token:
+    def _string(self, line: int, col: int, raw: bool = False) -> Token:
         self._adv()  # opening quote
         segments: List[Segment] = []
         buf: List[str] = []
@@ -136,6 +136,26 @@ class Lexer:
             if buf:
                 segments.append(("t", "".join(buf)))
                 buf.clear()
+
+        if raw:
+            # ``r"…"`` is literal text: no escapes, no interpolation. Detection
+            # patterns are full of backslashes and repeat counts (`^\d{2}:\d{2}$`),
+            # and spelling those inside a normal string means doubling the
+            # backslashes and escaping every brace — a rule that reads nothing
+            # like the pattern it encodes.
+            while True:
+                ch = self._peek()
+                if ch == "":
+                    self._error("unterminated raw string literal", line, col)
+                if ch == '"':
+                    self._adv()
+                    break
+                buf.append(ch)
+                self._adv()
+            flush()
+            if not segments:
+                segments.append(("t", ""))
+            return Token("str", segments, line, col)
 
         while True:
             ch = self._peek()
@@ -243,6 +263,13 @@ class Lexer:
                 continue
             if ch == '"':
                 tokens.append(self._string(line, col))
+                continue
+            if ch in "rR" and self._peek(1) == '"':
+                # Raw-string prefix. `r` immediately before a quote used to be an
+                # identifier followed by a string, which never parsed — so this
+                # costs no existing program its meaning.
+                self._adv()
+                tokens.append(self._string(line, col, raw=True))
                 continue
             if ch.isalpha() or ch == "_":
                 tokens.append(self._ident(line, col))

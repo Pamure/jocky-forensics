@@ -65,24 +65,25 @@ conclude, or only how comfortably they conclude it?*
 Six studies asked what a forensic language should be able to do and where JOCKY
 stands. Reports: `research/findings/cap-*.md`. Shipped from them in v1.4.0: the
 in-language test facility, denial auditing, the sandbox package read grant, and
-three language-consistency fixes the corpus exposed.
+three language-consistency fixes the corpus exposed. Shipped since: pattern
+matching with JOCKY's own linear-time engine (`re.*`, `fs.grep`, raw strings),
+the merged `/proc` snapshot for triage (752 → 290 ms), the `$PATH` audit
+rewrite, byte-level reads (`fs.read_bytes`/`fs.hash_bytes_raw`), Sigma and
+YARA rule import, correlation primitives (`index_by`/`group_by`), real
+streaming results, `--stamp-findings` (findings carry a `ts` for log
+correlation), the Pygments lexer, and a seeded grammar-aware fuzz harness.
 
 | Gap | Evidence | Effort | Source |
 |---|---|---|---|
-| **Pattern matching in the language** — string matching is literal-only, and the nine intrusion regexes are hard-coded in `detect.py`, unreachable from scripts (`regex` → undefined name) | `fs.grep`/`match`/`capture` proposed | M | `cap-forensic-features.md` |
-| **Time on findings + timeline merge** — mtimes are raw floats, findings carry no `ts`, `fs.timeline` sorts one root | blocks correlation with journald/auditd | M | `cap-forensic-features.md` |
-| **Structured ingestion** — JSON is the only parser; no CSV/JSONL/XML/Protobuf | triage of exported artifacts | S–M | `cap-forensic-features.md` |
+| **Structured ingestion** — JSON is the only parser; no CSV/JSONL/XML/Protobuf (Sigma/YARA import now covers the rule side) | triage of exported artifacts | S–M | `cap-forensic-features.md` |
 | **`needs` capability declaration + `jocky capabilities <script>`** — grants are per-run, never declared, and a script can currently *catch* a refusal (now audited in the result, but not pre-declared) | Deno/WASI/Starlark comparison | M | `cap-capability-models.md` |
 | **Per-path read narrowing** — `fs.read` reaches anything readable; Landlock grants are additive to fixed read roots | NIST SP 800-61r3 least-privilege | M | `cap-capability-models.md` |
 | **Cost model for natives** — a native costs one step regardless of bytes read, so `fs.scan` can exhaust memory "within budget" | `cap-performance-envelope.md` | S | `cap-forensic-features.md` |
-| **Editor tooling** — no Pygments lexer, TextMate/tree-sitter grammar, LSP, formatter or REPL; a prototype lexer tokenised 1,082 lines with zero errors in 22 rules | 24 `.jky` files exist to highlight | S (lexer) / L (LSP) | `cap-tooling.md` |
+| **Editor tooling** — a Pygments lexer now ships (`jocky[pygments]`); still missing: TextMate/tree-sitter grammar, LSP, formatter, REPL | 26 `.jky` files exist to highlight | S (grammar) / L (LSP) | `cap-tooling.md` |
 | **Fixture replay** — `jocky test --record` so a corpus can run against captured `/proc` snapshots instead of the live host | today every collector test depends on the host | M | `cap-dsl-survey.md` |
 | **Source positions on checks** — a failing `expect` reports its label and the difference, but not the line; `Proto.starts` records statement ingress and would carry a `lines` map to the wire format | rustc's `//~ ERROR` and Go's `ERROR` annotations both anchor a diagnostic to a line | M | `cap-language-testing.md` |
 | **Expectation files instead of inline values** — rustc keeps `.stderr` goldens with `--bless`; JOCKY's corpus asserts inline, so a deliberate change rewrites the test by hand | snapshot brittleness is a known failure mode (blind blessing) | M | `cap-language-testing.md` |
-| **Grammar-based fuzzing of the parser/VM** — wasm-smith's always-valid generator is the model; JOCKY has no fuzzing at all | the lexer's `KeyError` on a trailing `0` was found by reading, not by a fuzzer | M | `cap-language-testing.md` |
 | **Mutation testing** — mutants proxy real faults at equal coverage; diff-scoped mutation keeps it affordable | nothing measures whether the suite *would* catch a change | L | `cap-language-testing.md` |
-| **Merged `/proc` snapshot per run** — `det.triage()` performs four full `list_processes()` walks plus two fd sweeps; a shared snapshot measures ~2× on repeated passes | measured 4,696–5,257 syscalls per triage, 14.2 ms per walk on 118 pids | M | `cap-performance-envelope.md` |
-| **Byte-level reads** — `fs.read` decodes with `errors="replace"` (46 MB/s on binary vs 2.2 GB/s raw) and has no offset, so binary scanning is impossible; `fs.read_bytes` + an offset would fix both | the language has no byte type today | S | `cap-forensic-features.md`, `cap-performance-envelope.md` |
 | **Resource watchdog for collection** — osquery enforces duration/CPU/memory caps by default (0.8/1/3 s thresholds, 10% CPU, 12 s, 200 MB) and Velociraptor caps rows and ops per second; JOCKY has step and wall-clock budgets but no row, byte or CPU ceiling | a runaway `fs.scan` can still exhaust memory "within budget" | M | `cap-performance-envelope.md` |
 
 Closest external analogue: **Velociraptor VQL** — a host-native query language

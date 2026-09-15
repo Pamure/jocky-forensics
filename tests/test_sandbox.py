@@ -58,6 +58,12 @@ try:
     result["socket"] = True
 except OSError as exc:
     result["socket"] = f"denied: {{exc.errno}}"
+try:
+    libc = ctypes.CDLL(None)
+    res = libc.syscall(101, 0, 0, 0, 0) # PTRACE_TRACEME = 0
+    result["ptrace"] = True if res == 0 else f"denied: {{ctypes.get_errno()}}"
+except Exception as exc:
+    result["ptrace"] = f"denied: {{exc}}"
 print(json.dumps(result))
 """
 
@@ -116,7 +122,7 @@ def test_strict_level_denies_writes_and_sockets(tmp_path):
     assert isinstance(result["write_tmp"], str) and result["write_tmp"].startswith("denied")
     if sandbox.probe()["abi"] and sandbox.probe()["abi"] >= 1:
         assert result["socket"] is not True, "strict mode must not reach the network"
-
+        assert result["ptrace"] is not True, "strict mode must block ptrace syscall"
 
 def test_vm_level_keeps_the_working_directory_writable(tmp_path):
     if not sandbox.probe()["available"]:

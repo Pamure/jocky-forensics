@@ -21,9 +21,9 @@ expect_throws(fn() { return mem.memfd_run("print(1)") }, "exec refusal is specif
 # read-only probes stay available: they are what makes the gate usable
 let probe = mem.probe()
 expect(type(probe), "map", "mem.probe() returns a map")
-assert(probe.available == true or probe.available == false, "probe reports availability")
+expect(type(probe.available), "bool", "probe reports availability as a bool")
 expect(type(mem.uname().sysname), "str", "mem.uname() reports the kernel name")
-expect(mem.uname().sysname, mem.uname().sysname, "uname is stable within a run")
+expect(mem.uname().sysname, "Linux", "uname names the kernel this runtime targets")
 
 # fileless inspection helpers are read-only and therefore unguarded
 expect(type(mem.is_memfd(sys.pid())), "bool", "is_memfd answers for a live pid")

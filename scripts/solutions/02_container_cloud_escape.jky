@@ -1,0 +1,55 @@
+# 02_container_cloud_escape.jky
+# Production Threat Hunt: Container Breakouts, Namespace Escaping, and Cgroup Tampering.
+# Solves DFIR Problems 49–64.
+
+let procs = proc.list(500, true, false)
+let host_pid = sys.pid()
+let host_ns = proc.namespaces(host_pid)
+
+for p in procs {
+  # 1. Dual PID Namespace Detection (NSpid from /proc/<pid>/status)
+  # When running in a container, NSpid carries [host_pid, container_pid]
+  let nspids = p.get("nspid", [])
+  let is_nested = len(nspids) > 1
+  
+  # 2. Cgroup Hierarchy Inspection
+  let cg = proc.cgroups(p.pid)
+  let unified_cg = cg.get("unified", "")
+  
+  # 3. Container Breakout Detection: Process runs with container cgroup but shares host mount namespace
+  if p.get("is_container", false) {
+    let p_ns = proc.namespaces(p.pid)
+    let p_mnt = p_ns.get("mnt", "")
+    let host_mnt = host_ns.get("mnt", "")
+    
+    # If a container process has the exact same mount namespace inode as host init/launcher:
+    if p_mnt != "" and p_mnt == host_mnt and is_nested {
+      emit {
+        "kind": "container_mount_namespace_escape",
+        "severity": "critical",
+        "pid": p.pid,
+        "host_pid": nspids[0],
+        "container_pid": nspids[1],
+        "mount_namespace": p_mnt,
+        "cgroup": unified_cg,
+        "recommendation": "Containerized process has escaped mount boundary and shares root host filesystem"
+      }
+    }
+  }
+
+  # 4. Dangerous Capabilities Audit (CapEff check)
+  # CapEff bit 21 = CAP_SYS_ADMIN (0x200000), bit 12 = CAP_NET_ADMIN (0x1000)
+  let capeff = p.get("capeff", "")
+  if capeff != "" and p.get("is_container", false) {
+    if contains("0000003fffffffff", capeff) or contains("000001ffffffffff", capeff) {
+      emit {
+        "kind": "privileged_container_execution",
+        "severity": "high",
+        "pid": p.pid,
+        "capeff": capeff,
+        "cmdline": p.cmdline,
+        "recommendation": "Container executed with full host capabilities (--privileged), enabling trivial escape"
+      }
+    }
+  }
+}

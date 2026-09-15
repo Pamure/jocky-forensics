@@ -1,0 +1,136 @@
+# Byte-level reads — `fs.read_bytes`, `fs.hash_bytes_raw`, and the `offset`
+# that `fs.read` grew.
+#
+# `fs.read` decodes UTF-8 with `errors="replace"`: right for /proc text, lossy
+# for anything binary, since every invalid sequence becomes U+FFFD and the
+# original bytes are gone. `fs.read_bytes` decodes latin-1 instead, which maps
+# one byte onto exactly one code point, so `len()` is a byte count, string
+# indexing is byte indexing, and the result is a valid subject for the `re.*`
+# engine and for `fs.hash_bytes_raw`.
+#
+# Inputs are `/proc/self/*` and the interpreter's own image (`/proc/self/exe`,
+# an ELF on any Linux; `\x7fELF` is the magic): live host state, so the file
+# needs no fixture and holds on any machine that can run the runtime.
+
+# --- the byte read ---------------------------------------------------------
+let status = fs.read_bytes("/proc/self/status")
+expect(type(status), "str", "a byte read is a string (one character per byte)")
+assert(len(status) > 0, "the running process has a readable status file")
+assert(len(status) < 262144, "status is smaller than the default read limit")
+
+# Byte 5 is the tab after `Name:`; the first six bytes are ASCII, so the text
+# read and the byte read must agree there.
+expect(fs.read_bytes("/proc/self/status", 0, 5), "Name:",
+       "the first five bytes of /proc/<pid>/status are the Name: key")
+expect(fs.read("/proc/self/status", 5), fs.read_bytes("/proc/self/status", 0, 5),
+       "the text read and the byte read agree where the bytes are ASCII")
+
+# latin-1 never produces fewer characters than there are bytes; the UTF-8 text
+# read can, because invalid sequences collapse into U+FFFD.
+assert(len(fs.read_bytes("/proc/self/stat")) >= len(fs.read("/proc/self/stat")),
+       "one character per byte, so bytes >= characters")
+
+# --- the limit -------------------------------------------------------------
+expect(len(fs.read_bytes("/proc/self/status", 0, 16)), 16, "the limit is honoured exactly")
+expect(len(fs.read_bytes("/proc/self/status", 0, 0)), 0, "a zero limit reads nothing")
+expect(fs.read_bytes("/proc/self/status", 0, -1), "", "a negative limit clamps to zero")
+expect(len(fs.read_bytes("/proc/self/status", 0, 4096)), len(status),
+       "the default limit is larger than this file, so it reads the whole file")
+
+# --- offset paging ---------------------------------------------------------
+let page0 = fs.read_bytes("/proc/self/status", 0, 8)
+let page1 = fs.read_bytes("/proc/self/status", 8, 8)
+expect(len(page0), 8, "a full page comes back")
+expect(len(page1), 8, "the second page is the same size")
+assert(page0 != page1, "two offsets are two different byte windows")
+expect(page0 + page1, fs.read_bytes("/proc/self/status", 0, 16),
+       "8-byte pages at offset 0 and 8 reconstruct the 16-byte prefix")
+expect(fs.read_bytes("/proc/self/status", -5, 5), fs.read_bytes("/proc/self/status", 0, 5),
+       "a negative offset clamps to zero")
+expect(fs.read("/proc/self/status", 5) + fs.read("/proc/self/status", 1, 5),
+       fs.read("/proc/self/status", 6), "fs.read pages too: (path, limit, offset)")
+
+# `cmdline` cannot change while the process runs, so it is the right file to
+# pin end-of-file behaviour on.
+let argv_bytes = fs.read_bytes("/proc/self/cmdline")
+let size = len(argv_bytes)
+assert(size > 0, "the command line is readable as bytes")
+expect(fs.read_bytes("/proc/self/cmdline", size, 8), "", "an offset at EOF reads nothing")
+expect(fs.read_bytes("/proc/self/cmdline", size + 4096, 8), "",
+       "an offset past the end of the file reads nothing")
+expect(len(fs.read_bytes("/proc/self/cmdline", size - 4, 64)), 4,
+       "a read that runs off the end returns the bytes that were there")
+expect(re.test(r"\0", argv_bytes), true, "argv is NUL-separated: 0x00 survives a byte read")
+assert(len(re.find(r"\0", argv_bytes)) >= 1, "at least one NUL terminates the argv block")
+
+# --- the interpreter's own image -------------------------------------------
+# `\x7f` is decoded by the string lexer, not by the pattern engine (which knows
+# `\n \t \r \0` and treats any other escape as the literal character), so the
+# ELF magic is spelled with a normal string here.
+let head = fs.read_bytes("/proc/self/exe", 0, 16)
+expect(len(head), 16, "the image is longer than the window we ask for")
+expect(re.test("^\x7fELF", head), true,
+       "the first four bytes are the ELF magic — the DEL byte was not replaced")
+expect(re.test("ELF", head), true, "and the name follows it")
+assert(head != fs.read_bytes("/proc/self/exe", 16, 16),
+       "the next 16 bytes of the image are a different window")
+expect(fs.read_bytes("/proc/self/exe", 0, 8) + fs.read_bytes("/proc/self/exe", 8, 8), head,
+       "the 8-byte pages agree with the 16-byte read")
+
+# Paging through a binary must be byte-exact at any offset: 4 KiB read as one
+# window and as two 2 KiB pages is the same byte sequence, so it is the same
+# digest. (The same bytes through `fs.read` are decoded as UTF-8 text and are
+# not byte-exact there — that is why this function exists.)
+expect(fs.hash_bytes_raw(fs.read_bytes("/proc/self/exe", 0, 4096)),
+       fs.hash_bytes_raw(fs.read_bytes("/proc/self/exe", 0, 2048)
+                         + fs.read_bytes("/proc/self/exe", 2048, 2048)),
+       "two 2 KiB pages hash exactly like the 4 KiB read they came from")
+assert(len(fs.read_bytes("/proc/self/exe", 0, 4096)) == 4096,
+       "a full 4 KiB window comes back from a larger file")
+
+# --- hashing bytes ---------------------------------------------------------
+# The mapping the hash sees is latin-1, so a character above 0x7F is one byte:
+# U+00E9 is 0xE9, and the digest is that of the single byte 0xE9.
+expect(fs.hash_bytes_raw("abc"), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+       "ascii hashes as its own bytes")
+expect(fs.hash_bytes_raw("é"), "de2e331d891ae267a7009cb45b4e8830f170e0c937288ea2731a1941c7a53b0d",
+       "U+00E9 is the byte 0xE9 (what read_bytes produces for that byte)")
+expect(fs.hash_bytes("é") == fs.hash_bytes_raw("é"), false,
+       "hash_bytes hashes UTF-8 text, hash_bytes_raw hashes byte values")
+expect(fs.hash_bytes_raw("abc", "md5"), "900150983cd24fb0d6963f7d28e17f72",
+       "the second argument selects the algorithm")
+expect_throws(fn() { fs.hash_bytes_raw("é", "not-a-digest") },
+              "an unknown algorithm is an error", "not-a-digest")
+
+# First 16 bytes of /proc/<pid>/stat are `pid (comm)`, which cannot change
+# within one process — the wider fields (utime, faults) are further in.
+let digest = fs.hash_bytes_raw(fs.read_bytes("/proc/self/stat", 0, 16))
+expect(len(digest), 64, "a sha256 digest is 64 hex characters")
+expect(fs.hash_bytes_raw(fs.read_bytes("/proc/self/stat", 0, 16)), digest,
+       "the same bytes hash the same way on a second call")
+assert(fs.hash_bytes_raw(fs.read_bytes("/proc/self/stat", 0, 8))
+       != fs.hash_bytes_raw(fs.read_bytes("/proc/self/exe", 0, 8)),
+       "different bytes hash differently (the digest is not a constant)")
+
+# --- bytes as numbers ------------------------------------------------------
+# `ord` is what turns a byte back into the number it is. Before it existed, a
+# script had to search a 256-character alphabet for the character's position.
+expect(ord("A"), 65, "ord() of a byte-string character")
+expect(ord(chr(0xE9)), 0xE9, "latin-1 round-trips through ord/chr")
+expect(fs.hash_bytes_raw(chr(0xC8) + chr(0x00)),
+       "f04ba8caf5a3800fdbb20bd99633a2678c03a8f42220f2be341b61f5145b3aa3",
+       "two characters are the two bytes C8 00, one of them above 0x7F")
+let exe_head = fs.read_bytes("/proc/self/exe", 0, 4)
+expect(ord(exe_head[0]), 0x7F, "the first byte of an ELF image is 0x7F as a number")
+expect(re.test(r"^\x7fELF", exe_head), true,
+       "and the same bytes match the hex-escape pattern")
+
+# --- failures --------------------------------------------------------------
+expect_throws(fn() { fs.read_bytes("/nonexistent/path/for/sure") },
+              "reading a missing file is an error", "cannot read")
+expect_throws(fn() { fs.read_bytes("/proc") }, "a directory cannot be read as bytes", "cannot read")
+expect_throws(fn() { fs.read_bytes("/nonexistent/path", 8, 4) },
+              "the offset does not hide the failure", "cannot read")
+expect_throws(fn() { fs.read("/nonexistent/path/for/sure", 8, 0) },
+              "an unreadable text file raises instead of returning marker text",
+              "cannot read")

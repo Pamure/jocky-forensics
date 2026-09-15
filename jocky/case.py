@@ -26,9 +26,11 @@ Design decisions that matter
 from __future__ import annotations
 
 import hmac
+import fnmatch
 import os
+import re
 import time
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Sequence, Any, Dict, Iterable, List, Optional, Tuple
 
 from jocky.canon import (
     GENESIS,
@@ -47,18 +49,31 @@ MANIFEST_VERSION = 1
 
 #: Files that are part of the integrity layer itself and never chained.
 SKIP_NAMES = {MANIFEST_NAME, HEAD_NAME, SIGNATURE_NAME}
-SKIP_DIRS = {"__pycache__", ".git"}
 
 
-def _iter_files(directory: str) -> List[str]:
-    """Every chainable file, sorted by relative path for a stable chain."""
+def _iter_files(directory: str, exclude: Sequence[str] = ()) -> List[str]:
+    """Every chainable file, sorted by relative path for a stable chain.
+
+    Nothing is skipped implicitly — not ``.git``, not ``__pycache__``. Those are
+    exactly where a payload that runs on the analyst's next command can hide
+    (``.git/hooks/*``, ``.git/config`` with ``core.fsmonitor``), and a case
+    directory that reports "verified" while a subtree was never looked at is the
+    failure this chain exists to prevent. An operator who wants to leave
+    something out passes ``exclude`` (globs), and the manifest records the
+    exclusions so ``verify`` can report them instead of hiding them.
+    """
+    matchers = [fnmatch.translate(pattern) for pattern in exclude]
     found: List[str] = []
     for root, dirnames, filenames in os.walk(directory):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        dirnames[:] = sorted(dirnames)
         for name in sorted(filenames):
             if name in SKIP_NAMES:
                 continue
-            found.append(os.path.join(root, name))
+            path = os.path.join(root, name)
+            relative = os.path.relpath(path, directory)
+            if any(re.match(matcher, relative) for matcher in matchers):
+                continue
+            found.append(path)
     return sorted(found, key=lambda path: os.path.relpath(path, directory))
 
 

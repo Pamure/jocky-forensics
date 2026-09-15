@@ -3,14 +3,14 @@
   "child_process": 0,
   "exec": 0,
   "write_open": 0,
-  "read_open": 405,
+  "read_open": 586,
   "socket": 0,
-  "import": 62,
+  "import": 63,
   "write_paths": [],
   "exec_paths": [],
   "findings": 1,
   "errors": [],
   "steps": 885,
-  "duration_ms": 20.29079299973091,
+  "duration_ms": 17.915296000865055,
   "no_child_processes": true
 }

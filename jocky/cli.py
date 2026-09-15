@@ -17,10 +17,12 @@ import argparse
 import json
 import os
 import sys
+import time
 from typing import Any, Iterable, List, Optional
 
 from jocky import __version__
 from jocky import runner
+from jocky.errors import JockyRuntimeError
 from jocky.lang.vm import to_plain
 
 
@@ -55,17 +57,44 @@ def _print_findings(findings: Iterable[Any]) -> None:
               if isinstance(plain, (dict, list)) else plain)
 
 
+def _ndjson_finding(value: Any) -> None:
+    """Write one finding as it is emitted — the ``--ndjson`` sink."""
+    print(json.dumps({"kind": "finding", "value": to_plain(value)},
+                     ensure_ascii=False, default=str))
+
+
+def _stamped_sink(now: float):
+    """A sink that anchors each finding as it *arrives*.
+
+    The post-run `stamp_findings` pass cannot help a streamed run: the findings
+    left the process before it runs. One timestamp is captured up front, so
+    every finding of the run still shares the same collection moment.
+    """
+    def sink(value: Any) -> None:
+        if isinstance(value, dict):
+            value.setdefault("ts", now)
+        _ndjson_finding(value)
+    return sink
+
+
+def _run_sink(args: argparse.Namespace):
+    """The sink for this invocation, or None when findings must be retained."""
+    if not args.ndjson:
+        return None
+    if args.stamp_findings:
+        return _stamped_sink(round(time.time(), 3))
+    return _ndjson_finding
+
+
 def _print_ndjson(result: Any) -> None:
     """Stream a run as one JSON object per line.
 
-    The ``--json`` path materialises every finding into a single document: a
-    measured 300k-finding run costs ~400 MB and one giant ``json.dumps``. NDJSON
-    keeps memory flat and is line-oriented, so a reader can process findings as
-    they arrive.
+    With a sink installed (`--ndjson`), findings left the process as they were
+    emitted and `result.findings` is empty; without one, a caller that kept
+    them in memory (`--json`) still gets them printed here before the summary.
     """
     for finding in result.findings:
-        print(json.dumps({"kind": "finding", "value": to_plain(finding)},
-                         ensure_ascii=False, default=str))
+        _ndjson_finding(finding)
     for line in result.output:
         print(json.dumps({"kind": "output", "value": line}, ensure_ascii=False))
     for error in result.errors:
@@ -74,7 +103,7 @@ def _print_ndjson(result: Any) -> None:
         print(json.dumps({"kind": "check", **check}, ensure_ascii=False, default=str))
     print(json.dumps({
         "kind": "summary",
-        "findings": len(result.findings),
+        "findings": result.finding_count or len(result.findings),
         "errors": len(result.errors),
         "checks": len(result.checks),
         "denials": result.denials,
@@ -95,7 +124,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
     result = runner.run_source(source, wall_clock_ms=args.wall_ms,
                                max_steps=args.max_steps, ctx=ctx,
-                               sandbox=args.sandbox)
+                               sandbox=args.sandbox,
+                               emit_sink=_run_sink(args))
+    if args.stamp_findings:
+        runner.stamp_findings(result.findings)
     if args.ndjson:
         _print_ndjson(result)
     elif args.json:
@@ -121,7 +153,10 @@ def cmd_exec(args: argparse.Namespace) -> int:
         print(f"jocky: {exc}", file=sys.stderr)
         return 2
     result = runner.run_artifact(artifact, wall_clock_ms=args.wall_ms, ctx=ctx,
-                                 sandbox=args.sandbox)
+                                 sandbox=args.sandbox, max_steps=args.max_steps,
+                                 emit_sink=_run_sink(args))
+    if args.stamp_findings:
+        runner.stamp_findings(result.findings)
     _emit(result.to_dict(), True) if (args.json and not args.ndjson) else None
     if args.ndjson:
         _print_ndjson(result)
@@ -167,6 +202,8 @@ def cmd_fileless(args: argparse.Namespace) -> int:
                                        timeout=args.timeout, allow=args.allow,
                                        private=args.private)
     result = outcome.get("result") or {}
+    if args.stamp_findings:
+        runner.stamp_findings(result.get("findings") or [])
     if args.json:
         _emit(outcome, True)
     else:
@@ -195,6 +232,8 @@ def cmd_info(args: argparse.Namespace) -> int:
 def cmd_triage(args: argparse.Namespace) -> int:
     from jocky.rt import detect
     report = detect.triage(deep=args.deep)
+    if args.stamp_findings:
+        runner.stamp_findings(report["findings"])
     if args.json:
         _emit(report, True)
         return 0
@@ -302,6 +341,93 @@ def cmd_sign(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sigma(args: argparse.Namespace) -> int:
+    """Evaluate a Sigma rule against a log file, line by line."""
+    from jocky.rt import sigma as sigma_mod
+
+    try:
+        rule = sigma_mod.load_rule(_read(args.rule), source=args.rule)
+    except JockyRuntimeError as exc:
+        print(f"jocky: {exc}", file=sys.stderr)
+        return 2
+    try:
+        handle = open(args.input, "r", encoding="utf-8", errors="replace")
+    except OSError as exc:
+        print(f"jocky: cannot read {args.input}: {exc.strerror or exc}", file=sys.stderr)
+        return 2
+
+    findings: List[Dict[str, Any]] = []
+    scanned = 0
+    with handle:
+        for number, line in enumerate(handle, start=1):
+            scanned += 1
+            text = line.rstrip("\r\n")
+            if not text:
+                continue
+            record: Any = text
+            if text.startswith("{"):
+                # JSON records (Zeek/Suricata/Windows event exports) give the
+                # rule real fields; anything else is matched as text.
+                try:
+                    decoded = json.loads(text)
+                    if isinstance(decoded, dict):
+                        record = decoded
+                except json.JSONDecodeError:
+                    pass
+            if rule.matches(record):
+                findings.append({"kind": "sigma_match", **rule.summary(),
+                                 "line_no": number, "line": text[:400]})
+                if len(findings) >= args.limit:
+                    break
+    if args.stamp_findings:
+        runner.stamp_findings(findings)
+    summary = {"rule": rule.title, "id": rule.rule_id, "level": rule.level,
+               "lines": scanned, "matches": len(findings)}
+    if args.json:
+        _emit({"summary": summary, "findings": findings}, True)
+    else:
+        print(f"# {summary['matches']} match(es) in {summary['lines']} line(s) "
+              f"for {rule.title!r} [{rule.level}]")
+        for finding in findings:
+            print(f"[{rule.level:<8}] line {finding['line_no']}: {finding['line']}")
+    return 0 if not findings else 1
+
+
+def cmd_yara(parser_args: argparse.Namespace) -> int:
+    """Scan a file with a YARA rule (the subset this runtime implements)."""
+    from jocky.rt import yararules
+
+    try:
+        rule = yararules.load_rule(_read(parser_args.rule))
+    except JockyRuntimeError as exc:
+        print(f"jocky: {exc}", file=sys.stderr)
+        return 2
+    try:
+        with open(parser_args.target, "rb") as handle:
+            if parser_args.offset:
+                handle.seek(parser_args.offset)
+            data = handle.read(parser_args.limit).decode("latin-1")
+    except OSError as exc:
+        print(f"jocky: cannot read {parser_args.target}: {exc.strerror or exc}",
+              file=sys.stderr)
+        return 2
+    matched = rule.matches(data)
+    findings: List[Dict[str, Any]] = []
+    if matched:
+        findings.append({"kind": "yara_match", **rule.summary(),
+                         "path": parser_args.target, "scanned_bytes": len(data)})
+        if parser_args.stamp_findings:
+            runner.stamp_findings(findings)
+    if parser_args.json:
+        _emit({"matched": matched, "rule": rule.name, "findings": findings}, True)
+    else:
+        print(f"{'MATCH' if matched else 'no match'}: {rule.name} "
+              f"({len(data)} bytes of {parser_args.target})")
+        for finding in findings:
+            print(f"[{rule.name}] {finding['path']}")
+    return 1 if matched else 0
+
+
 def cmd_test(args: argparse.Namespace) -> int:
     from jocky import testrunner
     try:
@@ -371,7 +497,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("script")
     p_run.add_argument("--json", action="store_true")
     p_run.add_argument("--ndjson", action="store_true",
-                       help="stream findings as one JSON object per line (flat memory)")
+                       help="stream findings as one JSON object per line as they are "
+                            "emitted (no single JSON document, findings not retained)")
+    p_run.add_argument("--stamp-findings", action="store_true",
+                       help="add a `ts` (epoch seconds) to every finding map that lacks one")
     p_run.add_argument("--wall-ms", type=float, default=runner.DEFAULT_WALL_MS)
     p_run.add_argument("--max-steps", type=int, default=runner.DEFAULT_MAX_STEPS)
     p_run.add_argument("--allow", default=None,
@@ -384,7 +513,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_exec.add_argument("artifact")
     p_exec.add_argument("--json", action="store_true")
     p_exec.add_argument("--ndjson", action="store_true",
-                        help="stream findings as one JSON object per line (flat memory)")
+                        help="stream findings as one JSON object per line as they are "
+                            "emitted (no single JSON document, findings not retained)")
+    p_exec.add_argument("--stamp-findings", action="store_true",
+                        help="add a `ts` (epoch seconds) to every finding map that lacks one")
+    p_exec.add_argument("--max-steps", type=int, default=runner.DEFAULT_MAX_STEPS,
+                        help="instruction budget for an artifact you did not read "
+                             "(default: 50M)")
     p_exec.add_argument("--inspect", action="store_true")
     p_exec.add_argument("--wall-ms", type=float, default=runner.DEFAULT_WALL_MS)
     p_exec.add_argument("--allow", default=None,
@@ -416,6 +551,8 @@ def build_parser() -> argparse.ArgumentParser:
         p_fl.add_argument("--private", action="store_true",
                           help="hide /proc state from other same-uid processes "
                                "(also hides the process from your own triage)")
+        p_fl.add_argument("--stamp-findings", action="store_true",
+                          help="add a `ts` (epoch seconds) to every finding map that lacks one")
         p_fl.set_defaults(func=cmd_fileless)
 
     p_disasm = sub.add_parser("disasm", help="show compiled bytecode")
@@ -444,7 +581,30 @@ def build_parser() -> argparse.ArgumentParser:
     p_triage = sub.add_parser("triage", help="built-in host triage")
     p_triage.add_argument("--deep", action="store_true")
     p_triage.add_argument("--json", action="store_true")
+    p_triage.add_argument("--stamp-findings", action="store_true",
+                          help="add a `ts` (epoch seconds) to every finding map that lacks one")
     p_triage.set_defaults(func=cmd_triage)
+
+    p_sigma = sub.add_parser("sigma", help="evaluate a Sigma rule against a log file")
+    p_sigma.add_argument("rule", help="path to a Sigma rule (.yml)")
+    p_sigma.add_argument("input", help="log file: one record per line (JSON lines give "
+                                       "the rule real fields, anything else is matched as text)")
+    p_sigma.add_argument("--json", action="store_true")
+    p_sigma.add_argument("--limit", type=int, default=1000,
+                         help="stop after this many matches (default: 1000)")
+    p_sigma.add_argument("--stamp-findings", action="store_true",
+                         help="add a `ts` (epoch seconds) to every finding map that lacks one")
+    p_sigma.set_defaults(func=cmd_sigma)
+
+    p_yara = sub.add_parser("yara", help="scan a file with a YARA rule (subset)")
+    p_yara.add_argument("rule", help="path to a YARA rule (.yar)")
+    p_yara.add_argument("target", help="file to scan (bytes are read as-is)")
+    p_yara.add_argument("--offset", type=int, default=0)
+    p_yara.add_argument("--limit", type=int, default=32 * 1024 * 1024,
+                        help="bytes to read from the target (default: 32 MiB)")
+    p_yara.add_argument("--json", action="store_true")
+    p_yara.add_argument("--stamp-findings", action="store_true")
+    p_yara.set_defaults(func=cmd_yara)
 
     p_test = sub.add_parser("test", help="run JOCKY test files (.jky) that assert their own behaviour")
     p_test.add_argument("path", nargs="?", default="tests/lang",

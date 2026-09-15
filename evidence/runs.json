@@ -2,12 +2,12 @@
   "iterations": 1000,
   "distinct_finding_hashes": 1,
   "errors": 0,
-  "total_seconds": 18.119,
-  "runs_per_second": 55.2,
+  "total_seconds": 18.967,
+  "runs_per_second": 52.7,
   "duration_ms": {
-    "min": 12.298,
-    "median": 16.121,
-    "p95": 21.358,
-    "max": 28.348
+    "min": 14.96,
+    "median": 17.58,
+    "p95": 20.264,
+    "max": 45.372
   }
 }

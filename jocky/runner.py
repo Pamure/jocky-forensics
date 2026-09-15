@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import time
 from typing import Any, Dict, Optional, Tuple
 
 from jocky.lang.compiler import Program, compile_program
@@ -92,7 +93,8 @@ def run_program(program: Program, natives: Optional[Dict[str, Any]] = None,
                 ctx: Optional[Dict[str, Any]] = None,
                 sandbox: str = "off",
                 sandbox_extra_read: Optional[List[str]] = None,
-                sandbox_extra_write: Optional[List[str]] = None) -> RunResult:
+                sandbox_extra_write: Optional[List[str]] = None,
+                emit_sink: Optional[Any] = None) -> RunResult:
     """Execute a compiled program with the full forensic runtime.
 
     ``sandbox`` selects a Landlock confinement level (``off``/``vm``/``ro``/
@@ -102,7 +104,7 @@ def run_program(program: Program, natives: Optional[Dict[str, Any]] = None,
     report is attached to the result.
     """
     vm = VM(natives=natives if natives is not None else default_natives(),
-            max_steps=max_steps)
+            max_steps=max_steps, emit_sink=emit_sink)
     if ctx:
         vm.ctx.update(ctx)
     if sandbox and sandbox != "off":
@@ -157,9 +159,35 @@ def fileless_run_file(path: str, **kwargs: Any) -> Dict[str, Any]:
 
 
 # -------------------------------------------------------------------- helpers
+def stamp_findings(findings: Any, now: Optional[float] = None,
+                   field: str = "ts") -> int:
+    """Anchor finding maps to a wall-clock time; returns how many were stamped.
+
+    A finding carries no time of its own, so a run cannot be aligned with
+    journald/auditd output without one.  Three rules keep that safe: only
+    mappings are stamped (a script may emit bare strings), only when the field
+    is absent — a script that recorded when the *event* happened knows better
+    than the runner does — and every finding of a run shares one value, the
+    moment the run was collected.
+    """
+    stamp = round(time.time() if now is None else now, 3)
+    stamped = 0
+    for finding in findings or []:
+        if isinstance(finding, dict) and field not in finding:
+            finding[field] = stamp
+            stamped += 1
+    return stamped
+
+
 def result_summary(result: RunResult) -> str:
-    """One-line human summary used by the CLI."""
-    return (f"{len(result.findings)} finding(s), {len(result.errors)} error(s), "
+    """One-line human summary used by the CLI.
+
+    Counts findings with ``finding_count``: a streamed run
+    (``emit_sink``) hands every finding to the caller as it is produced and
+    keeps none, so ``len(result.findings)`` would report zero.
+    """
+    return (f"{result.finding_count or len(result.findings)} finding(s), "
+            f"{len(result.errors)} error(s), "
             f"{result.steps} steps, {result.duration_ms:.1f} ms")
 
 

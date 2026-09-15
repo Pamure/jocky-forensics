@@ -1,0 +1,80 @@
+# 01_anti_forensics_hunt.jky
+# Production Threat Hunt: Anti-Forensics, Process Hollowing, and In-Memory Execution.
+# Solves DFIR Problems 1–16 (zero child subprocesses, zero disk footprints).
+
+let procs = proc.list(500, true, true)
+let detected_threats = []
+
+for p in procs {
+  # 1. Anonymous memory execution (/memfd: or unlinked binary)
+  if p.memfd_exe {
+    emit {
+      "kind": "fileless_memfd_execution",
+      "severity": "critical",
+      "pid": p.pid,
+      "exe": p.exe,
+      "cmdline": p.cmdline,
+      "recommendation": "Memory-resident implant executing from anonymous memfd without disk presence"
+    }
+  }
+
+  if p.deleted_exe and not p.memfd_exe {
+    emit {
+      "kind": "unlinked_running_executable",
+      "severity": "high",
+      "pid": p.pid,
+      "exe": p.exe,
+      "cmdline": p.cmdline,
+      "recommendation": "Binary deleted from disk after execution to evade static file scanners"
+    }
+  }
+
+  # 2. Commandline and Kernel Comm Spoofing Detection
+  # Kernel task comm is in p.name (/proc/<pid>/stat). If cmdline mimics kernel worker but is userland:
+  if contains("kworker", p.cmdline) or contains("ksoftirqd", p.cmdline) {
+    if p.exe != nil and p.exe != "" {
+      emit {
+        "kind": "masquerading_kernel_thread",
+        "severity": "critical",
+        "pid": p.pid,
+        "comm": p.name,
+        "cmdline": p.cmdline,
+        "actual_exe": p.exe,
+        "recommendation": "Adversary disguised userland process as kernel worker thread via prctl PR_SET_MM"
+      }
+    }
+  }
+
+  # 3. Injection Primitives (userfaultfd, pidfd, io_uring in open descriptors)
+  let fds = p.get("fds", [])
+  let injection_fds = []
+  for fd in fds {
+    let target = fd.get("target", "")
+    if contains("userfaultfd", target) or contains("pidfd", target) or contains("io_uring", target) {
+      injection_fds.push(target)
+    }
+  }
+  if len(injection_fds) > 0 {
+    emit {
+      "kind": "process_injection_primitive",
+      "severity": "medium",
+      "pid": p.pid,
+      "descriptors": injection_fds,
+      "recommendation": "Process holds kernel descriptors commonly abused for ptrace-less shellcode staging"
+    }
+  }
+}
+
+# 4. Deleted Open File Descriptor Recovery Audit
+let deleted_files = proc.deleted_open()
+for df in deleted_files {
+  emit {
+    "kind": "deleted_open_file_residue",
+    "severity": "medium",
+    "pid": df.pid,
+    "path": df.path,
+    "descriptors": df.fds,
+    "count": df.count,
+    "recommendation": "Unlinked file held open in RAM; recover payload before process termination"
+  }
+}

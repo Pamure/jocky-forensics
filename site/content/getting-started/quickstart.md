@@ -385,6 +385,58 @@ machine.
 with severity and data source for each, is in
 [Detection checks](/docs/runtime/detection).
 
+### Anchor findings in time
+
+A finding is a map with no time of its own, so `--stamp-findings` adds a `ts`
+(epoch seconds) to every finding that lacks one — on `run`, `exec`, `triage`,
+`fileless` and `memfd` alike. A script that recorded when the *event* happened
+keeps its own value; the flag only fills in findings that were collected rather
+than observed.
+
+```bash
+jocky triage --stamp-findings --json > /tmp/triage.json
+```
+
+```json
+{
+  "check": "rwx_memory",
+  "severity": "low",
+  "title": "rwx region in pid 4219 (omp), 1048576 KiB",
+  "ts": 1789500203.502
+}
+```
+
+That single field is what lets a run share a timeline with everything else on
+the host: `time.iso(f.ts)` renders it, and `tl.merge` orders it together with
+parsed log lines:
+
+```jocky
+# correlate.jky - one timeline of runtime findings and log events.
+let report = json_decode(fs.read("/tmp/triage.json", 2000000))
+let events = []
+for f in report.findings {
+  if f.severity != "info" {
+    events.push({"ts": f.ts, "source": "triage", "text": f.title})
+  }
+}
+for h in fs.grep("/var/log/auth.log", r"^Failed password for (\S+) from (\S+)") {
+  # A bare log line carries no year; anchor it to the run for this demo.
+  events.push({"ts": report.findings[0].ts, "source": "auth.log", "text": h.line})
+}
+let merged = tl.merge(events)
+emit {"events": len(merged), "span_from": time.iso(merged[0].ts),
+      "sources": sort(transform(merged, fn(e) { return e.source }))}
+```
+
+```text
+{"events": 40, "span_from": "2026-09-15T19:23:23Z", …}
+```
+
+Each merged row also carries `tl_index` (its position in the merged list) and
+`tl_source` (which input it came from), so a finding can be traced back to the
+report it was read out of. 40 rows above is the shape of a real run: 39 triage
+findings plus one log line, all stamped from the same collection moment.
+
 ## Where to go next
 
 - [Architecture](/docs/getting-started/architecture) — the language pipeline, the encoder and the evidence harness.

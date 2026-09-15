@@ -31,3 +31,7 @@ class JockyRuntimeError(JockyError):
 
 class JockyArtifactError(JockyError):
     """Artifact is malformed, truncated or fails its integrity check."""
+
+
+class JockyLimitError(JockyError):
+    """Uncatchable safety limit (step budget, frame depth, wall clock)."""

@@ -263,6 +263,20 @@ def test_serving_with_a_token_file(management_server):
                 process.kill()
 
 
+
+def test_agent_rejects_tampered_payload_sha256():
+    """Agent must reject execution if payload_sha256 does not match decoded bytes."""
+    from jocky.agent import client
+    job = {
+        "job_id": "job_tampered",
+        "kind": "source",
+        "payload_b64": _b64('emit "MALICIOUS"'),
+        "payload_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    }
+    result, status = client._execute(job, "localhost", "test-agent")
+    assert status == "error"
+    assert result.get("errors") and "cryptographic task integrity violation" in result["errors"][0]
+
 def _b64(text: str) -> str:
     import base64
     return base64.b64encode(text.encode()).decode()

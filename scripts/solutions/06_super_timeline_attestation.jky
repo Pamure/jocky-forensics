@@ -1,0 +1,52 @@
+# 06_super_timeline_attestation.jky
+# Production Super-Timeline Generation and Evidentiary Chain of Custody.
+# Solves DFIR Problems 93–108.
+
+let timeline_events = []
+let now_epoch = time.now()
+
+# 1. Volatile Process Lifetime Events
+for p in proc.list(200) {
+  let start_time = p.get("start_epoch")
+  if start_time != nil and start_time > 0 {
+    timeline_events.push({
+      "ts": start_time,
+      "source": "procfs_exec",
+      "pid": p.pid,
+      "event": "Process started: " + str(p.exe),
+      "detail": p.cmdline
+    })
+  }
+}
+
+# 2. Filesystem Volatile Timeline in Sensitive Drop Zones (/tmp, /etc)
+let fs_events = fs.timeline("/etc", 20, 200)
+for fe in fs_events {
+  # 3. Timestomping Anomaly Detection: ctime < mtime is physically anomalous
+  let mtime = fe.get("mtime", 0)
+  let ctime = fe.get("ctime", 0)
+  let stomped = (ctime > 0 and mtime > 0 and ctime < mtime)
+  
+  timeline_events.push({
+    "ts": mtime,
+    "source": "filesystem_mtime",
+    "path": fe.path,
+    "event": "File modified: " + fe.path,
+    "timestomped_anomaly": stomped
+  })
+}
+
+# 4. Multi-Way Stable Timeline Merge via tl.merge
+let merged_timeline = tl.merge(timeline_events)
+
+# Emit chronologically ordered events
+for event in merged_timeline {
+  emit {
+    "kind": "super_timeline_entry",
+    "ts": event.ts,
+    "iso_time": time.iso(event.ts),
+    "source": event.source,
+    "description": event.get("event", ""),
+    "order_index": event.tl_index
+  }
+}

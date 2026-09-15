@@ -13,18 +13,164 @@ compatibility policy (see `docs/DESIGN.md` and the versioning page):
 ## [Unreleased]
 
 ### Added
-- `--ndjson` on `run` and `exec`: findings stream as one JSON object per line with
-  a summary line last. The `--json` path materialises every finding into a single
-  document (a measured 300k-finding run costs ~400 MB and one giant `json.dumps`);
-  NDJSON keeps memory flat.
+- **Sigma rules run as written** (`sigma.check`/`sigma.summary`, `jocky sigma <rule> <input>`):
+  a documented YAML subset — `contains`/`startswith`/`endswith`/`re`/`all`/`cased`/`base64`
+  modifiers, wildcards, `and/or/not`, `N of them`, `1 of selection*` — evaluated on
+  the linear-time engine. The engine that normally runs Sigma (Python `re` in
+  Zircolite, .NET regex in Chainsaw/Hayabusa) backtracks: a rule containing
+  `(\w+\s?)+whoami` against a crafted 80 KB log line was **still running after
+  20 s** there and answers in **745 ms** here, and the step budget bounds even
+  that. Unsupported constructs (`|cidr`, correlation rules, aggregations) are
+  refused by name rather than half-applied.
+- **YARA-subset signatures** (`yara.check`/`yara.summary`, `jocky yara <rule> <file>`):
+  hex strings with `??`/`?A` wildcards, `[n-m]` jumps and `(a | b)` alternatives,
+  text strings with `nocase`/`wide`/`ascii`/`fullword`, regex strings, and the
+  `any/all/N of them`, `$a at N`, `filesize` conditions — over byte strings from
+  `fs.read_bytes`. `xor`, `base64`, the module functions (`uint16(0)`, `pe.*`), `for` loops
+  and `~` (not-byte) are refused by name.
+- **Correlation primitives**: `index_by(rows, key_fn)` and `group_by(rows, key_fn)`
+  — the one-pass index that turns a nested-loop join into a lookup (VQL's
+  `memoize`, osquery's join), so process↔socket↔file correlation is O(n+m).
+- `fs.strings(path, min_len?, limit?, offset?, wide?)` — printable runs with
+  offsets, including UTF-16LE (`wide=True`), which a plain ASCII scan misses;
+  and `fs.entropy(path, offset?, limit?)` — the "is this packed?" signal, with a
+  `packed_likely` hint that is explicitly a hint, not a verdict.
+- `fs.grep_stats(...)` returns `{matches, lines, scanned_bytes, truncated}` so
+  "no match" is distinguishable from "the walk stopped".
+- `fs.read`/`fs.read_bytes` take an explicit ceiling (256 MiB) instead of letting
+  the script pick an allocation size.
 
 ### Changed
+- **`--ndjson` streams for real.** Findings are handed to a sink as they are
+  emitted (`VM(emit_sink=…)`) instead of being accumulated and printed after the
+  run: 150,000 findings went from 56.6 MB to **20.9 MB peak RSS**, flat in the
+  finding count. `result.finding_count` reports the total either way.
+- **`--stamp-findings` anchors streamed findings too** (one timestamp per run,
+  applied in the sink), and now covers `fileless`/`memfd`.
+- Confinement reads include the drop zones (`/tmp`, `/var/tmp`, `/dev/shm`):
+  that is where dropped payloads live, and denying triage scripts access to them
+  hid the artefacts the run exists to find. Reading them widens no privilege.
+- The evidence chain no longer skips `.git` or `__pycache__` implicitly: a
+  planted `.git/hooks/post-checkout` was invisible to `attest` **and** to
+  `verify`'s added-file check, so a directory that verified clean could carry a
+  payload that runs on the analyst's next `git` command. Unwanted subtrees are
+  excluded explicitly via `exclude=` and reported, never silently dropped.
+- `fs.read` on an unreadable path **raises** instead of returning
+  `<unreadable: PermissionError>`: a detection script treated that marker as
+  content, so a confined run reported a clean sweep where it was blind.
+- **`det.triage()` collects `/proc` once.** Each check walked the process table
+  on its own — five sweeps of the same data per run. A shared snapshot now
+  serves every check (measured on the development host: 752 ms → 290 ms
+  internal, 0.63–0.90 s → 0.29–0.42 s wall, with identical checks, severities
+  and counts). Each check is still callable on its own and collects its own
+  minimum when run without a snapshot.
+- **The `$PATH` audit does one pass per entry.** It resolved every entry with
+  `realpath` (six bridge round trips per `/mnt/c` entry under WSL), worked
+  duplicate entries twice, and re-read `/proc/mounts` for every fstype lookup.
+  Entries on a filesystem without POSIX mode bits are no longer resolved, since
+  their verdict cannot change: 591 ms → 89 ms on the development host, same
+  findings.
+
+### Fixed
+- **A pattern repeat count could hang the compiler forever.** `(?:){1000000000000000000}`
+  (or the same inside an untrusted Sigma rule) looped the attacker's count over
+  an empty body — invisible to the instruction-count bound because nothing was
+  emitted. Repeats are now bounded like the program is, and an empty-bodied
+  repeat is a no-op. All oversized counts raise in under a millisecond.
+- **Zero-width matches deleted text** in `re.replace`/`re.split`:
+  `re.replace(r"\s*", "a b c", "")` returned the empty string (host `re`: `abc`)
+  and `re.split("", "ab")` returned `['', '', '', '']` (host: `['', 'a', 'b', '']`).
+  Both now agree with the host engine on every shape tested.
+- **Back-references compiled to literal digits**: `(\w+)-\1` matched `a-1` and
+  never `a-a`. `\1`…`\9` now raise the documented offset-bearing error.
+- `list.unique()` stringified its results, so `[1, 2, 1].unique()[0] + 1` was
+  `"11"`: values keep their types now, maps/lists dedupe by value.
+- `tl.merge` defaulted to sorting by `time`, while findings carry `ts` — the
+  documented correlation recipe silently returned rows in input order. It now
+  picks `ts` when the rows have it.
+- `\B` matched at position 0 of an empty text where the host engine reports no
+  boundary.
+- `fs.grep` built a whole record before applying its byte cap (a 500 MB line cost
+  1 GB of RAM) and never returned on a stream with no newline; long lines are now
+  matched on their first MiB and the walk stops at the cap (with `truncated`
+  reported), and the long natives check the wall-clock deadline every chunk.
+- A single multiplication could burn minutes under a wall-clock budget
+  (`x = x * x` in a loop: 255 s under `--wall-ms 2000`): integer results are
+  capped at 65,536 bits, far above any forensic arithmetic and reported as a
+  catchable error.
+- Crafted artifacts with out-of-range operands (`JMP -1` wrapped to the last
+  instruction and spun out the step budget; `MK_FN 1e9`, `CONST 99`) surfaced
+  host `IndexError`s; they are now refused at decode as `JockyArtifactError`.
+- The sandbox report claimed path rules it had not installed (a missing path was
+  silently skipped but still listed); skipped rules are reported separately as
+  `rules_skipped`.
+- Error messages no longer leak host type names (`cannot compare nil < int`, not
+  `NoneType`).
+- **Pattern matching (`re`) and log searching (`fs.grep`)**, on JOCKY's own
+  linear-time engine rather than the host's backtracking one. Detection matches
+  attacker-authored text, so `(a+)+b` against 20,000 `a`s is a live concern:
+  it answers in ~50 ms here and does not finish at all under Python's `re`.
+  `re.test/full/find/captures/replace/split/escape` cover the subset that can
+  be matched in `O(len(text) × len(pattern))`; lazy quantifiers,
+  back-references and look-around are rejected with the offset in the message,
+  never silently reinterpreted. Correctness is pinned by differential testing
+  against `re` — 8,000+ comparisons of both the verdict and the match span —
+  and the documented semantics: matching is leftmost-longest, and `\w` is ASCII.
+- **Raw strings (`r"…"`)**: no escape decoding and no interpolation, so
+  `r"^\d{2}:\d{2}$"` is the pattern character for character. A repeat count in
+  a normal string is read as interpolation, so `"\d{2}"`-style patterns either
+  needed escaping or failed to parse.
+- **`time` and `tl` namespaces**: UTC `parse`/`iso`/`format`/`filetime`/`delta`
+  and event-timeline `merge`/`window`/`bucket`, with `nil`/row-preserving
+  degradation on unparseable input.
+- **Byte-level reads**: `fs.read_bytes(path, offset?, limit?)` returns a
+  latin-1 *byte string* — one character per byte, a bijective mapping, so
+  nothing is dropped or replaced the way `fs.read`'s UTF-8 `errors="replace"`
+  decode drops it — and `fs.hash_bytes_raw` digests exactly those bytes
+  (`fs.hash_bytes` keeps its UTF-8 semantics for text a script built itself).
+  `fs.read` gained an optional third argument, `offset`, so a large text file
+  can be paged. Binary scanning is now a script concern, not a native one:
+  `re.test(r"\x7fELF", fs.read_bytes(path, 0, 4))`.
+- **`\xNN` escapes in patterns**, with class ranges decoding both endpoints
+  (`r"[\x00-\x1f]+"`), plus `\0`, `\a`, and `\b` as a backspace inside a class.
+  An unknown *letter* escape (`r"\q"`) is now an error instead of a literal `q`,
+  matching Python's `re`: a typo that silently matches nothing is the worst
+  failure mode a detection rule can have.
+- **`ord()` and `chr()`** — the bridge between a character and its code point,
+  which is also the bridge between a byte string and the byte values in it:
+  `ord(fs.read_bytes(path, 0, 1))` is the first byte as a number, `hex(ord(b))`
+  renders it, and `chr(0x7f)` builds byte strings in script. Byte scans written
+  before this had to search a 256-character alphabet for a character's position.
+- `procfs.list_processes(detail_limit=…)` applies the expensive fields (`fds`,
+  `maps`, `environ`) to the first *N* processes only, so a bounded sample of
+  deep state no longer costs a deep read of every process on the host.
+- **`--stamp-findings` on `run`, `exec`, `triage`, `fileless` and `memfd`** adds
+  a `ts` (epoch seconds) to every finding map that lacks one, so a run can be
+  correlated with journald/auditd output instead of being a timeless list —
+  `time.iso(f.ts)` renders it and `tl.merge` puts it on one timeline with parsed
+  log lines. Only maps are stamped, a script's own `ts` always wins (it knows
+  when the event happened; the runner only knows when it collected), and every
+  finding of a run shares the collection moment.
+- An optional Pygments lexer (`jocky[pygments]`, entry point `jocky`) for
+  editor highlighting, plus a grammar-aware fuzz harness (`tests/fuzz_language.py`)
+  that runs generated programs through the full pipeline.
+- **Deeply nested source no longer escapes as a host exception.** The recursive
+  descent parser and the expression compiler had no limit of their own, so
+  `"(" * 200 + "1" + ")" * 200`, a 600-link method chain or 200 nested
+  `{interpolations}` raised the interpreter's `RecursionError` out of
+  `compile_source` — a traceback instead of a diagnostic, reachable from any
+  script or artifact source. Both phases now report their own limit
+  (`JockySyntaxError`/`JockyCompileError`, "nests too deeply"), with the shapes
+  pinned in `tests/test_language.py` and in the fuzz harness's defect recipes.
+  Found by the grammar-aware fuzzer (`tests/fuzz_language.py`), which produced
+  no other host-level exception in 23,000 generated programs.
+- `_mount_table()` re-read and re-sorted `/proc/mounts` on **every** fstype
+  query; it is now parsed once per process (`filefs.reset_mount_cache()` for
+  callers that mount something mid-run).
 - `expect_throws(closure, label, substring)` can require the error text to
   contain `substring`: "something raised" is a weak assertion when the
   interesting part is *which* error came back. A mismatch reports the actual
   message (`raised 'division by zero', which does not contain 'modulo by zero'`).
-
-### Fixed
 - **A single long native could overrun the wall-clock budget silently.** The
   deadline was sampled only between VM steps, so `ioc.match(…, "/usr", 4000)`
   ran 380 ms under `--wall-ms 20` and still reported `truncated: false`. The

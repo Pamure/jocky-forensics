@@ -27,10 +27,12 @@ jocky --help
 | [`memfd`](#memfd) | jocky memfd |
 | [`run`](#run) | jocky run |
 | [`serve`](#serve) | jocky serve |
+| [`sigma`](#sigma) | jocky sigma |
 | [`sign`](#sign) | jocky sign |
 | [`test`](#test) | jocky test |
 | [`triage`](#triage) | jocky triage |
 | [`verify`](#verify) | jocky verify |
+| [`yara`](#yara) | jocky yara |
 
 ## agent
 
@@ -138,7 +140,8 @@ usage: jocky examples [-h] [--json]
 ## exec
 
 ```text
-usage: jocky exec [-h] [--json] [--ndjson] [--inspect] [--wall-ms WALL_MS]
+usage: jocky exec [-h] [--json] [--ndjson] [--stamp-findings]
+                  [--max-steps MAX_STEPS] [--inspect] [--wall-ms WALL_MS]
                   [--allow ALLOW] [--sandbox {off,vm,ro,strict}]
                   artifact
 ```
@@ -147,7 +150,9 @@ usage: jocky exec [-h] [--json] [--ndjson] [--inspect] [--wall-ms WALL_MS]
 |---|---|
 | `artifact` |  |
 | `--json` |  |
-| `--ndjson` | stream findings as one JSON object per line (flat memory) |
+| `--ndjson` | stream findings as one JSON object per line as they are emitted (no single JSON document, findings not retained) |
+| `--stamp-findings` | add a `ts` (epoch seconds) to every finding map that lacks one |
+| `--max-steps` | instruction budget for an artifact you did not read (default: 50M) (default: `50000000`) |
 | `--inspect` |  |
 | `--wall-ms` |  (default: `60000.0`) |
 | `--allow` | grant privileged capabilities (comma list: syscall,exec) |
@@ -158,7 +163,7 @@ usage: jocky exec [-h] [--json] [--ndjson] [--inspect] [--wall-ms WALL_MS]
 
 ```text
 usage: jocky fileless [-h] [--json] [--wall-ms WALL_MS] [--timeout TIMEOUT]
-                      [--allow ALLOW] [--private]
+                      [--allow ALLOW] [--private] [--stamp-findings]
                       script
 ```
 
@@ -170,6 +175,7 @@ usage: jocky fileless [-h] [--json] [--wall-ms WALL_MS] [--timeout TIMEOUT]
 | `--timeout` |  (default: `120.0`) |
 | `--allow` | grant privileged capabilities (comma list: syscall,exec) |
 | `--private` | hide /proc state from other same-uid processes (also hides the process from your own triage) |
+| `--stamp-findings` | add a `ts` (epoch seconds) to every finding map that lacks one |
 
 
 ## info
@@ -198,7 +204,7 @@ usage: jocky init [-h] [--force] [--json] [directory]
 
 ```text
 usage: jocky memfd [-h] [--json] [--wall-ms WALL_MS] [--timeout TIMEOUT]
-                   [--allow ALLOW] [--private]
+                   [--allow ALLOW] [--private] [--stamp-findings]
                    script
 ```
 
@@ -210,13 +216,14 @@ usage: jocky memfd [-h] [--json] [--wall-ms WALL_MS] [--timeout TIMEOUT]
 | `--timeout` |  (default: `120.0`) |
 | `--allow` | grant privileged capabilities (comma list: syscall,exec) |
 | `--private` | hide /proc state from other same-uid processes (also hides the process from your own triage) |
+| `--stamp-findings` | add a `ts` (epoch seconds) to every finding map that lacks one |
 
 
 ## run
 
 ```text
-usage: jocky run [-h] [--json] [--ndjson] [--wall-ms WALL_MS]
-                 [--max-steps MAX_STEPS] [--allow ALLOW]
+usage: jocky run [-h] [--json] [--ndjson] [--stamp-findings]
+                 [--wall-ms WALL_MS] [--max-steps MAX_STEPS] [--allow ALLOW]
                  [--sandbox {off,vm,ro,strict}]
                  script
 ```
@@ -225,7 +232,8 @@ usage: jocky run [-h] [--json] [--ndjson] [--wall-ms WALL_MS]
 |---|---|
 | `script` |  |
 | `--json` |  |
-| `--ndjson` | stream findings as one JSON object per line (flat memory) |
+| `--ndjson` | stream findings as one JSON object per line as they are emitted (no single JSON document, findings not retained) |
+| `--stamp-findings` | add a `ts` (epoch seconds) to every finding map that lacks one |
 | `--wall-ms` |  (default: `60000.0`) |
 | `--max-steps` |  (default: `50000000`) |
 | `--allow` | grant privileged capabilities (comma list: syscall,exec) |
@@ -249,6 +257,21 @@ usage: jocky serve [-h] [--host HOST] [--port PORT] [--token TOKEN]
 | `--cert` |  |
 | `--key` |  |
 | `--state` |  (default: `.jocky-server`) |
+
+
+## sigma
+
+```text
+usage: jocky sigma [-h] [--json] [--limit LIMIT] [--stamp-findings] rule input
+```
+
+| Option | Description |
+|---|---|
+| `rule` | path to a Sigma rule (.yml) |
+| `input` | log file: one record per line (JSON lines give the rule real fields, anything else is matched as text) |
+| `--json` |  |
+| `--limit` | stop after this many matches (default: 1000) (default: `1000`) |
+| `--stamp-findings` | add a `ts` (epoch seconds) to every finding map that lacks one |
 
 
 ## sign
@@ -287,13 +310,14 @@ usage: jocky test [-h] [--pattern PATTERN] [--wall-ms WALL_MS]
 ## triage
 
 ```text
-usage: jocky triage [-h] [--deep] [--json]
+usage: jocky triage [-h] [--deep] [--json] [--stamp-findings]
 ```
 
 | Option | Description |
 |---|---|
 | `--deep` |  |
 | `--json` |  |
+| `--stamp-findings` | add a `ts` (epoch seconds) to every finding map that lacks one |
 
 
 ## verify
@@ -309,6 +333,24 @@ usage: jocky verify [-h] [--key-file KEY_FILE] [--anchor ANCHOR] [--json]
 | `--key-file` | HMAC key (or set JOCKY_EVIDENCE_KEY) to also check the signature |
 | `--anchor` | chain head stored outside the directory |
 | `--json` |  |
+
+
+## yara
+
+```text
+usage: jocky yara [-h] [--offset OFFSET] [--limit LIMIT] [--json]
+                  [--stamp-findings]
+                  rule target
+```
+
+| Option | Description |
+|---|---|
+| `rule` | path to a YARA rule (.yar) |
+| `target` | file to scan (bytes are read as-is) |
+| `--offset` |  |
+| `--limit` | bytes to read from the target (default: 32 MiB) (default: `33554432`) |
+| `--json` |  |
+| `--stamp-findings` |  |
 
 ## Exit codes
 

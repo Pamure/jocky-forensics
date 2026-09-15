@@ -1,0 +1,89 @@
+# Industry rule formats (`sigma.*`, `yara.*`) and correlation helpers.
+#
+# The point of these namespaces is that an analyst does not retype the
+# community's detection content: Sigma rules and YARA signatures are read as
+# written, on JOCKY's linear-time engine. Anything outside the supported subset
+# raises instead of matching something else.
+
+# --- Sigma ------------------------------------------------------------------
+# Rules are built line by line here because .jky has no multi-line strings;
+# in a real case they live in a file and arrive through fs.read.
+let rule = join([
+  "title: downloader piped to a shell",
+  "level: high",
+  "detection:",
+  "  downloader:",
+  "    CommandLine|contains:",
+  "      - 'curl'",
+  "      - 'wget'",
+  "  pipe:",
+  r"    CommandLine|re: '\|\s*(ba)?sh\b'",
+  "  admin:",
+  "    User: 'root'",
+  "  condition: downloader and pipe and not admin"
+], "\n")
+
+expect(sigma.check(rule, {"CommandLine": "curl http://x | sh", "User": "www-data"}),
+       true, "the rule matches a downloader piped into a shell")
+expect(sigma.check(rule, {"CommandLine": "curl http://x > /tmp/f", "User": "www-data"}),
+       false, "a plain download is not the shape")
+expect(sigma.check(rule, {"CommandLine": "curl http://x | sh", "User": "root"}),
+       false, "the not-filter excludes the admin shell")
+expect(sigma.check(rule, {"commandline": "wget -qO- http://y|bash", "user": "nobody"}),
+       true, "field names are case-insensitive, as in every Sigma backend")
+
+let meta = sigma.summary(rule)
+expect(meta.title, "downloader piped to a shell", "summary carries the rule title")
+expect(meta.level, "high", "and its level")
+expect(len(meta.selections), 3, "and its selection names")
+
+# A rule it cannot evaluate is refused, never half-applied.
+expect_throws(fn() { sigma.summary(join(["title: t", "detection:", "  s:",
+                                         "    A|cidr: 10.0.0.0/8", "  condition: s"], "\n")) },
+              "an unsupported modifier is an error", "not supported")
+
+# --- YARA -------------------------------------------------------------------
+# Byte signatures are written against a byte string, which is exactly what
+# fs.read_bytes returns.
+let sig = join([r"rule ElfHead {", r"  strings:", r"    $a = { 7F 45 4C 46 }",
+                r"  condition: $a", r"}"], "\n")
+let head = fs.read_bytes("/proc/self/exe", 0, 16)
+expect(yara.check(sig, head), true, "the ELF hex signature matches a real binary")
+expect(yara.check(sig, "not a binary"), false, "and does not match text")
+expect(yara.summary(sig).rule, "ElfHead", "summary carries the rule name")
+
+let wide_rule = join([r"rule Wide {", r"  strings:", "    $w = \"cmd.exe\" wide",
+                      r"  condition: $w", r"}"], "\n")
+# JOCKY strings have \xNN but not \uNNNN, so the UTF-16LE form is built with chr.
+let wide_bytes = join(["c", "m", "d", ".", "e", "x", "e"], chr(0)) + chr(0)
+expect(yara.check(wide_rule, wide_bytes), true,
+       "a wide string matches the UTF-16LE form")
+expect(yara.check(wide_rule, "cmd.exe"), false, "and not the ASCII form")
+expect_throws(fn() { yara.summary(join([r"rule T {", r"  strings:",
+                                        r"    $a = { 4D 5A } xor", r"  condition: $a",
+                                        r"}"], "\n")) },
+              "an unsupported modifier is an error", "xor")
+
+# --- correlation ------------------------------------------------------------
+# The primitive VQL calls `memoize` and osquery calls a join: one index, then a
+# lookup instead of a nested loop.
+let processes = [{"pid": 1, "exe": "/sbin/init"},
+                 {"pid": 2, "exe": "/usr/bin/sshd"}]
+let sockets = [{"pid": 2, "remote": "10.0.0.5:4444"},
+               {"pid": 7, "remote": "1.2.3.4:80"}]
+let by_pid = index_by(processes, fn(p) { return p.pid })
+
+let attributed = []
+for s in sockets {
+  let owner = by_pid.get(str(s.pid), nil)
+  if owner != nil {
+    attributed.push({"pid": s.pid, "exe": owner.exe, "remote": s.remote})
+  }
+}
+expect(len(attributed), 1, "only sockets with a matching process are attributed")
+expect(attributed[0].exe, "/usr/bin/sshd", "the join picked the right row")
+expect(attributed[0].remote, "10.0.0.5:4444", "and carried the socket field through")
+
+let grouped = group_by(sockets, fn(s) { return s.pid })
+expect(len(grouped["2"]), 1, "group_by keeps every row under its key")
+expect(len(grouped), 2, "and one entry per distinct key")

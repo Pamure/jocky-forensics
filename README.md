@@ -90,6 +90,9 @@ script cannot wedge an investigation.
 | `det` | triage: fileless processes, memfd mappings, deleted executables, temp executables, rwx regions, unusual listeners, deleted-open files, `LD_*` injection, suspicious command lines, persistence, hijackable PATH entries |
 | `ioc` | correlate indicator sets (IPs, names, paths, domains, hashes) against processes, sockets and files |
 | `mem` | direct-syscall probe/execute, memfd self-test, `is_memfd`/`memfd_maps` |
+| `re` | linear-time pattern matching (`test`/`full`/`find`/`captures`/`replace`/`split`/`escape`) and `fs.grep` for log lines — never the host's backtracking regex engine |
+| `time` | UTC timestamps: `now`, `iso`, `parse`, `format`, `filetime`, `delta` |
+| `tl` | timeline shaping: `merge`, `window`, `bucket` over collected events |
 
 ## Why it does not trip noisy telemetry
 

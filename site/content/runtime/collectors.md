@@ -228,7 +228,7 @@ work: hashing, metadata, magic sniffing and scanning are read-only syscalls.
 
 | Call | Behaviour |
 |---|---|
-| `fs.hash(path)` / `fs.hash_bytes(str)` | streamed SHA-256 in 1 MiB chunks (`nil` when unreadable) / hash of a UTF-8 string |
+| `fs.hash(path)` / `fs.hash_bytes(str)` / `fs.hash_bytes_raw(str, algo)` | streamed SHA-256 in 1 MiB chunks (`nil` when unreadable) / hash of a UTF-8 string / hash of a byte string's own byte values |
 | `fs.stat(path)` | `lstat` **plus** the flags a triage looks for |
 | `fs.magic(path)` | first 16 bytes against a fixed signature table |
 | `fs.scan(root, max_files, pattern, max_depth)` | bounded recursive walk |
@@ -236,7 +236,8 @@ work: hashing, metadata, magic sniffing and scanning are read-only syscalls.
 | `fs.special_perms(root, max_files)` | `setuid` / `setgid` / `world_writable` buckets |
 | `fs.path_dirs()` | every `$PATH` entry with hijack-relevant flags |
 | `fs.ld_preload()` | `/etc/ld.so.preload` contents |
-| `fs.read(path, limit)` | text read (`<unreadable: OSErrorName>` on failure) |
+| `fs.read(path, limit, offset)` | text read — UTF-8 with `errors="replace"`; raises on an unreadable path (it used to return `<unreadable: …>`, which scripts mistook for content) |
+| `fs.read_bytes(path, offset, limit)` | byte read — latin-1, one character per byte, lossless; raises `cannot read <path>: …` |
 
 `stat()` returns `path`, `size`, `mode`, `mode_str`, `uid`, `gid`,
 `mtime`/`ctime`/`atime`, `inode`, `nlink`, `is_dir`, `is_link`, `is_file`,
@@ -307,6 +308,71 @@ emit {"path_dirs": len(dirs), "missing": missing, "hijackable": hijackable}
 `export PATH` in this shell contains 66 entries, 3 of which do not exist on
 disk and 0 of which are hijackable. The detection layer turns the same data into
 findings — see [detection checks](/docs/runtime/detection).
+
+### Byte-level reads
+
+`fs.read` is a *text* read: it decodes UTF-8 with `errors="replace"`. That is
+right for `/proc` and log lines and wrong for anything binary — the first 4 KiB
+of `/proc/self/exe` below are 4096 bytes on disk and 4075 characters after that
+decode, because 21 bytes were not valid UTF-8 and came back as U+FFFD with the
+original values gone. `fs.read_bytes` is the lossless counterpart: it seeks to
+`offset`, reads at most `limit` bytes and returns them decoded as **latin-1**.
+
+Latin-1 is what makes it lossless: it maps each byte value 0..255 onto exactly
+one code point, U+0000..U+00FF, so no byte is dropped, replaced or re-encoded —
+Python's own idiom for byte-preserving text. The consequence a script can rely
+on is that **one character is one byte**: `len()` is the byte count, `s[i]` is
+byte *i*, and `s.encode("latin-1")` reproduces the file exactly. A byte string
+is therefore also a valid subject for the `re.*` engine, so a signature scan
+needs no byte type at all:
+
+```jocky
+# Scan a binary for a signature, and hash the first 4 KiB of it.
+let window = fs.read_bytes("/proc/self/exe", 0, 4096)
+emit {"bytes": len(window), "sha256_first_4k": fs.hash_bytes_raw(window)}
+
+for signature in [["\x7fELF", "elf"], ["MZ", "pe"], ["PK\x03\x04", "zip"], ["%PDF", "pdf"]] {
+  if re.test(re.escape(signature[0]), window) {
+    emit {"signature": signature[1], "at": re.find(re.escape(signature[0]), window)[0].start}
+  }
+}
+
+# The same window in two halves is byte-for-byte the same read.
+let halves = fs.read_bytes("/proc/self/exe", 0, 2048) + fs.read_bytes("/proc/self/exe", 2048, 2048)
+emit {"paging_is_exact": halves == window, "sha256_of_pages": fs.hash_bytes_raw(halves)}
+
+# NUL bytes are characters here, so argv comes back separators and all.
+emit {"argv_nuls": len(re.find(r"\0", fs.read_bytes("/proc/self/cmdline", 0, 256)))}
+emit {"byte_read_chars": len(window), "text_read_chars": len(fs.read("/proc/self/exe", 4096))}
+```
+
+```text
+{"bytes": 4096, "sha256_first_4k": "4f37d48bcddebea0d9803a619f3f00af0be41ab33999ac9309a015d59f131aa2"}
+{"signature": "elf", "at": 0}
+{"paging_is_exact": true, "sha256_of_pages": "4f37d48bcddebea0d9803a619f3f00af0be41ab33999ac9309a015d59f131aa2"}
+{"argv_nuls": 4}
+{"byte_read_chars": 4096, "text_read_chars": 4075}
+```
+
+`fs.hash_bytes_raw(text, algo)` hashes the **byte values** of the string, which
+is what composes with a byte read: it is the digest of the bytes that were in
+the file. `fs.hash_bytes` is unchanged and still hashes a *text* string, i.e.
+its UTF-8 encoding — the two answer different questions about the same
+characters, and differ for every value above 0x7F: `fs.hash_bytes("é")` is the
+digest of `c3 a9`, while `fs.hash_bytes_raw("é")` is the digest of the single
+byte `e9`. Use the raw form for `fs.read_bytes` output, the UTF-8 form for a
+string the script built itself.
+
+Bounds and failures differ from the text read on purpose. `read_bytes(path,
+offset, limit)` defaults to offset 0 and a 262144-byte (256 KiB) limit; negative
+values clamp to 0; a read that runs past the end returns the bytes that were
+there, so an offset at or beyond EOF is an empty string rather than an error.
+A file that cannot be *opened* raises `cannot read <path>: <errno message>` —
+a forensic script matching for a signature must be able to tell "no match" from
+"could not read", which a silent empty string would hide. `fs.read` keeps its
+raised-error behaviour and gained the same kind of third
+argument, `fs.read(path, limit, offset)` (note the argument order: `read_bytes`
+is seek-then-read, `fs.read` keeps its existing `limit`-second signature).
 
 ## sysinfo — host inventory
 

@@ -14,6 +14,7 @@ raises a catchable error naming the function.
 | Function | Arity |
 |---|---|
 | `assert` | 1..2 |
+| `chr` | 1..1 |
 | `contains` | 2..2 |
 | `count` | 1..2 |
 | `dict` | 0..0 |
@@ -23,7 +24,9 @@ raises a catchable error naming the function.
 | `fail` | 0..1 |
 | `filter` | 2..2 |
 | `float` | 1..1 |
+| `group_by` | 2..2 |
 | `hex` | 1..1 |
+| `index_by` | 2..2 |
 | `int` | 1..1 |
 | `join` | 1..2 |
 | `json_decode` | 1..1 |
@@ -31,6 +34,7 @@ raises a catchable error naming the function.
 | `keys` | 1..1 |
 | `len` | 1..1 |
 | `now` | 0..0 |
+| `ord` | 1..1 |
 | `print` | 0+ |
 | `range` | 1..2 |
 | `skip` | 0..1 |

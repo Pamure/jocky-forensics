@@ -1,0 +1,56 @@
+# 04_network_covert_channels.jky
+# Production Threat Hunt: Covert Channels, Unattributed Sockets, and Shellouts.
+# Solves DFIR Problems 81–92 (linear O(N+M) correlation without database locks).
+
+# 1. Linear-Time Process-to-Socket Correlation (Solving osquery/VQL Cartesian explosion)
+let procs = proc.list(500)
+let conns = net.connections(true, false)
+
+let procs_by_pid = index_by(procs, fn(p) { return p.pid })
+let socket_attribution = []
+
+for c in conns {
+  let pid = c.get("pid", 0)
+  let owner = procs_by_pid.get(str(pid), nil)
+  
+  if owner != nil {
+    socket_attribution.push({
+      "proto": c.proto,
+      "local": str(c.local_addr) + ":" + str(c.local_port),
+      "remote": str(c.remote_addr) + ":" + str(c.remote_port),
+      "pid": pid,
+      "exe": owner.exe,
+      "cmdline": owner.cmdline
+    })
+  } else {
+    # 2. Unattributed Sockets (Ghost listeners / sockets without owning userland process)
+    if c.state == "LISTEN" or c.state == "ESTABLISHED" {
+      emit {
+        "kind": "unattributed_network_socket",
+        "severity": "medium",
+        "proto": c.proto,
+        "local": str(c.local_addr) + ":" + str(c.local_port),
+        "remote": str(c.remote_addr) + ":" + str(c.remote_port),
+        "inode": c.inode,
+        "state": c.state,
+        "recommendation": "Active socket exists with no visible userland process owner (kernel rootkit or hidden PID)"
+      }
+    }
+  }
+}
+
+# 3. Outbound Shellouts to Common Reverse Shell Ports (4444, 1337, 8888, 9001)
+for sa in socket_attribution {
+  let remote_port = int(sa.remote.split(":")[1])
+  if remote_port == 4444 or remote_port == 1337 or remote_port == 8888 or remote_port == 9001 {
+    emit {
+      "kind": "suspicious_reverse_shell_port",
+      "severity": "high",
+      "pid": sa.pid,
+      "exe": sa.exe,
+      "cmdline": sa.cmdline,
+      "remote": sa.remote,
+      "recommendation": "Process established connection to classic attacker C2 reverse shell listener"
+    }
+  }
+}

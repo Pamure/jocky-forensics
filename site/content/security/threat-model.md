@@ -290,7 +290,7 @@ the same source from anonymous memory. A submitted job that reads two files
 produced:
 
 ```text
-stored finding: {"evidence": {"shadow": "<unreadable: PermissionError>",
+stored finding: {"evidence": {"shadow": "cannot read /etc/shadow: Permission denied",
  "passwd": "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:dae"}}
 ```
 
@@ -315,7 +315,7 @@ subprocess primitive; the journal entry is written *before* the result is sent.
 $ ./venv/bin/jocky run /tmp/jky-exp/sandbox.jky --sandbox off
 {"kind": "sandbox", "read": "ANALYST-SCRATCH-SECRET\n", "bytes": 23}
 $ ./venv/bin/jocky run /tmp/jky-exp/sandbox.jky --sandbox ro
-{"kind": "sandbox", "read": "<unreadable: PermissionError>", "bytes": 29}
+{"kind": "sandbox", "read": "cannot read /etc/shadow: Permission denied", "bytes": 29}
 {"kind": "sandbox", "processes": 40}          # collection still works
 ```
 

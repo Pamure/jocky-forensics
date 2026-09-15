@@ -17,12 +17,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from jocky.errors import JockyError, JockyRuntimeError
+from jocky.errors import JockyError, JockyLimitError, JockyRuntimeError
 from jocky.lang.compiler import Proto, Program
-
-
-class JockyLimitError(JockyError):
-    """Uncatchable safety limit (step budget, frame depth, wall clock)."""
 
 
 @dataclass
@@ -130,7 +126,8 @@ def to_plain(value: Any) -> Any:
 # --------------------------------------------------------------------- results
 @dataclass
 class RunResult:
-    findings: List[Any] = field(default_factory=list)
+    findings: List[Any] = field(default_factory=list)   # empty when streamed
+    finding_count: int = 0                              # every emit, streamed or not
     output: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     checks: List[Dict[str, Any]] = field(default_factory=list)   # assert/expect results
@@ -144,6 +141,7 @@ class RunResult:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "findings": to_plain(self.findings),
+            "finding_count": self.finding_count,
             "output": list(self.output),
             "errors": list(self.errors),
             "checks": list(self.checks),
@@ -160,8 +158,15 @@ class VM:
     """Executes a compiled :class:`Program`."""
 
     def __init__(self, natives: Optional[Dict[str, Any]] = None,
-                 max_steps: int = 20_000_000, max_frames: int = 256):
+                 max_steps: int = 20_000_000, max_frames: int = 256,
+                 emit_sink: Optional[Callable[[Any], None]] = None):
         self.max_steps = max_steps
+        # ``emit_sink`` hands each finding to the caller as it is produced, so a
+        # filesystem sweep that emits hundreds of thousands of findings does not
+        # accumulate them in memory. ``self.findings`` stays empty in that mode;
+        # ``finding_count`` is what summaries report.
+        self._emit_sink = emit_sink
+        self.finding_count = 0
         self.max_frames = max_frames
         self.native_calls = 0
         self.steps = 0
@@ -225,6 +230,7 @@ class VM:
         self.program = program
         self.steps = 0
         self.native_calls = 0
+        self.finding_count = 0
         self.findings = []
         self.output = []
         self.frames = [self._new_frame(program.main, [None] * program.main.nlocals)]
@@ -241,6 +247,7 @@ class VM:
         duration = (time.perf_counter() - started) * 1000.0
         return RunResult(
             findings=list(self.findings),
+            finding_count=self.finding_count,
             output=list(self.output),
             errors=errors,
             checks=list(self.ctx.get("checks", [])),
@@ -313,7 +320,7 @@ class VM:
             self.native_calls += 1
             return fn(self, args)
         if not isinstance(fn, JFn):
-            raise JockyRuntimeError(f"{type(fn).__name__} is not callable")
+            raise JockyRuntimeError(f"{_value_type(fn)} is not callable")
         proto = fn.proto
         if len(args) != len(proto.params):
             raise JockyRuntimeError(
@@ -384,7 +391,7 @@ class VM:
     def _binop(self, fn: Callable[[Any, Any], Any]):
         def op(frame: Frame, arg: Any) -> None:
             a, b = self._pop2(frame)
-            frame.stack.append(fn(a, b))
+            frame.stack.append(_bounded(fn(a, b)))
         return op
 
     def _cmp(self, fn: Callable[[Any, Any], bool], symbol: str):
@@ -394,7 +401,7 @@ class VM:
             if isinstance(a, str) and isinstance(b, str):
                 return fn(a, b)
             raise JockyRuntimeError(
-                f"cannot compare {type(a).__name__} {symbol} {type(b).__name__}"
+                f"cannot compare {_value_type(a)} {symbol} {_value_type(b)}"
             )
         return compare
 
@@ -419,7 +426,7 @@ class VM:
         if isinstance(a, list) and isinstance(b, int):
             return a * max(0, b)
         if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-            return a * b
+            return _bounded(a * b)
         raise JockyRuntimeError(f"cannot multiply {type(a).__name__} by {type(b).__name__}")
 
     def _div(self, a: Any, b: Any) -> Any:
@@ -625,7 +632,7 @@ class VM:
                 raise JockyLimitError(f"call depth exceeded ({self.max_frames} frames)")
             self.frames.append(self._new_frame(proto, list(callee.captures) + list(args)))
             return
-        raise JockyRuntimeError(f"{type(callee).__name__} is not callable")
+        raise JockyRuntimeError(f"{_value_type(callee)} is not callable")
 
     def _op_ret(self, frame: Frame, arg: Any) -> None:
         value = frame.stack.pop() if frame.stack else None
@@ -659,7 +666,12 @@ class VM:
         it.index += 1
 
     def _op_emit(self, frame: Frame, arg: Any) -> None:
-        self.findings.append(frame.stack.pop())
+        value = frame.stack.pop()
+        self.finding_count += 1
+        if self._emit_sink is not None:
+            self._emit_sink(value)
+        else:
+            self.findings.append(value)
 
     def _op_halt(self, frame: Frame, arg: Any) -> None:
         self.frames.clear()
@@ -690,86 +702,29 @@ class VM:
         raise JockyRuntimeError(f"cannot read member {name!r} of {type(obj).__name__}")
 
     def _str_method(self, s: str, name: str) -> Any:
-        # name -> (implementation, min arity, max arity)
-        table: Dict[str, Tuple[Callable[..., Any], int, Optional[int]]] = {
-            "len": (lambda: len(s), 0, 0),
-            "upper": (lambda: s.upper(), 0, 0),
-            "lower": (lambda: s.lower(), 0, 0),
-            "strip": (lambda: s.strip(), 0, 0),
-            "split": (lambda sep=None: s.split(sep) if sep is not None else s.split(), 0, 1),
-            "replace": (lambda a, b: s.replace(to_str(a), to_str(b)), 2, 2),
-            "contains": (lambda sub: to_str(sub) in s, 1, 1),
-            "starts_with": (lambda pre: s.startswith(to_str(pre)), 1, 1),
-            "ends_with": (lambda suf: s.endswith(to_str(suf)), 1, 1),
-            "find": (lambda sub: s.find(to_str(sub)), 1, 1),
-            "substr": (lambda start, end=None: s[start:end], 1, 2),
-            "to_int": (lambda: int(s.strip() or "0"), 0, 0),
-            "to_float": (lambda: _safe_float(s), 0, 0),
-            "chars": (lambda: list(s), 0, 0),
-            "bytes": (lambda: list(s.encode("utf-8", "surrogateescape")), 0, 0),
-            "lines": (lambda: s.splitlines(), 0, 0),
-        }
-        if name in table:
-            fn, lo, hi = table[name]
-            return NativeFn(f"str.{name}", lambda vm, args: fn(*args), lo, hi)
+        spec = _STR_METHODS.get(name)
+        if spec is not None:
+            fn, lo, hi = spec
+            return NativeFn(f"str.{name}", lambda vm, args: fn(s, *args), lo, hi)
         raise JockyRuntimeError(f"string has no member {name!r}")
 
     def _list_method(self, items: list, name: str) -> Any:
-        table: Dict[str, Callable[..., Any]] = {
-            "len": lambda: len(items),
-            "first": lambda: items[0] if items else None,
-            "last": lambda: items[-1] if items else None,
-            "push": lambda v: (items.append(v), items)[1],
-            "contains": lambda v: any(x == v for x in items),
-            "index": lambda v: items.index(v) if v in items else -1,
-            "count": lambda v: sum(1 for x in items if x == v),
-            "join": lambda sep="": to_str(sep).join(to_str(x) for x in items),
-            "slice": lambda start=0, end=None: items[start:end],
-            # sort/reverse return new lists, matching the global sort() helper:
-            # a collector's result should not be reordered by asking for an
-            # ordered view of it. push() and index assignment remain the
-            # explicit mutators.
-            "reverse": lambda: list(reversed(items)),
-            "sort": lambda: sorted(items, key=_sort_key),
-            "sum": lambda: sum(x for x in items if isinstance(x, (int, float))),
-            "min": lambda: min(items) if items else None,
-            "max": lambda: max(items) if items else None,
-            "unique": lambda: list(dict.fromkeys(to_str(x) for x in items)),
-        }
-        if name in table:
-            fn = table[name]
-            return NativeFn(f"list.{name}", lambda vm, args: fn(*args), 0, None)
+        fn = _LIST_METHODS.get(name)
+        if fn is not None:
+            return NativeFn(f"list.{name}", lambda vm, args: fn(items, *args), 0, None)
         raise JockyRuntimeError(f"list has no member {name!r}")
 
     def _dict_method(self, mapping: dict, name: str) -> Any:
-        table: Dict[str, Callable[..., Any]] = {
-            "keys": lambda: list(mapping.keys()),
-            "values": lambda: list(mapping.values()),
-            "items": lambda: [[k, v] for k, v in mapping.items()],
-            "len": lambda: len(mapping),
-            "has": lambda k: to_str(k) in mapping,
-            "get": lambda k, default=None: mapping.get(to_str(k), default),
-            "set": lambda k, v: (mapping.__setitem__(to_str(k), v), mapping)[1],
-            "del": lambda k: (mapping.pop(to_str(k), None), mapping)[1],
-            "merge": lambda other: {**mapping, **(other if isinstance(other, dict) else {})},
-        }
-        if name in table:
-            fn = table[name]
-            return NativeFn(f"map.{name}", lambda vm, args: fn(*args), 0, None)
+        fn = _DICT_METHODS.get(name)
+        if fn is not None:
+            return NativeFn(f"map.{name}", lambda vm, args: fn(mapping, *args), 0, None)
         raise JockyRuntimeError(f"map has no member {name!r}")
 
     def _number_method(self, value: Any, name: str) -> Any:
-        table: Dict[str, Callable[..., Any]] = {
-            "to_str": lambda: to_str(value),
-            "to_int": lambda: int(value),
-            "to_float": lambda: float(value),
-            "abs": lambda: abs(value),
-            "hex": lambda: hex(int(value)),
-        }
-        if name in table:
-            return NativeFn(f"num.{name}", lambda vm, args: table[name](), 0, 0)
+        fn = _NUM_METHODS.get(name)
+        if fn is not None:
+            return NativeFn(f"num.{name}", lambda vm, args: fn(value), 0, 0)
         raise JockyRuntimeError(f"number has no member {name!r}")
-
 
 def _safe_float(text: str) -> float:
     """Permissive float parsing, matching the global ``float()`` helper."""
@@ -779,9 +734,136 @@ def _safe_float(text: str) -> float:
         return 0.0
 
 
+#: Largest integer a script may build (65536 bits ≈ 19,700 decimal digits).
+#: Python integers are unbounded, so `x = x * x` in a loop is one VM instruction
+#: that doubles in cost every iteration: a 4-line script took 255 s of wall clock
+#: under a 2 s budget, because no limit can preempt a single multiplication. The
+#: ceiling is far above anything forensic arithmetic needs (sizes, epochs, hashes,
+#: byte offsets) and turns that loop into a reported error on the 17th squaring.
+MAX_INT_BITS = 1 << 16
+
+
+def _bounded(value: Any) -> Any:
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value.bit_length() > MAX_INT_BITS:
+            raise JockyRuntimeError(
+                f"integer result exceeds {MAX_INT_BITS} bits; refusing to keep "
+                "growing it (this is the loop-with-huge-numbers guard)")
+    return value
+
+
+def _value_type(value: Any) -> str:
+    """JOCKY's name for a value's type — never the host's (`NoneType`, `JFn`).
+
+    "cannot compare NoneType < int" tells an analyst about the interpreter;
+    "cannot compare nil < int" tells them about their script.
+    """
+    if value is None:
+        return "nil"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "str"
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, dict):
+        return "map"
+    if isinstance(value, (JFn, NativeFn)):
+        return "fn"
+    return "value"
+
+
+def _unique(items: List[Any]) -> List[Any]:
+    """First occurrence of each distinct value, order and types intact.
+
+    Deduplicating on ``to_str`` turned ``[1, 2, 1].unique()`` into ``["1", "2"]``,
+    so ``unique()[0] + 1`` was ``"11"`` — a type change hidden inside a
+    collection helper. Maps and lists are unhashable, so they are compared by
+    their canonical JSON text while the *original* object is what comes back.
+    """
+    seen_hashable: set = set()
+    seen_other: List[str] = []
+    out: List[Any] = []
+    for item in items:
+        if isinstance(item, (str, int, float, bool, type(None))):
+            marker = (type(item).__name__, item)
+            if marker in seen_hashable:
+                continue
+            seen_hashable.add(marker)
+        else:
+            marker_text = json.dumps(to_plain(item), sort_keys=True, default=str)
+            if marker_text in seen_other:
+                continue
+            seen_other.append(marker_text)
+        out.append(item)
+    return out
+
+
 def _sort_key(value: Any) -> Tuple[int, Any]:
     if isinstance(value, bool):
         return (1, int(value))
     if isinstance(value, (int, float)):
         return (0, value)
     return (2, to_str(value))
+
+
+_STR_METHODS: Dict[str, Tuple[Callable[..., Any], int, Optional[int]]] = {
+    "len": (lambda s: len(s), 0, 0),
+    "upper": (lambda s: s.upper(), 0, 0),
+    "lower": (lambda s: s.lower(), 0, 0),
+    "strip": (lambda s: s.strip(), 0, 0),
+    "split": (lambda s, sep=None: s.split(sep) if sep is not None else s.split(), 0, 1),
+    "replace": (lambda s, a, b: s.replace(to_str(a), to_str(b)), 2, 2),
+    "contains": (lambda s, sub: to_str(sub) in s, 1, 1),
+    "starts_with": (lambda s, pre: s.startswith(to_str(pre)), 1, 1),
+    "ends_with": (lambda s, suf: s.endswith(to_str(suf)), 1, 1),
+    "find": (lambda s, sub: s.find(to_str(sub)), 1, 1),
+    "substr": (lambda s, start, end=None: s[start:end], 1, 2),
+    "to_int": (lambda s: int(s.strip() or "0"), 0, 0),
+    "to_float": (lambda s: _safe_float(s), 0, 0),
+    "chars": (lambda s: list(s), 0, 0),
+    "bytes": (lambda s: list(s.encode("utf-8", "surrogateescape")), 0, 0),
+    "lines": (lambda s: s.splitlines(), 0, 0),
+}
+
+_LIST_METHODS: Dict[str, Callable[..., Any]] = {
+    "len": lambda items: len(items),
+    "first": lambda items: items[0] if items else None,
+    "last": lambda items: items[-1] if items else None,
+    "push": lambda items, v: (items.append(v), items)[1],
+    "contains": lambda items, v: any(x == v for x in items),
+    "index": lambda items, v: items.index(v) if v in items else -1,
+    "count": lambda items, v: sum(1 for x in items if x == v),
+    "join": lambda items, sep="": to_str(sep).join(to_str(x) for x in items),
+    "slice": lambda items, start=0, end=None: items[start:end],
+    "reverse": lambda items: list(reversed(items)),
+    "sort": lambda items: sorted(items, key=_sort_key),
+    "sum": lambda items: sum(x for x in items if isinstance(x, (int, float))),
+    "min": lambda items: min(items) if items else None,
+    "max": lambda items: max(items) if items else None,
+    "unique": lambda items: _unique(items),
+}
+
+_DICT_METHODS: Dict[str, Callable[..., Any]] = {
+    "keys": lambda mapping: list(mapping.keys()),
+    "values": lambda mapping: list(mapping.values()),
+    "items": lambda mapping: [[k, v] for k, v in mapping.items()],
+    "len": lambda mapping: len(mapping),
+    "has": lambda mapping, k: to_str(k) in mapping,
+    "get": lambda mapping, k, default=None: mapping.get(to_str(k), default),
+    "set": lambda mapping, k, v: (mapping.__setitem__(to_str(k), v), mapping)[1],
+    "del": lambda mapping, k: (mapping.pop(to_str(k), None), mapping)[1],
+    "merge": lambda mapping, other: {**mapping, **(other if isinstance(other, dict) else {})},
+}
+
+_NUM_METHODS: Dict[str, Callable[..., Any]] = {
+    "to_str": lambda val: to_str(val),
+    "to_int": lambda val: int(val),
+    "to_float": lambda val: float(val),
+    "abs": lambda val: abs(val),
+    "hex": lambda val: hex(int(val)),
+}

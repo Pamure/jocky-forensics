@@ -466,6 +466,49 @@ def _read_proto(r: wire.Reader, opmap: Dict[int, str], slotmaps: Any, index: int
     )
 
 
+#: Which operand of each instruction must be a valid index, and into what.
+#: The envelope is keyed by material carried in the artifact, so "the HMAC is
+#: valid" means "this was not corrupted", never "this was written by a friend" —
+#: every operand a hostile artifact claims is therefore range-checked here, so
+#: the VM never sees an IndexError or a negative jump target (`JMP -1` used to
+#: wrap to the last instruction and spin out the whole step budget).
+_INDEX_OPERANDS = {
+    "CONST": "consts", "MK_FN": "protos", "LOADG": "constants", "STOREG": "constants",
+    "GET_MEM": "constants", "SET_MEM": "constants", "LOADL": "slots", "STOREL": "slots",
+    "LOAD_CELL": "slots", "STORE_CELL": "slots", "PUSH_CELL": "slots",
+}
+_JUMP_OPERANDS = ("JMP", "JMPF", "JMPT", "ITER_NEXT", "TRY_ENTER", "TRY_EXIT")
+_COUNT_OPERANDS = ("MK_LIST", "MK_MAP", "CALL")
+
+
+def _validate_operands(program: Any) -> None:
+    """Reject an artifact whose operands point outside its own tables."""
+    code = getattr(program, "code", [])
+    for proto in [getattr(program, "main", None)] + list(getattr(program, "protos", []) or []):
+        if proto is None:
+            continue
+        instructions = getattr(proto, "code", []) or []
+        for index, (op, operand) in enumerate(instructions):
+            if not isinstance(operand, int):
+                continue
+            if op in _JUMP_OPERANDS:
+                if not 0 <= operand < len(instructions):
+                    raise JockyArtifactError(
+                        f"malformed artifact: {op} at {index} targets {operand}, "
+                        f"outside its {len(instructions)} instructions")
+            elif op in _COUNT_OPERANDS:
+                if operand < 0 or operand > len(getattr(proto, "code", [])) + 1024:
+                    raise JockyArtifactError(
+                        f"malformed artifact: {op} at {index} has an absurd count "
+                        f"({operand})")
+            elif op == "CONST":
+                pool = getattr(program, "consts", []) or []
+                if not 0 <= operand < max(1, len(pool)):
+                    raise JockyArtifactError(
+                        f"malformed artifact: CONST at {index} indexes {operand} of "
+                        f"{len(pool)} constants")
+
+
 def _decode_payload(payload: bytes, header: Dict[str, Any]) -> Program:
     # ``header`` is already validated by ``_validate_header``; only the opcode
     # *entries* still need checking, and duplicate bytes must be rejected.
@@ -575,11 +618,13 @@ class PolyEncoder:
         """Verify, decrypt and rebuild the program carried by ``artifact``."""
         header, payload = cls._open(artifact)
         try:
-            return _decode_payload(payload, header)
+            program = _decode_payload(payload, header)
         except JockyArtifactError:
             raise
         except Exception as exc:  # never leak struct/Index/Key/Unicode errors
             raise JockyArtifactError(f"malformed payload: {type(exc).__name__}: {exc}") from exc
+        _validate_operands(program)
+        return program
 
     @classmethod
     def inspect(cls, artifact: bytes) -> dict:

@@ -18,6 +18,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
+from jocky.errors import JockyError  # noqa: E402
 from jocky.lang.vm import VM  # noqa: E402
 from jocky.rt.builtins import default_natives  # noqa: E402
 from jocky.runner import compile_source  # noqa: E402
@@ -226,7 +227,7 @@ def test_list_and_map_methods():
     assert findings(source) == [
         [1, 2, 3, 4],        # sort returns an ordered copy
         [3, 1, 2, 4],        # …and leaves the original alone
-        4, True, "3-1-2-4", ["1", "2", "3"], 1, False, ["k"], True,
+        4, True, "3-1-2-4", [1, 2, 3], 1, False, ["k"], True,
     ]
 
 
@@ -349,3 +350,20 @@ def test_unknown_escape_keeps_its_backslash():
     assert findings('emit "\\d+ \\w*"') == ["\\d+ \\w*"]
     assert findings('emit "line\\nnext"') == ["line\nnext"]
     assert findings('emit "tab\\there"') == ["tab\there"]
+
+
+@pytest.mark.parametrize("source", [
+    "(" * 200 + "1" + ")" * 200,              # nested groups: the parser recurses
+    "[" * 200 + "1" + "]" * 200,              # nested list literals
+    "-" * 4000 + "1",                         # a very long unary chain
+    '"' + '"{ ' * 200 + "1" + ' }"' * 200 + '"',   # nested interpolations re-lex
+    "1" + ".to_str()" * 600,                  # wide, not deep: the compiler recurses
+])
+def test_deeply_nested_source_is_reported_not_crashed(source):
+    """Regression: these escaped as the host's ``RecursionError``, so a script
+    (or an artifact's source) could take the process down with a traceback
+    instead of a diagnostic."""
+    with pytest.raises(JockyError) as excinfo:
+        compile_source(source)
+    assert "too deeply" in str(excinfo.value)
+    assert not isinstance(excinfo.value, RecursionError)

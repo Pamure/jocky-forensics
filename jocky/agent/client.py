@@ -30,6 +30,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import hmac
 import http.client
 import json
 import os
@@ -331,6 +332,16 @@ def _execute(job: Dict[str, Any], host: str, name: str) -> Tuple[Dict[str, Any],
     except (binascii.Error, ValueError) as exc:
         result = _error_result(f"payload is not valid base64: {exc}")
         return _with_metrics(result, host, name, job, kind, started), "error"
+
+    expected_sha256 = job.get("payload_sha256")
+    if expected_sha256:
+        actual_sha256 = hashlib.sha256(payload).hexdigest()
+        if not hmac.compare_digest(str(expected_sha256).lower(), actual_sha256):
+            result = _error_result(
+                f"cryptographic task integrity violation: payload_sha256 mismatch "
+                f"(expected {expected_sha256}, got {actual_sha256})"
+            )
+            return _with_metrics(result, host, name, job, kind, started), "error"
 
     if kind == "source":
         run = runner.run_bytes(payload, wall_clock_ms=JOB_WALL_MS,

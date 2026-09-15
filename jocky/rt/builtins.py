@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from jocky.errors import JockyRuntimeError
 from jocky.lang.vm import JockyLimitError, NativeFn, to_str, truthy
-from jocky.rt import detect, filefs, netfs, procfs, sysinfo
+from jocky.rt import detect, filefs, netfs, procfs, sysinfo, timeutil
 
 
 #: Capabilities a script must be granted explicitly (`jocky run --allow …`).
@@ -186,12 +186,60 @@ def core_builtins() -> Dict[str, Any]:
             return len(items)
         return sum(1 for item in items if truthy(vm.call_value(args[1], [item])))
 
+    def _index_by(vm: Any, args: List[Any]) -> Dict[str, Any]:
+        """``index_by(rows, key_fn)`` — a lookup table built in one pass.
+
+        This is the primitive every correlation script was hand-rolling as a
+        nested loop (VQL has ``memoize``, osquery has a join): process rows,
+        sockets and files with one index each and the correlation costs
+        O(n + m) instead of O(n x m). First row wins for a duplicate key, so
+        the result is deterministic; keys are stringified because they index a
+        JOCKY map.
+        """
+        rows, key_fn = _list(args[0]), args[1]
+        table: Dict[str, Any] = {}
+        for row in rows:
+            key = vm.call_value(key_fn, [row])
+            table.setdefault(to_str(key), row)
+        return table
+
+    def _group_by(vm: Any, args: List[Any]) -> Dict[str, Any]:
+        """``group_by(rows, key_fn)`` — the same pass, keeping every row."""
+        rows, key_fn = _list(args[0]), args[1]
+        groups: Dict[str, Any] = {}
+        for row in rows:
+            key = to_str(vm.call_value(key_fn, [row]))
+            groups.setdefault(key, []).append(row)
+        return groups
+
     def _json_decode(vm: Any, args: List[Any]) -> Any:
         return json.loads(_str(args[0]))
 
     def _len(vm: Any, args: List[Any]) -> int:
         value = args[0]
         return len(value) if isinstance(value, (str, list, dict)) else 0
+
+    def _ord(vm: Any, args: List[Any]) -> int:
+        """Code point of a one-character string — the other half of the byte story.
+
+        ``fs.read_bytes`` hands back a byte string (one character per byte), so
+        turning a byte into the number it *is* — for arithmetic, for building
+        hex, for indexing a table — needs this. Without it a script has to
+        search a 256-character alphabet for the character's position, which is
+        exactly the workaround this replaces.
+        """
+        text = args[0]
+        if not isinstance(text, str) or len(text) != 1:
+            _raise(f"ord() expects a one-character string, got {_type_name(text)} "
+                   f"of length {_len(vm, [text])}")
+        return ord(text)
+
+    def _chr(vm: Any, args: List[Any]) -> str:
+        """Character with that code point; the inverse of ``ord`` (0..1114111)."""
+        code = _int(args[0])
+        if not 0 <= code <= 0x10FFFF:
+            _raise(f"chr() expects a code point in 0..1114111, got {code}")
+        return chr(code)
 
     def _float(vm: Any, args: List[Any]) -> float:
         """Permissive like ``int``: unparseable text becomes 0.0, never an error."""
@@ -226,6 +274,8 @@ def core_builtins() -> Dict[str, Any]:
         "fail": _fn("fail", _fail, 0, 1),
         "skip": _fn("skip", _skip, 0, 1),
         "len": _fn("len", _len, 1, 1),
+        "ord": _fn("ord", _ord, 1, 1),
+        "chr": _fn("chr", _chr, 1, 1),
         "str": _fn("str", lambda vm, a: to_str(a[0]), 1, 1),
         "int": _fn("int", lambda vm, a: _int(a[0]), 1, 1),
         "float": _fn("float", _float, 1, 1),
@@ -236,6 +286,8 @@ def core_builtins() -> Dict[str, Any]:
         "sort": _fn("sort", lambda vm, a: sorted(_list(a[0]), key=_sort_key), 1, 1),
         "sort_by": _fn("sort_by", _sort_by, 2, 2),
         "count": _fn("count", _count, 1, 2),
+        "index_by": _fn("index_by", _index_by, 2, 2),
+        "group_by": _fn("group_by", _group_by, 2, 2),
         "join": _fn("join", lambda vm, a: _str(a[1] if len(a) > 1 else "").join(
             to_str(x) for x in _list(a[0])), 1, 2),
         "keys": _fn("keys", lambda vm, a: list(a[0].keys()) if isinstance(a[0], dict) else [], 1, 1),
@@ -288,6 +340,53 @@ def _plain(value: Any) -> Any:
 
 
 # --------------------------------------------------------------- namespaces
+def _sigma_namespace() -> Dict[str, Any]:
+    """Sigma rule evaluation on the linear-time engine.
+
+    The industry's detection corpus is written in Sigma, and the engines that
+    normally evaluate it backtrack on adversarial input.  These natives parse
+    the rule as written (a documented subset — unsupported modifiers raise
+    rather than silently widening the match) and evaluate it against a record
+    map or a line of text.
+    """
+    from jocky.rt import sigma as sigma_mod
+
+    def _check(vm: Any, a: List[Any]) -> bool:
+        return sigma_mod.load_rule(_str(a[0])).matches(a[1])
+
+    def _summary(vm: Any, a: List[Any]) -> Dict[str, Any]:
+        return sigma_mod.load_rule(_str(a[0])).summary()
+
+    return {
+        "check": _fn("sigma.check", _check, 2, 2),
+        "summary": _fn("sigma.summary", _summary, 1, 1),
+    }
+
+
+def _yara_namespace() -> Dict[str, Any]:
+    """YARA-subset rule matching on the linear-time engine.
+
+    The industry's byte-signature corpus is written in YARA; a tool that reads
+    it inherits the signatures instead of asking an analyst to retype them.  The
+    subset is documented in ``jocky/rt/yararules.py`` and anything outside it
+    (``xor``, ``base64``, modules, loops) raises rather than matching something
+    else — a signature that silently stops matching is worse than one that
+    refuses to load.
+    """
+    from jocky.rt import yararules
+
+    def _check(vm: Any, a: List[Any]) -> bool:
+        return yararules.load_rule(_str(a[0])).matches(_str(a[1]))
+
+    def _summary(vm: Any, a: List[Any]) -> Dict[str, Any]:
+        return yararules.load_rule(_str(a[0])).summary()
+
+    return {
+        "check": _fn("yara.check", _check, 2, 2),
+        "summary": _fn("yara.summary", _summary, 1, 1),
+    }
+
+
 def namespaces() -> Dict[str, Any]:
     """The host-facing namespaces."""
 
@@ -311,6 +410,9 @@ def namespaces() -> Dict[str, Any]:
         "deleted_open": _fn("proc.deleted_open", lambda vm, a: procfs.deleted_open_files(), 0, 0),
         "socket_map": _fn("proc.socket_map", lambda vm, a: {str(k): v for k, v in procfs.socket_inode_map().items()}, 0, 0),
         "pids": _fn("proc.pids", lambda vm, a: procfs.list_pids(), 0, 0),
+        "cgroups": _fn("proc.cgroups", lambda vm, a: procfs.read_cgroups(_int(a[0])), 1, 1),
+        "namespaces": _fn("proc.namespaces", lambda vm, a: procfs.read_namespaces(_int(a[0])), 1, 1),
+        "status": _fn("proc.status", lambda vm, a: procfs.read_status(_int(a[0])), 1, 1),
     }
 
     net_ns = {
@@ -329,6 +431,8 @@ def namespaces() -> Dict[str, Any]:
     fs_ns = {
         "hash": _fn("fs.hash", lambda vm, a: filefs.hash_file(_str(a[0])), 1, 1),
         "hash_bytes": _fn("fs.hash_bytes", lambda vm, a: filefs.hash_bytes(_str(a[0]).encode()), 1, 1),
+        "hash_bytes_raw": _fn("fs.hash_bytes_raw", lambda vm, a: filefs.hash_bytes_raw(
+            _str(a[0]), _str(a[1], "sha256") if len(a) > 1 else "sha256"), 1, 2),
         "stat": _fn("fs.stat", lambda vm, a: filefs.stat_entry(_str(a[0])), 1, 1),
         "magic": _fn("fs.magic", lambda vm, a: filefs.magic(_str(a[0])), 1, 1),
         "scan": _fn("fs.scan", lambda vm, a: filefs.scan(
@@ -345,9 +449,37 @@ def namespaces() -> Dict[str, Any]:
         "path_dirs": _fn("fs.path_dirs", lambda vm, a: filefs.path_dirs(), 0, 0),
         "ld_preload": _fn("fs.ld_preload", lambda vm, a: filefs.ld_preload(), 0, 0),
         "read": _fn("fs.read", lambda vm, a: _read_text(_str(a[0]),
-                                                        _int(a[1]) if len(a) > 1 else 262144), 1, 2),
+                                                        _int(a[1]) if len(a) > 1 else 262144,
+                                                        _int(a[2]) if len(a) > 2 else 0), 1, 3),
+        "read_bytes": _fn("fs.read_bytes", lambda vm, a: filefs.read_bytes(
+            _str(a[0]),
+            offset=_int(a[1]) if len(a) > 1 else 0,
+            limit=_int(a[2]) if len(a) > 2 else 262144), 1, 3),
         "basename": _fn("fs.basename", lambda vm, a: os.path.basename(_str(a[0])), 1, 1),
         "dirname": _fn("fs.dirname", lambda vm, a: os.path.dirname(_str(a[0])), 1, 1),
+        "grep": _fn("fs.grep", lambda vm, a: filefs.grep_file(
+            _str(a[0]), _str(a[1]),
+            limit=_int(a[2]) if len(a) > 2 else 500,
+            ignore_case=_bool(a[3]) if len(a) > 3 else False,
+            max_bytes=(_int(a[4]) or None) if len(a) > 4 else 32 * 1024 * 1024,
+            deadline=getattr(vm, "_deadline", None)), 2, 5),
+        "grep_stats": _fn("fs.grep_stats", lambda vm, a: filefs.grep_file(
+            _str(a[0]), _str(a[1]),
+            limit=_int(a[2]) if len(a) > 2 else 500,
+            ignore_case=_bool(a[3]) if len(a) > 3 else False,
+            max_bytes=(_int(a[4]) or None) if len(a) > 4 else 32 * 1024 * 1024,
+            with_stats=True, deadline=getattr(vm, "_deadline", None)), 2, 5),
+        "strings": _fn("fs.strings", lambda vm, a: filefs.strings(
+            _str(a[0]),
+            min_len=_int(a[1]) if len(a) > 1 else 4,
+            limit=_int(a[2]) if len(a) > 2 else 200,
+            offset=_int(a[3]) if len(a) > 3 else 0,
+            wide=_bool(a[4]) if len(a) > 4 else False,
+            deadline=getattr(vm, "_deadline", None)), 1, 5),
+        "entropy": _fn("fs.entropy", lambda vm, a: filefs.entropy(
+            _str(a[0]),
+            offset=_int(a[1]) if len(a) > 1 else 0,
+            limit=_int(a[2]) if len(a) > 2 else 1 << 20), 1, 3),
         "exists": _fn("fs.exists", lambda vm, a: os.path.exists(_str(a[0])), 1, 1),
     }
 
@@ -394,16 +526,80 @@ def namespaces() -> Dict[str, Any]:
     }
 
     mem_ns = _memory_namespace()
-    return {"proc": proc_ns, "net": net_ns, "fs": fs_ns, "sys": sys_ns,
-            "det": det_ns, "ioc": ioc_ns, "mem": mem_ns}
+    re_ns = _re_namespace()
+    ns = {"proc": proc_ns, "net": net_ns, "fs": fs_ns, "sys": sys_ns,
+          "det": det_ns, "ioc": ioc_ns, "mem": mem_ns, "re": re_ns,
+          "sigma": _sigma_namespace(), "yara": _yara_namespace()}
+    # `time`/`tl` come from the runtime module that owns them; keeping them
+    # here means the documentation generator, which enumerates this mapping,
+    # cannot miss a namespace that scripts can call.
+    ns.update(timeutil.namespace())
+    return ns
 
 
-def _read_text(path: str, limit: int) -> str:
+#: Characters that must be escaped to appear literally in a pattern.
+_PATTERN_SPECIALS = "\\^$.[]|()?*+{}"
+
+
+def _escape_pattern(text: str) -> str:
+    """Quote ``text`` so the engine treats every character literally."""
+    return "".join(f"\\{char}" if char in _PATTERN_SPECIALS else char for char in text)
+
+
+def _re_namespace() -> Dict[str, Any]:
+    """Pattern matching over JOCKY's linear-time engine (never ``re``).
+
+    Detection scripts match attacker-controlled strings; a backtracking engine
+    lets one adversarial command line (`aaaa…`) stall the whole triage run, so
+    the runtime ships its own NFA matcher with an explicit step budget.
+    """
+    from jocky.rt.pattern import compile_pattern
+
+    def _pattern(args: List[Any], flags_index: int) -> Any:
+        return compile_pattern(_str(args[0]),
+                               _bool(args[flags_index]) if len(args) > flags_index else False)
+
+    def _find(vm: Any, a: List[Any]) -> List[Dict[str, Any]]:
+        limit = _int(a[2]) if len(a) > 2 else 0
+        matches = _pattern(a, 3).find_all(_str(a[1]), limit or None)
+        return [{"text": m.text, "start": m.start, "end": m.end,
+                 "groups": list(m.groups[1:])} for m in matches]
+
+    return {
+        "test": _fn("re.test", lambda vm, a: _pattern(a, 2).test(_str(a[1])), 2, 3),
+        "full": _fn("re.full", lambda vm, a: _pattern(a, 2).fullmatch(_str(a[1])) is not None, 2, 3),
+        "find": _fn("re.find", _find, 2, 4),
+        "captures": _fn("re.captures", lambda vm, a: [
+            [m.text, *m.groups[1:]] for m in _pattern(a, 3).find_all(
+                _str(a[1]), (_int(a[2]) if len(a) > 2 and _int(a[2]) else None))], 2, 4),
+        "replace": _fn("re.replace", lambda vm, a: _pattern(a, 4).sub(
+            _str(a[1]), _str(a[2]), (_int(a[3]) if len(a) > 3 and _int(a[3]) else None)), 3, 5),
+        "split": _fn("re.split", lambda vm, a: _pattern(a, 3).split(
+            _str(a[1]), (_int(a[2]) if len(a) > 2 and _int(a[2]) else None)), 2, 4),
+        "escape": _fn("re.escape", lambda vm, a: _escape_pattern(_str(a[0])), 1, 1),
+    }
+
+
+def _read_text(path: str, limit: int, offset: int = 0) -> str:
+    """UTF-8 text read (``errors="replace"``) — lossy by design; see ``fs.read_bytes``.
+
+    ``offset`` pages through a large file: without it a script that wanted the
+    tail of a multi-gigabyte log had to read the whole head first.
+
+    A file that cannot be read **raises**. It used to return the string
+    ``<unreadable: PermissionError>``, which a detection script happily treats as
+    content — `if contains(ioc, fs.read(p))` is then silently false, and a
+    confined run (where /tmp and the home directory are denied) reports a clean
+    sweep instead of a blind one.
+    """
+    from jocky.errors import JockyRuntimeError
     try:
         with open(path, "rb") as fh:
+            if offset > 0:
+                fh.seek(offset)
             data = fh.read(max(0, limit))
     except OSError as exc:
-        return f"<unreadable: {exc.__class__.__name__}>"
+        raise JockyRuntimeError(f"cannot read {path}: {exc.strerror or exc}")
     return data.decode("utf-8", "replace")
 
 

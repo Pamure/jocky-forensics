@@ -11,12 +11,17 @@ arity-checked `NativeFn`; every read is a direct kernel-interface access
 | Namespace | Functions |
 |---|---|
 | [`det`](#det) | 13 |
-| [`fs`](#fs) | 13 |
+| [`fs`](#fs) | 19 |
 | [`ioc`](#ioc) | 1 |
 | [`mem`](#mem) | 6 |
 | [`net`](#net) | 7 |
 | [`proc`](#proc) | 13 |
+| [`re`](#re) | 7 |
+| [`sigma`](#sigma) | 2 |
 | [`sys`](#sys) | 15 |
+| [`time`](#time) | 6 |
+| [`tl`](#tl) | 3 |
+| [`yara`](#yara) | 2 |
 
 All of these are also reachable programmatically:
 
@@ -52,16 +57,22 @@ print(result.findings, result.errors)
 |---|---|
 | `basename` | 1..1 |
 | `dirname` | 1..1 |
+| `entropy` | 1..3 |
 | `exists` | 1..1 |
+| `grep` | 2..5 |
+| `grep_stats` | 2..5 |
 | `hash` | 1..1 |
 | `hash_bytes` | 1..1 |
+| `hash_bytes_raw` | 1..2 |
 | `ld_preload` | 0..0 |
 | `magic` | 1..1 |
 | `path_dirs` | 0..0 |
-| `read` | 1..2 |
+| `read` | 1..3 |
+| `read_bytes` | 1..3 |
 | `scan` | 0..4 |
 | `special_perms` | 0..2 |
 | `stat` | 1..1 |
+| `strings` | 1..5 |
 | `timeline` | 0..3 |
 
 ## ioc
@@ -111,6 +122,25 @@ print(result.findings, result.errors)
 | `threads` | 1..1 |
 | `tree` | 0..0 |
 
+## re
+
+| Call | Arity |
+|---|---|
+| `captures` | 2..4 |
+| `escape` | 1..1 |
+| `find` | 2..4 |
+| `full` | 2..3 |
+| `replace` | 3..5 |
+| `split` | 2..4 |
+| `test` | 2..3 |
+
+## sigma
+
+| Call | Arity |
+|---|---|
+| `check` | 2..2 |
+| `summary` | 1..1 |
+
 ## sys
 
 | Call | Arity |
@@ -130,3 +160,29 @@ print(result.findings, result.errors)
 | `ppid` | 0..0 |
 | `uptime` | 0..0 |
 | `users` | 0..0 |
+
+## time
+
+| Call | Arity |
+|---|---|
+| `delta` | 2..2 |
+| `filetime` | 1..1 |
+| `format` | 2..2 |
+| `iso` | 0..1 |
+| `now` | 0..0 |
+| `parse` | 1..1 |
+
+## tl
+
+| Call | Arity |
+|---|---|
+| `bucket` | 2..3 |
+| `merge` | 1..2 |
+| `window` | 2..3 |
+
+## yara
+
+| Call | Arity |
+|---|---|
+| `check` | 2..2 |
+| `summary` | 1..1 |

@@ -16,6 +16,7 @@ unverifiable.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import os
 import re
 import time
@@ -207,13 +208,39 @@ def _self_pids() -> set:
     return pids
 
 
+@dataclass
+class Snapshot:
+    """One pass over ``/proc``, shared by every process check.
+
+    Each check used to walk ``/proc`` on its own, so a single triage run paid
+    for roughly five sweeps of the same data. ``processes`` holds every visible
+    process with its cheap fields, plus descriptors and memory maps for the
+    first ``max_pids`` — the same bound the deep checks always applied, so
+    ``entry.get("fds")``/``entry.get("maps")`` are absent exactly where a check
+    would previously have stopped.
+
+    The host-facing checks (network, modules, PATH) take the snapshot too and
+    ignore it; the uniform signature keeps the triage call site honest.
+    """
+
+    processes: List[Dict[str, Any]] = field(default_factory=list)
+
+
+def collect_snapshot(max_pids: int = 400) -> Snapshot:
+    """Collect the shared process view once."""
+    return Snapshot(processes=procfs.list_processes(
+        detail_limit=max_pids, with_fds=True, with_maps=True))
+
+
 # --------------------------------------------------------------- fileless
-def fileless_processes(exclude_self: bool = True) -> List[Dict[str, Any]]:
+def fileless_processes(exclude_self: bool = True,
+                       snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     """Processes running from an anonymous memory file (memfd) or a
     deleted executable — the artefact both we and malware leave."""
     skip = _self_pids() if exclude_self else set()
+    entries = snapshot.processes if snapshot is not None else procfs.list_processes()
     out: List[Dict[str, Any]] = []
-    for entry in procfs.list_processes():
+    for entry in entries:
         if entry["pid"] in skip:
             continue
         exe = entry.get("exe") or ""
@@ -229,11 +256,15 @@ def fileless_processes(exclude_self: bool = True) -> List[Dict[str, Any]]:
     return out
 
 
-def memfd_mappings(max_pids: int = 400) -> List[Dict[str, Any]]:
+def memfd_mappings(max_pids: int = 400,
+                   snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     """Executable mappings backed by memfd objects."""
+    entries = snapshot.processes if snapshot is not None else procfs.list_processes(
+        detail_limit=max_pids, with_maps=True)
     out: List[Dict[str, Any]] = []
-    for pid in procfs.list_pids()[:max_pids]:
-        for mapping in procfs.read_maps(pid):
+    for entry in entries[:max_pids]:
+        pid = entry["pid"]
+        for mapping in entry.get("maps") or []:
             if mapping["memfd"] and "x" in mapping["perms"]:
                 out.append(_finding(
                     "memfd_mapping", "high",
@@ -245,7 +276,8 @@ def memfd_mappings(max_pids: int = 400) -> List[Dict[str, Any]]:
     return out
 
 
-def memfd_fd_holders(max_pids: int = 400) -> List[Dict[str, Any]]:
+def memfd_fd_holders(max_pids: int = 400,
+                     snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     """Processes that handed a memfd to an interpreter through argv.
 
     Executing a *script* from a memfd does not produce a memfd-backed
@@ -255,9 +287,12 @@ def memfd_fd_holders(max_pids: int = 400) -> List[Dict[str, Any]]:
     survives is the pair — an argv token pointing at ``/proc/self/fd/N`` and a
     descriptor N that really is a memfd.
     """
+    entries = snapshot.processes if snapshot is not None else procfs.list_processes(
+        detail_limit=max_pids, with_fds=True)
     out: List[Dict[str, Any]] = []
-    for pid in procfs.list_pids()[:max_pids]:
-        argv = procfs.read_cmdline(pid)
+    for entry in entries[:max_pids]:
+        pid = entry["pid"]
+        argv = entry.get("argv") or procfs.read_cmdline(pid)
         referenced = {
             int(token.rsplit("/", 1)[-1])
             for token in argv
@@ -267,9 +302,9 @@ def memfd_fd_holders(max_pids: int = 400) -> List[Dict[str, Any]]:
         if not referenced:
             continue
         memfds = {
-            entry["fd"]: entry["target"]
-            for entry in procfs.read_fds(pid)
-            if isinstance(entry.get("fd"), int) and "memfd:" in entry.get("target", "")
+            fd["fd"]: fd["target"]
+            for fd in entry.get("fds") or procfs.read_fds(pid)
+            if isinstance(fd.get("fd"), int) and "memfd:" in fd.get("target", "")
         }
         hits = {fd: memfds[fd] for fd in referenced if fd in memfds}
         if not hits:
@@ -278,13 +313,14 @@ def memfd_fd_holders(max_pids: int = 400) -> List[Dict[str, Any]]:
             "memfd_fd_holder", "high",
             f"pid {pid} is running a memfd payload through an interpreter",
             {"pid": pid, "argv": argv[:4], "memfd_descriptors": hits,
-             "exe": procfs.read_exe(pid)},
+             "exe": entry.get("exe")},
             "recover the payload from /proc/<pid>/fd/<N> before the process exits",
         ))
     return out
 
 
-def injection_primitives(max_pids: int = 400) -> List[Dict[str, Any]]:
+def injection_primitives(max_pids: int = 400,
+                         snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     """Anonymous kernel objects used for cross-process injection.
 
     ``userfaultfd`` and ``io_uring`` descriptors are how modern Linux injectors
@@ -292,66 +328,76 @@ def injection_primitives(max_pids: int = 400) -> List[Dict[str, Any]]:
     ``low``: it is a correlation input, not a verdict.
     """
     markers = ("userfaultfd", "io_uring", "udmabuf", "pidfd")
+    entries = snapshot.processes if snapshot is not None else procfs.list_processes(
+        detail_limit=max_pids, with_fds=True)
     out: List[Dict[str, Any]] = []
-    for pid in procfs.list_pids()[:max_pids]:
+    for entry in entries[:max_pids]:
+        pid = entry["pid"]
         hits = [
-            entry for entry in procfs.read_fds(pid)
-            if any(marker in entry.get("target", "") for marker in markers)
+            fd for fd in entry.get("fds") or procfs.read_fds(pid)
+            if any(marker in fd.get("target", "") for marker in markers)
         ]
         if not hits:
             continue
         out.append(_finding(
             "injection_primitive", "low",
             f"pid {pid} holds {len(hits)} injection-capable descriptor(s)",
-            {"pid": pid, "descriptors": [entry["target"] for entry in hits][:4],
-             "exe": procfs.read_exe(pid)},
+            {"pid": pid, "descriptors": [fd["target"] for fd in hits][:4],
+             "exe": entry.get("exe")},
             "correlate with ptrace/process_vm_* activity before alerting",
         ))
     return out
 
 
-def deleted_executables(max_pids: int = 400) -> List[Dict[str, Any]]:
+def deleted_executables(max_pids: int = 400,
+                        snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     """Processes whose on-disk image was unlinked after start."""
+    entries = snapshot.processes if snapshot is not None else procfs.list_processes()
     out: List[Dict[str, Any]] = []
-    for pid in procfs.list_pids()[:max_pids]:
-        exe = procfs.read_exe(pid)
+    for entry in entries[:max_pids]:
+        exe = entry.get("exe")
         if exe and exe.endswith("(deleted)") and "/memfd:" not in exe:
             out.append(_finding(
                 "deleted_executable", "medium",
-                f"pid {pid} runs a deleted executable",
-                {"pid": pid, "exe": exe, "cmdline": " ".join(procfs.read_cmdline(pid))},
+                f"pid {entry['pid']} runs a deleted executable",
+                {"pid": entry["pid"], "exe": exe, "cmdline": entry.get("cmdline", "")},
                 "copy /proc/<pid>/exe to evidence storage",
             ))
     return out
 
 
-def temp_executables(max_pids: int = 400) -> List[Dict[str, Any]]:
+def temp_executables(max_pids: int = 400,
+                     snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     """Executables launched from world-writable temporary directories."""
+    entries = snapshot.processes if snapshot is not None else procfs.list_processes()
     out: List[Dict[str, Any]] = []
-    for pid in procfs.list_pids()[:max_pids]:
-        exe = procfs.read_exe(pid)
+    for entry in entries[:max_pids]:
+        exe = entry.get("exe")
         if exe and exe.startswith(filefs.TEMP_PREFIXES):
             out.append(_finding(
                 "temp_executable", "high",
-                f"pid {pid} executes from {exe}",
-                {"pid": pid, "exe": exe,
-                 "cmdline": " ".join(procfs.read_cmdline(pid))},
+                f"pid {entry['pid']} executes from {exe}",
+                {"pid": entry["pid"], "exe": exe,
+                 "cmdline": entry.get("cmdline", "")},
                 "hash the binary and correlate with the parent process",
             ))
     return out
 
 
-def rwx_regions(max_pids: int = 400, anonymous_only: bool = True) -> List[Dict[str, Any]]:
+def rwx_regions(max_pids: int = 400, anonymous_only: bool = True,
+                snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     """Writable+executable memory regions — injection / JIT shells.
 
     Reported as ``low``: JIT runtimes (Python, Electron, JVM) legitimately own
     anonymous rwx regions, so this is a correlation input, not a verdict.
     """
+    entries = snapshot.processes if snapshot is not None else procfs.list_processes(
+        detail_limit=max_pids, with_maps=True)
     out: List[Dict[str, Any]] = []
-    for pid in procfs.list_pids()[:max_pids]:
-        stat = procfs.read_stat(pid) or {}
-        name = stat.get("name", "?")
-        for mapping in procfs.read_maps(pid):
+    for entry in entries[:max_pids]:
+        pid = entry["pid"]
+        name = entry.get("name", "?")
+        for mapping in entry.get("maps") or []:
             if not mapping["rwx"]:
                 continue
             if anonymous_only and not mapping["anonymous"]:
@@ -367,7 +413,7 @@ def rwx_regions(max_pids: int = 400, anonymous_only: bool = True) -> List[Dict[s
 
 
 # --------------------------------------------------------------- network
-def unusual_listeners() -> List[Dict[str, Any]]:
+def unusual_listeners(snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     for conn in netfs.unusual_listeners():
         owner = conn.get("process") or "unattributed"
@@ -399,9 +445,24 @@ def remote_connections_to(addresses: List[str]) -> List[Dict[str, Any]]:
 
 
 # --------------------------------------------------------------- host
-def deleted_open_files() -> List[Dict[str, Any]]:
+def deleted_open_files(snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
+    if snapshot is None:
+        items = procfs.deleted_open_files()
+    else:
+        grouped: Dict[tuple, Dict[str, Any]] = {}
+        for entry in snapshot.processes:
+            for fd in entry.get("fds") or []:
+                target = fd.get("target", "")
+                if not fd.get("deleted") or fd.get("kind") != "file" or "/memfd:" in target:
+                    continue
+                row = grouped.setdefault((entry["pid"], target),
+                                         {"pid": entry["pid"], "path": target,
+                                          "fds": [], "count": 0})
+                row["fds"].append(fd["fd"])
+                row["count"] += 1
+        items = list(grouped.values())
     out: List[Dict[str, Any]] = []
-    for item in procfs.deleted_open_files():
+    for item in items:
         out.append(_finding(
             "deleted_open_file", "medium",
             f"pid {item['pid']} holds deleted file {item['path']}",
@@ -411,7 +472,7 @@ def deleted_open_files() -> List[Dict[str, Any]]:
     return out
 
 
-def ld_preload_check() -> List[Dict[str, Any]]:
+def ld_preload_check(snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     """``/etc/ld.so.preload`` and LD_* variables: userland rootkit surface."""
     out: List[Dict[str, Any]] = []
     preload = filefs.ld_preload()
@@ -422,7 +483,10 @@ def ld_preload_check() -> List[Dict[str, Any]]:
             preload,
             "verify each library hash against the package manager",
         ))
-    for entry in procfs.list_processes():
+    # `environ` is not part of the shared snapshot (it is the only check that
+    # wants it) and reading it costs a fraction of a millisecond per process.
+    entries = snapshot.processes if snapshot is not None else procfs.list_processes()
+    for entry in entries:
         for var in procfs.read_environ(entry["pid"]):
             key = var.split("=", 1)[0]
             if key in SUSPICIOUS_ENV_KEYS:
@@ -435,31 +499,33 @@ def ld_preload_check() -> List[Dict[str, Any]]:
     return out
 
 
-def suspicious_cmdline(max_pids: int = 400) -> List[Dict[str, Any]]:
+def suspicious_cmdline(max_pids: int = 400,
+                       snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     """Command lines matching known intrusion patterns."""
     compiled = [(re.compile(pattern), label, severity)
                 for pattern, label, severity in CMD_PATTERNS]
     skip = _self_pids()
+    entries = snapshot.processes if snapshot is not None else procfs.list_processes()
     out: List[Dict[str, Any]] = []
-    for pid in procfs.list_pids()[:max_pids]:
-        if pid in skip:
+    for entry in entries[:max_pids]:
+        if entry["pid"] in skip:
             continue
-        cmdline = " ".join(procfs.read_cmdline(pid))
+        cmdline = entry.get("cmdline") or ""
         if not cmdline:
             continue
         for regex, label, severity in compiled:
             if regex.search(cmdline):
                 out.append(_finding(
                     "suspicious_cmdline", severity,
-                    f"pid {pid} matches {label}",
-                    {"pid": pid, "pattern": label, "cmdline": cmdline[:400]},
+                    f"pid {entry['pid']} matches {label}",
+                    {"pid": entry["pid"], "pattern": label, "cmdline": cmdline[:400]},
                     "reconstruct the full process tree around this PID",
                 ))
                 break
     return out
 
 
-def hidden_modules() -> List[Dict[str, Any]]:
+def hidden_modules(snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     """Module-view mismatch between /proc/modules and /sys/module."""
     diff = sysinfo.hidden_modules()
     out: List[Dict[str, Any]] = []
@@ -480,7 +546,7 @@ def hidden_modules() -> List[Dict[str, Any]]:
     return out
 
 
-def world_writable_path() -> List[Dict[str, Any]]:
+def world_writable_path(snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     """PATH directories the current user could plant a binary in."""
     out: List[Dict[str, Any]] = []
     for entry in filefs.path_dirs():
@@ -522,17 +588,20 @@ def triage(deep: bool = False, max_pids: int = 400) -> Dict[str, Any]:
     """Run every check and return findings plus counters."""
     started = time.perf_counter()
     findings: List[Dict[str, Any]] = []
+    # One pass over /proc for every check that needs process state: the
+    # per-check sweeps this replaces were most of a triage run's syscalls.
+    snapshot = collect_snapshot(max_pids=max_pids)
     for check in (fileless_processes, memfd_fd_holders, deleted_executables,
                   temp_executables, rwx_regions, unusual_listeners,
                   deleted_open_files, ld_preload_check, suspicious_cmdline,
                   hidden_modules, world_writable_path, injection_primitives):
         try:
-            findings.extend(check())            # type: ignore[operator]
+            findings.extend(check(snapshot=snapshot))   # type: ignore[call-arg]
         except Exception as exc:                # a failed check must not stop triage
             findings.append(_finding("check_error", "info",
                                      f"{check.__name__} failed", {"error": repr(exc)}))
     if deep:
-        findings.extend(memfd_mappings(max_pids=max_pids))
+        findings.extend(memfd_mappings(max_pids=max_pids, snapshot=snapshot))
         findings.extend(persistence())
     counts: Dict[str, int] = {level: 0 for level in SEVERITY_ORDER}
     processes = procfs.list_processes()

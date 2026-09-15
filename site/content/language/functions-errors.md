@@ -378,11 +378,15 @@ Two details that matter when you size a budget:
 
 * The step budget is exact: the run stops at the first instruction that takes
   the count past the limit, which is why the counter above reads `50001`.
-* The wall-clock budget is only **sampled every 1024 VM instructions**, and
-  only between instructions. A single long-running call is not interrupted:
-  `sleep(0.4)` under `--wall-ms 100` prints both of its lines and exits `0`
-  after roughly 0.6 s of wall time. A call is one instruction, so a deadline
-  that passes while it runs is noticed after it returns, not during it.
+* The wall-clock budget is sampled every 1024 VM instructions **and** when a
+  native returns, because a call is one instruction: a deadline that passes
+  while it runs is noticed when it comes back, not during it. That makes an
+  overrun *visible* rather than silent — `sleep(0.4)` under `--wall-ms 100`
+  prints `start`, then reports `error: wall-clock budget exceeded`, exits `1`,
+  and `--json` shows `truncated: true` with `duration_ms` ≈ 400. The call itself
+  still runs to completion (there is no way to interrupt a syscall from inside
+  the VM), so the limit bounds what the *script* does next, not how long the
+  native takes.
 
 ## Related pages
 

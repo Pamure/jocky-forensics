@@ -497,5 +497,16 @@ class Compiler:
 
 
 def compile_program(program: N.Program) -> Program:
-    """Compile a parsed AST into a :class:`Program`."""
-    return Compiler().compile(program)
+    """Compile a parsed AST into a :class:`Program`.
+
+    The compiler walks expressions recursively too, and a *shallow* but very
+    long chain (`1.to_str().to_str()…`, 500 links) exhausts the stack here
+    rather than in the parser — a deep tree is not needed, only a wide one. The
+    failure is reported as a compile error for the same reason the parser
+    reports its own limit: no host exception may escape the front end.
+    """
+    try:
+        return Compiler().compile(program)
+    except RecursionError:
+        raise JockyCompileError(
+            "program nests too deeply to compile (expression or statement nesting)") from None

@@ -210,3 +210,44 @@ def test_deterministic_artifacts_still_run():
     result = runner.run_artifact(artifact)
     assert not result.errors, result.errors
     assert result.findings == [{"kind": "runs", "n": 3}]
+
+
+def test_artifact_operands_are_range_checked_at_decode():
+    """The artifact HMAC detects corruption, not an adversary — anyone can forge
+    the key material it carries. So every operand a hostile artifact claims is
+    range-checked at decode: an out-of-range jump or pool index must be reported
+    as a malformed *artifact*, never surface as a host IndexError from inside the
+    VM (and a negative jump target must not wrap to the last instruction and burn
+    the whole step budget).
+    """
+    from types import SimpleNamespace
+
+    from jocky.errors import JockyArtifactError
+    from jocky.poly.encoder import _validate_operands
+
+    proto = SimpleNamespace(code=[("JMP", -1)])
+    program = SimpleNamespace(main=proto, protos=[], consts=["a"])
+    with pytest.raises(JockyArtifactError, match="outside its"):
+        _validate_operands(program)
+
+    proto = SimpleNamespace(code=[("JMP", 5)])
+    program = SimpleNamespace(main=proto, protos=[], consts=["a"])
+    with pytest.raises(JockyArtifactError, match="outside its"):
+        _validate_operands(program)
+
+    proto = SimpleNamespace(code=[("CONST", 99)])
+    program = SimpleNamespace(main=proto, protos=[], consts=["a"])
+    with pytest.raises(JockyArtifactError, match="CONST"):
+        _validate_operands(program)
+
+    # A sane program passes untouched.
+    proto = SimpleNamespace(code=[("CONST", 0), ("EMIT", None), ("HALT", None)])
+    program = SimpleNamespace(main=proto, protos=[], consts=["a"])
+    _validate_operands(program)
+
+
+def test_a_valid_artifact_passes_the_operand_check():
+    artifact, _meta = runner.build_artifact("emit 1", seed=b"\x44" * 32, deterministic=True)
+    result = runner.run_artifact(artifact)
+    assert not result.errors, result.errors
+    assert result.findings == [1]

@@ -42,6 +42,18 @@ expect_throws(fn() { return json_decode("{{not json") }, "malformed JSON raises"
 expect(hex(255), "0xff", "hex")
 expect(dict(), {}, "dict() makes an empty map")
 
+# ord/chr are the bridge between text and its numeric value — and, with
+# fs.read_bytes, between a file's bytes and the numbers they are.
+expect(ord("A"), 65, "ord() of a letter is its code point")
+expect(ord("\x7f"), 127, "ord() of an escape sequence")
+expect(chr(65), "A", "chr() is the inverse")
+expect(chr(0), "\x00", "chr(0) is NUL")
+expect(ord(chr(200)), 200, "ord/chr round-trip")
+expect_throws(fn() { ord("ab") }, "ord() rejects a longer string", "one-character")
+expect_throws(fn() { ord("") }, "ord() rejects an empty string", "one-character")
+expect_throws(fn() { chr(-1) }, "chr() rejects a negative code point", "0..1114111")
+expect(len(chr(0x10FFFF)), 1, "chr() reaches the top of the Unicode range")
+
 assert(now() > 0, "now() returns an epoch timestamp")
 expect(type(now()), "float", "now() is a float")
 expect(sleep(0), nil, "sleep() returns nil")

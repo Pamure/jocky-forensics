@@ -131,7 +131,8 @@ def read_cmdline(pid: int) -> List[str]:
 def read_status(pid: int) -> Dict[str, str]:
     """Selected fields from ``/proc/<pid>/status``."""
     wanted = ("Name", "State", "Pid", "PPid", "Uid", "Gid", "Threads",
-              "VmRSS", "VmSize", "Seccomp", "NoNewPrivs")
+              "VmRSS", "VmSize", "Seccomp", "NoNewPrivs", "NSpid", "CapEff",
+              "CapPrm", "SigIgn", "SigBlk")
     fields: Dict[str, str] = {}
     try:
         with open(f"/proc/{pid}/status") as fh:
@@ -198,6 +199,35 @@ def read_fds(pid: int, deleted_only: bool = False) -> List[Dict[str, Any]]:
             item["kind"] = "file"
         results.append(item)
     return results
+
+
+def read_cgroups(pid: int) -> Dict[str, str]:
+    """Extract cgroup hierarchies from ``/proc/<pid>/cgroup`` (container detection)."""
+    cgroups: Dict[str, str] = {}
+    try:
+        with open(f"/proc/{pid}/cgroup") as fh:
+            for line in fh:
+                parts = line.strip().split(":", 2)
+                if len(parts) == 3:
+                    cgroups[parts[1] or "unified"] = parts[2]
+    except OSError:
+        pass
+    return cgroups
+
+
+def read_namespaces(pid: int) -> Dict[str, str]:
+    """Resolve namespace inode links from ``/proc/<pid>/ns/*``."""
+    ns_dir = f"/proc/{pid}/ns"
+    namespaces: Dict[str, str] = {}
+    try:
+        for entry in os.listdir(ns_dir):
+            try:
+                namespaces[entry] = os.readlink(f"{ns_dir}/{entry}")
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return namespaces
 
 
 def read_maps(pid: int) -> List[Dict[str, Any]]:
@@ -291,7 +321,14 @@ def info(pid: int, with_fds: bool = False, with_maps: bool = False,
         "vmsize_kb": _kb(status.get("VmSize")),
         # ---- evasion-relevant flags -------------------------------------
         "memfd_exe": bool(read_exe(pid) and "/memfd:" in (read_exe(pid) or "")),
+        "nspid": [int(x) for x in status.get("NSpid", "").split() if x.isdigit()],
+        "capeff": status.get("CapEff", ""),
     }
+    cgroups = read_cgroups(pid)
+    entry["cgroup"] = cgroups.get("unified") or next(iter(cgroups.values()), "")
+    entry["is_container"] = bool(len(entry["nspid"]) > 1 or any(
+        marker in entry["cgroup"] for marker in ("docker", "kubepods", "containerd", "lxc")
+    ))
     exe = entry["exe"] or ""
     entry["deleted_exe"] = exe.endswith("(deleted)")
     entry["suspicious_path"] = any(
@@ -317,11 +354,18 @@ def _kb(value: Optional[str]) -> Optional[int]:
         return None
 
 
-def list_processes(limit: Optional[int] = None, **kwargs: Any) -> List[Dict[str, Any]]:
-    """Aggregate every visible process; extra kwargs go to :func:`info`."""
+def list_processes(limit: Optional[int] = None, detail_limit: Optional[int] = None,
+                   **kwargs: Any) -> List[Dict[str, Any]]:
+    """Aggregate every visible process; extra kwargs go to :func:`info`.
+
+    ``detail_limit`` applies those kwargs to the first *N* processes only, so a
+    caller that wants deep state (fds, maps) for a bounded sample still sees
+    every process's cheap fields without paying for a deep read of each one.
+    """
     out: List[Dict[str, Any]] = []
-    for pid in list_pids():
-        entry = info(pid, **kwargs)
+    for index, pid in enumerate(list_pids()):
+        detailed = detail_limit is None or index < detail_limit
+        entry = info(pid, **(kwargs if detailed else {}))
         if entry is not None:
             out.append(entry)
             if limit is not None and len(out) >= limit:
