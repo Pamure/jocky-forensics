@@ -1,0 +1,52 @@
+# The type system: eight value kinds, deep equality, and explicit conversions.
+
+expect(type(nil), "nil", "nil")
+expect(type(true), "bool", "boolean")
+expect(type(1), "int", "integer")
+expect(type(1.0), "float", "float")
+expect(type("s"), "str", "string")
+expect(type([]), "list", "list")
+expect(type({}), "map", "map")
+expect(type(fn() { return 1 }), "fn", "function")
+
+# literals keep their kind: this is the bug class where 0 became false
+expect(type(0), "int", "zero is an int, not a bool")
+expect(type(false), "bool", "false is a bool, not an int")
+expect(type(1.0), "float", "a float literal stays a float")
+
+# equality is structural for containers
+expect([1, 2] == [1, 2], true, "lists compare by value")
+expect([1, 2] == [1, 3], false, "different lists differ")
+expect({"a": 1} == {"a": 1}, true, "maps compare by value")
+expect(nil == nil, true, "nil equals itself")
+expect([1, [2]] == [1, [2]], true, "nested containers compare structurally")
+expect(1 == true, true, "documented quirk: 1 and true compare equal (Python semantics)")
+expect(1 == "1", false, "numbers and strings never compare equal")
+
+# string conversions are stable and used in findings
+expect(str(42), "42", "int to string")
+expect(str(4.5), "4.5", "float to string")
+expect(str(4.0), "4", "integral floats print without a decimal point")
+expect(str(true), "true", "bool to string")
+expect(str(nil), "nil", "nil to string")
+expect(str([1, 2]), "[1,2]", "containers render as JSON")
+
+# numeric conversions are permissive on purpose: a forensic script should not
+# die because a log field was empty
+expect(int("42"), 42, "string to int")
+expect(int("abc"), 0, "an unparseable string becomes 0, it does not raise")
+expect(int(3.9), 3, "float to int truncates")
+expect(float("1.5"), 1.5, "string to float")
+expect(float("nope"), 0.0, "an unparseable float becomes 0.0")
+
+# len() answers for the sizing types and reports 0 elsewhere
+expect(len("abc"), 3, "string length")
+expect(len([1, 2]), 2, "list length")
+expect(len({"a": 1}), 1, "map length")
+expect(len(5), 0, "len() of a number is 0, not an error")
+
+# numbers survive the round trip through strings
+expect("" + 1, "1", "concatenation coerces")
+expect(type(1 + 2), "int", "int + int stays int")
+expect(type(1 + 2.0), "float", "int + float promotes")
+expect(type(3 * 2), "int", "multiplication keeps the kind")

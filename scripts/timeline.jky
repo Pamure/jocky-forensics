@@ -21,7 +21,8 @@ for root in roots {
 }
 
 for item in proc.deleted_open() {
-  emit {"kind": "deleted_open", "pid": item.pid, "fd": item.fd, "path": item.path}
+  emit {"kind": "deleted_open", "pid": item.pid, "fds": item.fds,
+        "count": item.count, "path": item.path}
 }
 
 let perms = fs.special_perms("/usr", 4000)

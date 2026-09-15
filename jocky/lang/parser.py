@@ -323,8 +323,15 @@ class Parser:
                 continue
             if self._at_op("."):
                 tok = self._next()
-                name = self._expect_ident()
-                expr = N.Member(line=tok.line, col=tok.col, obj=expr, name=name.value)
+                # A member name may be a keyword: `m.set(...)` reaches the map
+                # method of that name, and after a dot there is no statement to
+                # confuse it with. Requiring identifiers here made several
+                # natives unreachable from scripts.
+                member = self._peek()
+                if member.kind not in ("ident", "kw"):
+                    self._fail("expected a member name after '.'")
+                self._next()
+                expr = N.Member(line=tok.line, col=tok.col, obj=expr, name=member.value)
                 continue
             break
         return expr

@@ -1,0 +1,51 @@
+# Strings: literals, escapes, interpolation and methods.
+
+expect(type("x"), "str", "quoted text is a string")
+expect("abc".len(), 3, "length counts characters")
+expect("".len(), 0, "the empty string is a string")
+
+# escapes
+expect("\n".len(), 1, "newline escape")
+expect("\t".len(), 1, "tab escape")
+expect("\\".len(), 1, "escaped backslash")
+expect("\"".len(), 1, "escaped quote")
+expect("a\nb".split("\n"), ["a", "b"], "escaping then splitting")
+expect("\x41", "A", "hex escape")
+
+# unknown escapes keep their backslash: detection patterns must survive verbatim
+expect("\d".len(), 2, "unknown escape is preserved, not silently dropped")
+expect("\d+ \w*", "\d+ \w*", "regex-shaped literals round-trip")
+
+# interpolation
+let x = 7
+let name = "pid"
+expect("x={x}", "x=7", "interpolation of a variable")
+expect("{name}={x}", "pid=7", "interpolation at the start of a string")
+expect("{{literal}}".len(), 9, "doubled braces are literal braces, not interpolation")
+expect("{{".len(), 1, "an escaped opening brace stands alone")
+expect("}}".len(), 1, "an escaped closing brace stands alone")
+expect("{1 + 1}", "2", "expressions are allowed inside interpolation")
+expect("n={x + 1} done", "n=8 done", "text around an interpolation")
+expect(type("{x}"), "str", "interpolation always yields a string")
+expect("{nil}", "nil", "nil renders as 'nil'")
+expect("{true}", "true", "booleans render lowercase")
+
+# methods
+expect("Hello".upper(), "HELLO", "upper")
+expect("Hello".lower(), "hello", "lower")
+expect("  pad  ".strip(), "pad", "strip")
+expect("a,b,c".split(","), ["a", "b", "c"], "split on a separator")
+expect("abc".contains("b"), true, "substring containment")
+expect("abc".starts_with("ab"), true, "prefix")
+expect("abc".ends_with("bc"), true, "suffix")
+expect("abc".find("c"), 2, "find returns an index")
+expect("abc".find("zz"), -1, "find returns -1 when absent")
+expect("abcdef".substr(1, 3), "bc", "substr takes start and end")
+expect("abcabc".replace("a", "z"), "zbczbc", "replace all occurrences")
+expect("ab".chars(), ["a", "b"], "chars yields a list")
+expect("a b".lines(), ["a b"], "lines splits on newlines only")
+
+assert("a" < "b", "strings compare lexicographically")
+expect("abc" + "def", "abcdef", "string concatenation")
+expect("ab" * 2, "abab", "string repetition")
+expect("value=" + 5, "value=5", "concatenation coerces numbers")

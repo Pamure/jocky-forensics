@@ -1,0 +1,63 @@
+# Iteration semantics, including the ones a triage loop depends on.
+
+# order is the list's order, not a set order
+fn collect_into(seed) {
+  let out = seed
+  for n in [5, 4, 3, 2, 1] { out.push(n) }
+  return out
+}
+expect(collect_into([]), [5, 4, 3, 2, 1], "lists iterate in order")
+
+# a large loop is still exact — triage scripts walk hundreds of records
+let total = 0
+for n in range(1000) { set total = total + n }
+expect(total, 499500, "sum of 0..999")
+
+# strings iterate by character, including multi-byte ones
+let chars = []
+for ch in "héllo" { chars.push(ch) }
+expect(len(chars), 5, "one entry per character, not per byte")
+expect(chars[1], "é", "the accented character is intact")
+expect("é".bytes(), [195, 169], "bytes() exposes the UTF-8 encoding")
+
+# maps iterate as [key, value] pairs
+let pairs = []
+for entry in {"first": 1, "second": 2} {
+  pairs.push(entry[0] + "=" + entry[1])
+}
+expect(pairs.sort(), ["first=1", "second=2"], "map entries are key/value pairs")
+
+# breaking out early on a match is the common triage shape
+let found = nil
+for process in [{"name": "init"}, {"name": "suspect"}, {"name": "other"}] {
+  if process.name == "suspect" {
+    set found = process
+    break
+  }
+}
+expect(found.name, "suspect", "break leaves the loop with the found record")
+expect(found, {"name": "suspect"}, "the record itself is intact")
+
+# nested iteration with an accumulator per outer item
+let matrix = []
+for row in range(3) {
+  let row_total = 0
+  for col in range(3) { set row_total = row_total + col }
+  matrix.push(row_total)
+}
+expect(matrix, [3, 3, 3], "inner loops re-run for every outer item")
+
+# iteration over a list built by a native
+let listeners = net.listeners()
+let counted = 0
+for listener in listeners { set counted = counted + 1 }
+expect(counted, len(listeners), "iterating collector output matches its length")
+
+# filtering then iterating is the reporting pattern used by the example scripts
+let severities = ["low", "critical", "high", "critical"]
+let critical = []
+for severity in severities {
+  if severity == "critical" { critical.push(severity) }
+}
+expect(len(critical), 2, "manual filter")
+expect(filter(severities, fn(s) { return s == "critical" }).len(), 2, "filter is equivalent")

@@ -1,0 +1,91 @@
+# Collector contracts: shape assertions that must hold on any Linux host.
+#
+# These read the real host. Values are asserted for *shape* (and for the few
+# invariants a running Linux system always satisfies), never for a specific
+# machine's contents, so the file is portable across hosts and CI.
+
+# processes
+let pids = proc.pids()
+assert(len(pids) > 0, "a running host has at least one process")
+assert(contains(sys.pid(), pids), "the test process itself is listed")
+
+let self_info = proc.info(sys.pid())
+expect(self_info.pid, sys.pid(), "proc.info() reports the pid we asked for")
+expect(type(self_info.name), "str", "a process has a name")
+expect(type(self_info.cmdline), "str", "a process has a command line")
+assert(self_info.ppid >= 0, "a process has a parent id")
+
+let processes = proc.list(50)
+expect(type(processes), "list", "proc.list() returns a list")
+assert(len(processes) <= 50, "the limit is respected")
+assert(len(processes) > 0, "and the list is not empty")
+
+let tree = proc.tree()
+expect(type(tree.processes), "map", "proc.tree() indexes by pid")
+expect(type(tree.roots), "list", "and reports root processes")
+
+expect(type(proc.fds(sys.pid())), "list", "fds are a list")
+expect(type(proc.maps(sys.pid())), "list", "maps are a list")
+assert(len(proc.maps(sys.pid())) > 0, "a live process has memory mappings")
+expect(type(proc.deleted_open()), "list", "deleted-open scan returns a list")
+expect(type(proc.socket_map()), "map", "socket inode map returns a map")
+
+# network
+expect(type(net.connections()), "list", "socket table")
+expect(type(net.listeners()), "list", "listener view")
+expect(type(net.established()), "list", "established view")
+expect(type(net.interfaces()), "list", "interfaces")
+assert(len(net.interfaces()) >= 1, "a host has at least the loopback interface")
+expect(type(net.routes()), "list", "routes")
+
+let interfaces = net.interfaces()
+for interface in interfaces {
+  expect(type(interface.name), "str", "every interface has a name")
+}
+
+# filesystem
+assert(fs.exists("/proc/self/stat"), "procfs is mounted")
+expect(fs.exists("/definitely-not-here-9f3a"), false, "a missing path reports false")
+expect(type(fs.stat("/proc/self/stat")), "map", "stat returns a map")
+expect(fs.stat("/proc/self/stat").is_file, true, "and flags it as a file")
+expect(type(fs.magic("/proc/self/stat")), "str", "magic() returns a type name")
+expect(type(fs.path_dirs()), "list", "PATH audit returns a list")
+expect(type(fs.ld_preload()), "map", "ld.so.preload probe returns a map")
+expect(type(fs.special_perms("/tmp", 50)), "map", "permission inventory returns a map")
+
+let hostname_hash = fs.hash("/etc/hostname")
+assert(hostname_hash == nil or len(hostname_hash) == 64, "hash is SHA-256 or nil when unreadable")
+
+expect(type(fs.scan("/tmp", 10)), "list", "bounded scan returns a list")
+assert(len(fs.scan("/tmp", 10)) <= 10, "and respects its bound")
+
+# system
+let info = sys.info()
+expect(type(info.kernel.release), "str", "kernel release")
+expect(type(info.uptime.seconds), "float", "uptime is numeric")
+assert(info.uptime.seconds > 0, "uptime is positive")
+assert(len(sys.mounts()) > 0, "there is at least one mounted filesystem")
+expect(type(sys.modules()), "list", "module list")
+expect(type(sys.hidden_modules()), "map", "module cross-check returns a map")
+expect(type(sys.loadavg()), "list", "load average is a list")
+expect(type(sys.cpu().cpus), "int", "cpu count is an integer")
+expect(type(sys.kernel()), "map", "kernel inventory")
+
+# detection
+let report = det.triage()
+expect(type(report.counts), "map", "triage counts are a map")
+expect(type(report.findings), "list", "triage findings are a list")
+assert(report.scanned.processes > 0, "triage scanned processes")
+assert(report.scanned.coverage > 0, "visibility coverage is reported")
+expect(type(report.scanned.coverage), "float", "coverage is a fraction")
+expect(type(report.duration_ms), "float", "triage is timed")
+
+for finding in report.findings {
+  expect(type(finding.check), "str", "every finding names its check")
+  expect(type(finding.severity), "str", "every finding has a severity")
+  expect(type(finding.title), "str", "every finding has a title")
+}
+
+expect(type(det.unusual_listeners()), "list", "listener review returns a list")
+expect(type(det.rwx()), "list", "memory-region check returns a list")
+expect(type(det.deleted_open()), "list", "deleted-open check returns a list")

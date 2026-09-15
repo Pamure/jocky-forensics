@@ -1,0 +1,73 @@
+# Closures capture by reference to a shared cell — the property that makes
+# counters, accumulators and callbacks work the way a script author expects.
+
+fn make_counter() {
+  let count = 0
+  return fn() { set count = count + 1
+    return count }
+}
+
+let counter = make_counter()
+expect(counter(), 1, "first call")
+expect(counter(), 2, "the closure remembers its cell")
+expect(counter(), 3, "and keeps counting")
+
+let other = make_counter()
+expect(other(), 1, "a second instance has its own cell")
+expect(counter(), 4, "the first instance is unaffected")
+
+# two closures over one variable observe each other
+fn make_pair() {
+  let shared = 0
+  let increment = fn() { set shared = shared + 1
+    return shared }
+  let read = fn() { return shared }
+  return [increment, read]
+}
+let pair = make_pair()
+expect(pair[1](), 0, "read before any increment")
+expect(pair[0](), 1, "increment")
+expect(pair[1](), 1, "the reader sees the write")
+
+# capture across two levels of nesting
+fn outer(value) {
+  fn middle() {
+    let offset = 5
+    return fn() { return value + offset }
+  }
+  return middle()
+}
+expect(outer(100)(), 105, "a grandchild closure sees both captured cells")
+
+# a captured parameter is a cell too
+fn accumulate(start) {
+  return fn(step) { set start = start + step
+    return start }
+}
+let acc = accumulate(10)
+expect(acc(5), 15, "captured parameter mutated")
+expect(acc(5), 20, "and persists")
+
+# closures created in a loop share the loop variable (late binding), which is
+# worth knowing before writing a callback per iteration
+let thunks = []
+for i in [1, 2, 3] {
+  thunks.push(fn() { return i })
+}
+expect(thunks[0](), 3, "loop-created closures share one cell; all see the last value")
+expect(thunks[1](), 3, "second closure sees the same cell")
+expect(thunks[2](), 3, "third closure sees the same cell")
+
+# capture by value for anything that is not a local slot: a captured list is the
+# same object, so mutation inside the closure is visible outside
+fn append_inside(list) {
+  let adder = fn() { return list.push("added") }
+  adder()
+  return list.len()
+}
+expect(append_inside([]), 1, "a captured container is shared, not copied")
+
+# closures are values like any other
+expect(type(make_counter()), "fn", "a closure is a function value")
+let third = make_counter()
+expect([third(), third()], [1, 2], "a closure keeps its own state across calls")

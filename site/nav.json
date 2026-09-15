@@ -14,7 +14,8 @@
 				{ "slug": "language/basics", "title": "Language basics" },
 				{ "slug": "language/functions-errors", "title": "Functions & errors" },
 				{ "slug": "language/reference", "title": "Reference" },
-				{ "slug": "language/standard-library", "title": "Standard library" }
+				{ "slug": "language/standard-library", "title": "Standard library" },
+				{ "slug": "language/testing", "title": "Testing scripts" }
 			]
 		},
 		{

@@ -1,0 +1,76 @@
+# Control flow: branching, loops, short-circuiting and loop control.
+
+let pick = fn(n) {
+  if n == 1 { return "one" }
+  elif n == 2 { return "two" }
+  elif n == 3 { return "three" }
+  else { return "many" }
+}
+expect(pick(1), "one", "first branch")
+expect(pick(2), "two", "second branch")
+expect(pick(3), "three", "third branch")
+expect(pick(9), "many", "else branch")
+
+# a block is a statement, and the last statement decides nothing implicitly
+let side = 0
+if true { set side = side + 1 }
+expect(side, 1, "if without else runs the block")
+
+let i = 0
+let collected = []
+while i < 6 {
+  set i = i + 1
+  if i == 2 { continue }
+  if i == 5 { break }
+  collected.push(i)
+}
+expect(collected, [1, 3, 4], "continue skips, break exits")
+expect(i, 5, "the loop variable is visible afterwards")
+
+# loops over every iterable
+let total = 0
+for n in [1, 2, 3] { set total = total + n }
+expect(total, 6, "for over a list")
+
+let letters = ""
+for ch in "abc" { set letters = letters + ch }
+expect(letters, "abc", "for over a string yields characters")
+
+let pairs = []
+for entry in {"k1": 1, "k2": 2} { pairs.push(entry[0]) }
+expect(pairs.sort(), ["k1", "k2"], "for over a map yields [key, value] pairs")
+
+let empty_count = 0
+for item in [] { set empty_count = empty_count + 1 }
+expect(empty_count, 0, "iterating an empty list runs the body zero times")
+
+# nested loops keep their own bounds
+let grid = []
+for row in [1, 2] {
+  for col in [10, 20] {
+    grid.push(row * col)
+  }
+}
+expect(grid, [10, 20, 20, 40], "nested loops")
+
+# short-circuit evaluation: the right-hand side must not run
+let calls = 0
+let bump = fn() { set calls = calls + 1
+  return true }
+expect(false and bump(), false, "and short-circuits")
+expect(calls, 0, "the right-hand side of a false 'and' never ran")
+expect(true or bump(), true, "or short-circuits")
+expect(calls, 0, "the right-hand side of a true 'or' never ran")
+expect(true and bump(), true, "a true 'and' does evaluate the right-hand side")
+expect(calls, 1, "the counter proves it ran once")
+
+# truthiness drives both branches and boolean operators
+assert(not nil, "nil is falsy")
+assert(not false, "false is falsy")
+assert(not 0, "zero is falsy")
+assert(not "", "the empty string is falsy")
+assert(not [], "the empty list is falsy")
+assert(not {}, "the empty map is falsy")
+assert(1, "non-zero numbers are truthy")
+assert("x", "non-empty strings are truthy")
+assert([0], "a list with an element is truthy")

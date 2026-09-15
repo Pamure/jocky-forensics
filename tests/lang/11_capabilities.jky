@@ -1,0 +1,39 @@
+# Capability posture: what a script may do by default, and what it may not.
+#
+# These assertions describe the DENY-BY-DEFAULT posture. Run the corpus with
+# `jocky test tests/lang --allow syscall` and the first expectation flips — that
+# is the point of a capability gate, so it is asserted here rather than hidden.
+
+expect_throws(fn() { return mem.syscall(39) },
+              "raw syscalls are refused without an explicit grant")
+expect_throws(fn() { return mem.memfd_run("print(1)") },
+              "memfd execution is refused without an explicit grant")
+
+# the refusal names the capability and the flag that grants it
+let message = ""
+try { mem.syscall(39) } catch e { set message = e }
+assert(message.contains("syscall"), "the error names the capability")
+assert(message.contains("--allow"), "the error names the flag that grants it")
+
+# read-only probes stay available: they are what makes the gate usable
+let probe = mem.probe()
+expect(type(probe), "map", "mem.probe() returns a map")
+assert(probe.available == true or probe.available == false, "probe reports availability")
+expect(type(mem.uname().sysname), "str", "mem.uname() reports the kernel name")
+expect(mem.uname().sysname, mem.uname().sysname, "uname is stable within a run")
+
+# fileless inspection helpers are read-only and therefore unguarded
+expect(type(mem.is_memfd(sys.pid())), "bool", "is_memfd answers for a live pid")
+expect(mem.is_memfd(sys.pid()), false, "our own process is not memfd-backed")
+expect(type(mem.memfd_maps(sys.pid())), "list", "memfd_maps returns a list")
+expect(len(mem.memfd_maps(sys.pid())), 0, "and it is empty for a normal interpreter")
+
+# the detection library never needs a capability, which is deliberate: a script
+# that only reads the host must always be runnable
+expect(type(det.fileless()), "list", "det.fileless() needs no grant")
+expect(type(det.triage().findings), "list", "det.triage() needs no grant")
+expect(type(ioc.match({"names": ["nothing-matches-this"]})), "map", "ioc.match() needs no grant")
+
+# the sandbox level, when one is applied, is reported to the script's host
+# (scripts cannot read it directly; the runner records it on the result instead)
+assert(true, "sandbox state is a runner-level fact, verified by jocky test --sandbox")

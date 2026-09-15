@@ -13,10 +13,14 @@ raises a catchable error naming the function.
 
 | Function | Arity |
 |---|---|
+| `assert` | 1..2 |
 | `contains` | 2..2 |
 | `count` | 1..2 |
 | `dict` | 0..0 |
 | `error` | 1..1 |
+| `expect` | 2..3 |
+| `expect_throws` | 1..2 |
+| `fail` | 0..1 |
 | `filter` | 2..2 |
 | `float` | 1..1 |
 | `hex` | 1..1 |
@@ -29,6 +33,7 @@ raises a catchable error naming the function.
 | `now` | 0..0 |
 | `print` | 0+ |
 | `range` | 1..2 |
+| `skip` | 0..1 |
 | `sleep` | 1..1 |
 | `sort` | 1..1 |
 | `sort_by` | 2..2 |

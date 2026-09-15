@@ -133,6 +133,9 @@ class RunResult:
     findings: List[Any] = field(default_factory=list)
     output: List[str] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
+    checks: List[Dict[str, Any]] = field(default_factory=list)   # assert/expect results
+    denials: List[Dict[str, Any]] = field(default_factory=list)  # refused capabilities
+    permissions: Dict[str, Any] = field(default_factory=dict)    # what this run was allowed
     steps: int = 0
     native_calls: int = 0
     duration_ms: float = 0.0
@@ -143,6 +146,9 @@ class RunResult:
             "findings": to_plain(self.findings),
             "output": list(self.output),
             "errors": list(self.errors),
+            "checks": list(self.checks),
+            "denials": list(self.denials),
+            "permissions": dict(self.permissions),
             "steps": self.steps,
             "native_calls": self.native_calls,
             "duration_ms": round(self.duration_ms, 3),
@@ -237,6 +243,12 @@ class VM:
             findings=list(self.findings),
             output=list(self.output),
             errors=errors,
+            checks=list(self.ctx.get("checks", [])),
+            denials=list(self.ctx.get("denials", [])),
+            permissions={
+                "granted": sorted((self.ctx.get("policy") or {}).get("allow") or []),
+                **({"sandbox": self.ctx["sandbox"]} if "sandbox" in self.ctx else {}),
+            },
             steps=self.steps,
             native_calls=self.native_calls,
             duration_ms=duration,
@@ -681,7 +693,7 @@ class VM:
             "find": (lambda sub: s.find(to_str(sub)), 1, 1),
             "substr": (lambda start, end=None: s[start:end], 1, 2),
             "to_int": (lambda: int(s.strip() or "0"), 0, 0),
-            "to_float": (lambda: float(s.strip() or "0"), 0, 0),
+            "to_float": (lambda: _safe_float(s), 0, 0),
             "chars": (lambda: list(s), 0, 0),
             "bytes": (lambda: list(s.encode("utf-8", "surrogateescape")), 0, 0),
             "lines": (lambda: s.splitlines(), 0, 0),
@@ -702,8 +714,12 @@ class VM:
             "count": lambda v: sum(1 for x in items if x == v),
             "join": lambda sep="": to_str(sep).join(to_str(x) for x in items),
             "slice": lambda start=0, end=None: items[start:end],
-            "reverse": lambda: (items.reverse(), items)[1],
-            "sort": lambda: (items.sort(key=_sort_key), items)[1],
+            # sort/reverse return new lists, matching the global sort() helper:
+            # a collector's result should not be reordered by asking for an
+            # ordered view of it. push() and index assignment remain the
+            # explicit mutators.
+            "reverse": lambda: list(reversed(items)),
+            "sort": lambda: sorted(items, key=_sort_key),
             "sum": lambda: sum(x for x in items if isinstance(x, (int, float))),
             "min": lambda: min(items) if items else None,
             "max": lambda: max(items) if items else None,
@@ -742,6 +758,14 @@ class VM:
         if name in table:
             return NativeFn(f"num.{name}", lambda vm, args: table[name](), 0, 0)
         raise JockyRuntimeError(f"number has no member {name!r}")
+
+
+def _safe_float(text: str) -> float:
+    """Permissive float parsing, matching the global ``float()`` helper."""
+    try:
+        return float(text.strip() or "0")
+    except ValueError:
+        return 0.0
 
 
 def _sort_key(value: Any) -> Tuple[int, Any]:

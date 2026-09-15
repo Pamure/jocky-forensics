@@ -18,7 +18,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional
 
 from jocky.errors import JockyRuntimeError
-from jocky.lang.vm import NativeFn, to_str, truthy
+from jocky.lang.vm import JockyLimitError, NativeFn, to_str, truthy
 from jocky.rt import detect, filefs, netfs, procfs, sysinfo
 
 
@@ -40,15 +40,26 @@ def _policy_allows(vm: Any, capability: str) -> bool:
 
 
 def _guarded(fn: Callable[[Any, List[Any]], Any], capability: str):
-    """Wrap a native so it refuses to run without an explicit grant."""
+    """Wrap a native so it refuses to run without an explicit grant.
+
+    The refusal stays *catchable* — a triage script may legitimately try an
+    operation and fall back — but it is recorded in the run's ``denials`` list
+    first, so a script cannot hide from the operator that it reached for a
+    capability it was not granted.
+    """
 
     def wrapper(vm: Any, args: List[Any]) -> Any:
-        if not _policy_allows(vm, capability):
-            raise JockyRuntimeError(
-                f"'{capability}' capability is disabled: {GUARDED_CAPABILITIES[capability]}. "
-                f"Re-run with --allow {capability} if this script is trusted."
+        if _policy_allows(vm, capability):
+            return fn(vm, args)
+        context = getattr(vm, "ctx", None)
+        if context is not None:
+            context.setdefault("denials", []).append(
+                {"capability": capability, "native": getattr(fn, "__name__", "native")}
             )
-        return fn(vm, args)
+        raise JockyRuntimeError(
+            f"'{capability}' capability is disabled: {GUARDED_CAPABILITIES[capability]}. "
+            f"Re-run with --allow {capability} if this script is trusted."
+        )
 
     return wrapper
 
@@ -84,11 +95,62 @@ def _list(value: Any) -> List[Any]:
 
 
 # ------------------------------------------------------------------- core
+def _check_sink(vm: Any) -> List[Dict[str, Any]]:
+    """Where in-language assertions are recorded (per run, not global)."""
+    sink = getattr(vm, "ctx", None)
+    if sink is None:  # a bare VM without context: keep the call harmless
+        return []
+    return sink.setdefault("checks", [])
+
+
+def _record(vm: Any, label: str, ok: bool, detail: str = "", skipped: bool = False) -> bool:
+    entry: Dict[str, Any] = {"label": label, "ok": bool(ok), "detail": detail}
+    if skipped:
+        entry["skipped"] = True
+    _check_sink(vm).append(entry)
+    return bool(ok)
+
+
 def core_builtins() -> Dict[str, Any]:
     """Value/collection helpers every script expects."""
 
     def _print(vm: Any, args: List[Any]) -> None:
         vm.output.append(" ".join(to_str(a) for a in args))
+
+    def _assert(vm: Any, args: List[Any]) -> bool:
+        condition = truthy(args[0])
+        label = _str(args[1]) if len(args) > 1 else "assert"
+        return _record(vm, label, condition,
+                       "" if condition else "condition was falsy")
+
+    def _expect(vm: Any, args: List[Any]) -> bool:
+        actual, expected = args[0], args[1]
+        label = _str(args[2]) if len(args) > 2 else "expect"
+        ok = actual == expected
+        detail = "" if ok else f"expected {to_str(expected)}, got {to_str(actual)}"
+        return _record(vm, label, ok, detail)
+
+    def _expect_throws(vm: Any, args: List[Any]) -> bool:
+        """A closure must raise a *catchable* error (limits are failures, not passes)."""
+        fn = args[0]
+        label = _str(args[1]) if len(args) > 1 else "expect_throws"
+        try:
+            vm.call_value(fn, [])
+        except JockyRuntimeError as exc:
+            return _record(vm, label, True, f"raised: {exc}")
+        except JockyLimitError as exc:
+            # exceeding a budget is not the error the test asked for
+            return _record(vm, label, False, f"hit a limit instead of raising: {exc}")
+        except Exception as exc:  # host-level surprise: report, never swallow
+            return _record(vm, label, False, f"raised a host error: {type(exc).__name__}: {exc}")
+        return _record(vm, label, False, "no error was raised")
+
+    def _fail(vm: Any, args: List[Any]) -> bool:
+        return _record(vm, _str(args[0]) if args else "failure", False, "explicit failure")
+
+    def _skip(vm: Any, args: List[Any]) -> bool:
+        return _record(vm, _str(args[0]) if args else "skipped", True,
+                       "skipped on this host", skipped=True)
 
     def _range(vm: Any, args: List[Any]) -> List[int]:
         if len(args) == 1:
@@ -116,12 +178,46 @@ def core_builtins() -> Dict[str, Any]:
     def _json_decode(vm: Any, args: List[Any]) -> Any:
         return json.loads(_str(args[0]))
 
+    def _len(vm: Any, args: List[Any]) -> int:
+        value = args[0]
+        return len(value) if isinstance(value, (str, list, dict)) else 0
+
+    def _float(vm: Any, args: List[Any]) -> float:
+        """Permissive like ``int``: unparseable text becomes 0.0, never an error."""
+        value = args[0]
+        if isinstance(value, bool):
+            return float(value)
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.strip() or "0")
+            except ValueError:
+                return 0.0
+        return 0.0
+
+    def _contains(vm: Any, args: List[Any]) -> bool:
+        """``contains(needle, haystack)`` for strings, lists and map keys."""
+        needle, haystack = args[0], args[1]
+        if isinstance(haystack, str):
+            return to_str(needle) in haystack
+        if isinstance(haystack, list):
+            return any(item == needle for item in haystack)
+        if isinstance(haystack, dict):
+            return to_str(needle) in haystack
+        return False
+
     return {
         "print": _fn("print", _print, 0, None),
-        "len": _fn("len", lambda vm, a: len(a[0]) if isinstance(a[0], (str, list, dict)) else 0, 1, 1),
+        "assert": _fn("assert", _assert, 1, 2),
+        "expect": _fn("expect", _expect, 2, 3),
+        "expect_throws": _fn("expect_throws", _expect_throws, 1, 2),
+        "fail": _fn("fail", _fail, 0, 1),
+        "skip": _fn("skip", _skip, 0, 1),
+        "len": _fn("len", _len, 1, 1),
         "str": _fn("str", lambda vm, a: to_str(a[0]), 1, 1),
         "int": _fn("int", lambda vm, a: _int(a[0]), 1, 1),
-        "float": _fn("float", lambda vm, a: float(a[0]) if isinstance(a[0], (int, float, str)) else 0.0, 1, 1),
+        "float": _fn("float", _float, 1, 1),
         "type": _fn("type", lambda vm, a: _type_name(a[0]), 1, 1),
         "range": _fn("range", _range, 1, 2),
         "transform": _fn("transform", _transform, 2, 2),
@@ -133,7 +229,7 @@ def core_builtins() -> Dict[str, Any]:
             to_str(x) for x in _list(a[0])), 1, 2),
         "keys": _fn("keys", lambda vm, a: list(a[0].keys()) if isinstance(a[0], dict) else [], 1, 1),
         "values": _fn("values", lambda vm, a: list(a[0].values()) if isinstance(a[0], dict) else [], 1, 1),
-        "contains": _fn("contains", lambda vm, a: (a[0] in a[1]) if isinstance(a[1], (str, list)) else False, 2, 2),
+        "contains": _fn("contains", _contains, 2, 2),
         "dict": _fn("dict", lambda vm, a: {}, 0, 0),
         "now": _fn("now", lambda vm, a: time.time(), 0, 0),
         "sleep": _fn("sleep", lambda vm, a: time.sleep(max(0.0, float(a[0]))), 1, 1),
@@ -230,7 +326,9 @@ def namespaces() -> Dict[str, Any]:
             pattern=(_str(a[2]) or None) if len(a) > 2 else None,
             max_depth=_int(a[3]) if len(a) > 3 else 6), 0, 4),
         "timeline": _fn("fs.timeline", lambda vm, a: filefs.timeline(
-            _str(a[0], "/"), limit=_int(a[1]) if len(a) > 1 else 200), 0, 2),
+            _str(a[0], "/"),
+            limit=_int(a[1]) if len(a) > 1 else 200,
+            max_files=_int(a[2]) if len(a) > 2 else 5000), 0, 3),
         "special_perms": _fn("fs.special_perms", lambda vm, a: filefs.special_perms(
             _str(a[0], "/"), max_files=_int(a[1]) if len(a) > 1 else 5000), 0, 2),
         "path_dirs": _fn("fs.path_dirs", lambda vm, a: filefs.path_dirs(), 0, 0),

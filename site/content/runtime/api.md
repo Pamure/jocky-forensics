@@ -62,7 +62,7 @@ print(result.findings, result.errors)
 | `scan` | 0..4 |
 | `special_perms` | 0..2 |
 | `stat` | 1..1 |
-| `timeline` | 0..2 |
+| `timeline` | 0..3 |
 
 ## ioc
 

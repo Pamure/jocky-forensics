@@ -74,6 +74,12 @@ ALL_ACCESS = READ_ONLY | WRITE_ACCESS
 #: Directories a collection script legitimately needs to read.
 READ_ROOTS = ("/proc", "/sys", "/dev", "/usr", "/lib", "/lib64", "/etc", "/bin",
               "/sbin", "/run", "/var/log", "/snap")
+
+#: The runtime's own package directory. A confined interpreter still has to be
+#: able to import its own modules — several natives import lazily inside the
+#: call (`jocky.exec.memfd`, `jocky.rt.raw`), and denying them turns a routine
+#: read into an EACCES far from the cause. Granted as a read rule in every level.
+PACKAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
 #: Where output may be written (per level).
 WRITE_ROOTS = ("/tmp", "/var/tmp", "/dev/shm")
 
@@ -225,8 +231,14 @@ def run_sandboxed(level: str, function, *args: Any, **kwargs: Any) -> Any:
     return function(*args, **kwargs)
 
 
-def apply(level: str, extra_write: Optional[List[str]] = None) -> SandboxReport:
+def apply(level: str, extra_write: Optional[List[str]] = None,
+          extra_read: Optional[List[str]] = None) -> SandboxReport:
     """Confine the *current* process to ``level``.
+
+    ``extra_read`` / ``extra_write`` grant paths the caller legitimately needs
+    beyond the defaults — a test runner, for example, must still be able to read
+    its own corpus after a ruleset is applied, and confinement cannot be relaxed
+    once installed.
 
     Returns a report saying what was enforced; raises ``RuntimeError`` when the
     caller asked for confinement the kernel cannot provide. Silent downgrade is
@@ -256,7 +268,10 @@ def apply(level: str, extra_write: Optional[List[str]] = None) -> SandboxReport:
 
     read_access = _access_for(abi, write=False)
     write_access = _access_for(abi, write=True)
-    for root in READ_ROOTS:
+    for root in READ_ROOTS + (PACKAGE_ROOT,):
+        _add_path_rule(ruleset_fd, root, read_access)
+        report.rules.append((root, read_access))
+    for root in extra_read or ():
         _add_path_rule(ruleset_fd, root, read_access)
         report.rules.append((root, read_access))
     for root in tuple(WRITE_ROOTS) + tuple(extra_write or ()):

@@ -62,6 +62,33 @@ def test_policy_ctx_accepts_lists_and_empty_values():
     assert runner.policy_ctx(["syscall", " exec "])["policy"]["allow"] == {"syscall", "exec"}
 
 
+def test_a_caught_denial_is_still_recorded():
+    """A script may fall back after a refusal, but it cannot hide the attempt.
+
+    The refusal stays catchable (a triage script may legitimately try and fall
+    back), yet the run reports what it reached for and what it was granted, so
+    an operator reading the result sees the attempt either way.
+    """
+    source = """
+    let outcome = "unknown"
+    try { mem.syscall(39)
+      set outcome = "allowed" } catch e { set outcome = "refused" }
+    emit outcome
+    """
+    result = runner.run_source(source)
+    assert not result.errors, result.errors
+    assert result.findings == ["refused"], "the refusal is catchable"
+    assert [d["capability"] for d in result.denials] == ["syscall"], result.denials
+    assert result.permissions["granted"] == []
+
+
+def test_permissions_are_reported_for_a_granted_run():
+    result = runner.run_source("emit mem.syscall(39)", ctx=runner.policy_ctx("syscall"))
+    assert not result.errors, result.errors
+    assert result.permissions["granted"] == ["syscall"]
+    assert result.denials == []
+
+
 # ------------------------------------------------------------ case integrity
 @pytest.fixture()
 def case_dir(tmp_path):

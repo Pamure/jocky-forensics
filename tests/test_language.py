@@ -210,7 +210,9 @@ def test_list_and_map_methods():
     source = """
     let xs = [3, 1, 2]
     xs.push(4)
-    emit xs.sort()
+    let ordered = xs.sort()
+    emit ordered
+    emit xs
     emit xs.len()
     emit xs.contains(2)
     emit xs.join("-")
@@ -219,10 +221,12 @@ def test_list_and_map_methods():
     emit m.get("k")
     emit m.has("nope")
     emit m.keys()
-    "".len()
+    emit contains("k", m)
     """
     assert findings(source) == [
-        [1, 2, 3, 4], 4, True, "1-2-3-4", ["1", "2", "3"], 1, False, ["k"],
+        [1, 2, 3, 4],        # sort returns an ordered copy
+        [3, 1, 2, 4],        # …and leaves the original alone
+        4, True, "3-1-2-4", ["1", "2", "3"], 1, False, ["k"], True,
     ]
 
 

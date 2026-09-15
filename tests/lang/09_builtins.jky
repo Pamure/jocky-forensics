@@ -1,0 +1,52 @@
+# The standard library: the helpers a forensic script reaches for every day.
+
+expect(range(3), [0, 1, 2], "range(n) counts from zero")
+expect(range(2, 5), [2, 3, 4], "range(start, end) is half-open")
+expect(len(range(100)), 100, "range is a real list")
+
+expect(len("abcdef"), 6, "len")
+expect(str(7), "7", "str")
+expect(int("7"), 7, "int")
+expect(float("7.5"), 7.5, "float")
+expect(type(range(1)), "list", "type")
+
+expect(join(["a", "b", "c"], " "), "a b c", "join")
+expect(join([1, 2], ","), "1,2", "join coerces numbers")
+expect(keys({"b": 2, "a": 1}).sort(), ["a", "b"], "keys")
+expect(values({"b": 2, "a": 1}).sort(), [1, 2], "values")
+
+expect(contains("bc", "abcd"), true, "contains(needle, haystack) for strings")
+expect(contains(2, [1, 2, 3]), true, "contains for lists")
+expect(contains("b", {"a": 1, "b": 2}), true, "contains for map keys")
+expect(contains("zz", "abcd"), false, "contains returns false when absent")
+
+expect(sort([3, 1, 2]), [1, 2, 3], "sort numbers")
+expect(sort(["c", "a"]), ["a", "c"], "sort strings")
+expect(sort([]), [], "sort of an empty list")
+expect(sort_by(["bb", "a", "ccc"], fn(s) { return s.len() }), ["a", "bb", "ccc"], "sort_by a key")
+
+expect(transform([1, 2, 3], fn(n) { return n + 1 }), [2, 3, 4], "transform")
+expect(filter([1, 2, 3, 4], fn(n) { return n % 2 == 0 }), [2, 4], "filter")
+expect(count([1, 2, 3], fn(n) { return n > 5 }), 0, "count with no matches")
+expect(count(["a", "b"]), 2, "count without a predicate")
+
+# JSON is the wire format for findings, so both directions must be exact
+let encoded = json_encode({"kind": "test", "n": 3, "list": [1, 2]})
+expect(encoded.contains("\"kind\""), true, "json_encode emits keys")
+let decoded = json_decode(encoded)
+expect(decoded.kind, "test", "json_decode round trip preserves strings")
+expect(decoded.n, 3, "json_decode round trip preserves numbers")
+expect(decoded.list, [1, 2], "json_decode round trip preserves lists")
+expect_throws(fn() { return json_decode("{{not json") }, "malformed JSON raises")
+
+expect(hex(255), "0xff", "hex")
+expect(dict(), {}, "dict() makes an empty map")
+
+assert(now() > 0, "now() returns an epoch timestamp")
+expect(type(now()), "float", "now() is a float")
+expect(sleep(0), nil, "sleep() returns nil")
+
+# higher-order helpers accept functions declared earlier
+fn is_big(n) { return n > 10 }
+expect(filter([5, 50], is_big), [50], "filter with a declared function")
+expect(transform([5, 50], is_big), [false, true], "transform with a declared function")

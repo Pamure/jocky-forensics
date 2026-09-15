@@ -1,0 +1,63 @@
+# Lists and maps: construction, indexing, methods and mutation.
+
+let xs = [3, 1, 2]
+expect(xs.len(), 3, "list length")
+expect(xs[0], 3, "indexing is zero-based")
+expect(xs[-1], 2, "negative indices count from the end")
+expect(xs[1], 1, "second element")
+
+let sorted = xs.sort()
+expect(sorted, [1, 2, 3], "sort returns ascending order")
+expect(xs, [3, 1, 2], "sort does not mutate the original")
+
+expect([1, 1, 2].unique(), ["1", "2"], "unique stringifies and preserves order")
+expect([1, 2, 3].sum(), 6, "sum of numbers")
+expect([1, 5, 2].max(), 5, "maximum")
+expect([1, 5, 2].min(), 1, "minimum")
+expect(["a", "b"].join("-"), "a-b", "join with a separator")
+expect([1, 2].contains(2), true, "membership")
+expect([1, 2].contains(9), false, "non-membership")
+expect([1, 2, 3, 4].slice(1, 3), [2, 3], "slice by position")
+expect([1, 2, 3].first(), 1, "first element")
+expect([1, 2, 3].last(), 3, "last element")
+expect([].first(), nil, "first of an empty list is nil")
+
+let pushed = []
+pushed.push(1)
+pushed.push(2)
+expect(pushed, [1, 2], "push appends in place")
+expect(pushed.len(), 2, "push is visible through the same reference")
+
+expect_throws(fn() { return xs[10] }, "out-of-range index raises")
+
+# maps
+let m = {"a": 1, "b": 2}
+expect(m.a, 1, "member access on a map")
+expect(m["b"], 2, "index access on a map")
+expect(m.keys().sort(), ["a", "b"], "keys")
+expect(m.values().sort(), [1, 2], "values")
+expect(m.len(), 2, "map length")
+expect(m.has("a"), true, "has()")
+expect(m.has("z"), false, "has() for a missing key")
+expect(m.get("z", -1), -1, "get() with a default")
+expect(m["missing"], nil, "indexing a missing key yields nil")
+
+m.set("c", 3)
+expect(m.c, 3, "set() adds a key")
+set m["d"] = 4
+expect(m.d, 4, "index assignment adds a key")
+m.del("d")
+expect(m.has("d"), false, "del() removes a key")
+
+# nesting
+let nested = [[1, 2], [3, 4]]
+expect(nested[1][0], 3, "nested indexing")
+expect({"outer": {"inner": 5}}.outer.inner, 5, "nested member access")
+expect([{"k": 1}][0].k, 1, "member access after indexing")
+
+# aggregates used throughout the runtime
+let records = [{"n": 1}, {"n": 2}, {"n": 3}]
+expect(transform(records, fn(r) { return r.n * 10 }), [10, 20, 30], "transform")
+expect(filter(records, fn(r) { return r.n > 1 }).len(), 2, "filter")
+expect(count(records, fn(r) { return r.n == 2 }), 1, "count with a predicate")
+expect(sort_by(records, fn(r) { return -r.n })[0].n, 3, "sort_by with a key")

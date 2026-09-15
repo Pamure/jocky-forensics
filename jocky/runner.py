@@ -90,12 +90,16 @@ def run_program(program: Program, natives: Optional[Dict[str, Any]] = None,
                 wall_clock_ms: Optional[float] = DEFAULT_WALL_MS,
                 max_steps: int = DEFAULT_MAX_STEPS,
                 ctx: Optional[Dict[str, Any]] = None,
-                sandbox: str = "off") -> RunResult:
+                sandbox: str = "off",
+                sandbox_extra_read: Optional[List[str]] = None,
+                sandbox_extra_write: Optional[List[str]] = None) -> RunResult:
     """Execute a compiled program with the full forensic runtime.
 
     ``sandbox`` selects a Landlock confinement level (``off``/``vm``/``ro``/
-    ``strict``); it is applied to the *current* process before the VM starts, so
-    the report is attached to the result for the record.
+    ``strict``); it is applied to the *current* process before the VM starts and
+    cannot be relaxed afterwards, so ``sandbox_extra_read``/``_write`` exist for
+    paths the caller must keep (a test runner's own corpus, for example). The
+    report is attached to the result.
     """
     vm = VM(natives=natives if natives is not None else default_natives(),
             max_steps=max_steps)
@@ -103,7 +107,9 @@ def run_program(program: Program, natives: Optional[Dict[str, Any]] = None,
         vm.ctx.update(ctx)
     if sandbox and sandbox != "off":
         from jocky.sandbox import apply as apply_sandbox
-        vm.ctx["sandbox"] = apply_sandbox(sandbox).to_dict()
+        vm.ctx["sandbox"] = apply_sandbox(
+            sandbox, extra_read=sandbox_extra_read,
+            extra_write=sandbox_extra_write).to_dict()
     return vm.run(program, wall_clock_ms=wall_clock_ms)
 
 

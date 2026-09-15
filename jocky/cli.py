@@ -267,6 +267,21 @@ def cmd_sign(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_test(args: argparse.Namespace) -> int:
+    from jocky import testrunner
+    try:
+        summary = testrunner.run(args.path, pattern=args.pattern, wall_ms=args.wall_ms,
+                                 sandbox=args.sandbox, allow=args.allow)
+    except FileNotFoundError as exc:
+        print(f"jocky: {exc}", file=sys.stderr)
+        return 2
+    if args.json:
+        _emit(summary, True)
+    else:
+        print(testrunner.format_report(summary, verbose=args.verbose))
+    return 0 if summary["ok"] else 1
+
+
 def cmd_evidence(args: argparse.Namespace) -> int:
     from jocky import evidence
     report = evidence.run_all(iterations=args.iterations, out_dir=args.out,
@@ -391,6 +406,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_triage.add_argument("--deep", action="store_true")
     p_triage.add_argument("--json", action="store_true")
     p_triage.set_defaults(func=cmd_triage)
+
+    p_test = sub.add_parser("test", help="run JOCKY test files (.jky) that assert their own behaviour")
+    p_test.add_argument("path", nargs="?", default="tests/lang",
+                        help="file or directory (default: tests/lang)")
+    p_test.add_argument("--pattern", default="*.jky", help="glob within the directory")
+    p_test.add_argument("--wall-ms", type=float, default=30_000.0)
+    p_test.add_argument("--sandbox", default="off", choices=["off", "vm", "ro", "strict"],
+                        help="run every test under confinement")
+    p_test.add_argument("--allow", default=None,
+                        help="grant privileged capabilities to the tests (comma list)")
+    p_test.add_argument("--json", action="store_true")
+    p_test.add_argument("--verbose", action="store_true")
+    p_test.set_defaults(func=cmd_test)
 
     p_ev = sub.add_parser("evidence", help="run the proof harness")
     p_ev.add_argument("--iterations", type=int, default=1000)

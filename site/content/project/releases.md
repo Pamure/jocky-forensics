@@ -16,6 +16,7 @@ tagged commit, and `jocky --version` reports the same string.
 
 Commits after the latest tag:
 
+- `de25f67 docs: operations pages refreshed at 1.3.0 (evidence labelled as a 1.2.0-era run)`
 - `3c4af7d docs: refresh language, management and versioning pages to 1.3.0`
 - `ed50df5 docs: refresh installation pages to 1.3.0 and document token handling`
 

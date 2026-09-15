@@ -1,0 +1,56 @@
+# Functions: declarations, lambdas, recursion, arity and higher-order use.
+
+fn add(a, b) { return a + b }
+expect(add(2, 3), 5, "declared function")
+expect(type(add), "fn", "a function is a value")
+
+fn no_return() { let unused = 1 }
+expect(no_return(), nil, "a function without return yields nil")
+
+fn implicit_nil_path(n) {
+  if n > 0 { return "positive" }
+}
+expect(implicit_nil_path(1), "positive", "explicit return")
+expect(implicit_nil_path(-1), nil, "falling off the end yields nil")
+
+fn fact(n) {
+  if n <= 1 { return 1 }
+  return n * fact(n - 1)
+}
+expect(fact(6), 720, "recursion")
+
+fn fibonacci(n) {
+  if n < 2 { return n }
+  return fibonacci(n - 1) + fibonacci(n - 2)
+}
+expect(fibonacci(10), 55, "mutual recursion through the global scope")
+
+let double = fn(n) { return n * 2 }
+expect(double(21), 42, "lambda assigned to a name")
+expect(transform([1, 2, 3], double), [2, 4, 6], "lambda passed as a value")
+
+# functions as return values
+fn multiplier(factor) {
+  return fn(n) { return n * factor }
+}
+let triple = multiplier(3)
+expect(triple(5), 15, "returned closure")
+expect(multiplier(10)(2), 20, "immediate call of a returned closure")
+
+# named and anonymous functions are interchangeable
+expect(transform(["a", "b"], fn(s) { return s.upper() }), ["A", "B"], "inline lambda")
+expect(filter([1, 2, 3, 4], fn(n) { return n % 2 == 0 }), [2, 4], "filter with lambda")
+expect(count([1, 2, 3], fn(n) { return n > 1 }), 2, "count with lambda")
+
+# higher-order natives compose the way the runtime uses them
+let findings = [{"severity": "low"}, {"severity": "high"}, {"severity": "high"}]
+let highs = filter(findings, fn(f) { return f.severity == "high" })
+expect(len(highs), 2, "filtering structured records")
+
+# arity is enforced
+expect_throws(fn() { add(1) }, "too few arguments raises")
+expect_throws(fn() { add(1, 2, 3) }, "too many arguments raises")
+
+# calling a non-function is an error, not silence
+expect_throws(fn() { let n = 5
+  return n() }, "calling a number raises")

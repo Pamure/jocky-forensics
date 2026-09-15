@@ -10,6 +10,42 @@ compatibility policy (see `docs/DESIGN.md` and the versioning page):
 * **minor** — backwards-compatible features (new natives, new checks);
 * **patch** — fixes only.
 
+## [1.4.0] — 2026-09-15
+
+### Added
+- **`jocky test <dir>`** and five in-language assertion natives (`assert`,
+  `expect`, `expect_throws`, `fail`, `skip`), so a `.jky` file can test its own
+  behaviour: `jocky test tests/lang --sandbox=strict --json`. Checks are
+  reported per file, failures keep the file running, and a budget-exhausted run
+  is a failure rather than a passing expectation.
+- A **conformance corpus** of 12 files and 456 checks in `tests/lang/`, covering
+  arithmetic, strings, collections, control flow, functions, closures, the error
+  model, types, the standard library, iteration, the capability posture and the
+  collector contracts — written as invariants so it passes on any Linux host.
+- `tests/test_language_conformance.py` pins that the corpus is green *and* that
+  the runner fails loudly on a wrong expectation, a syntax error, an uncaught
+  runtime error and a truncated run.
+
+### Changed
+- `list.sort()` and `list.reverse()` return new lists, matching the global
+  `sort()` helper; `push()` and index assignment stay the only mutators. Sorting
+  a collector's output for display no longer reorders the evidence in place.
+- `float()` and `str.to_float()` are permissive like `int()`: unparseable text
+  becomes `0.0` instead of raising, which is what a triage script wants when a
+  log field is empty.
+- `contains(needle, haystack)` now covers map keys, not just strings and lists.
+- Member names may be keywords, so `m.set(...)` reaches the map method of that
+  name (previously a parse error, which left that method unreachable).
+
+### Fixed
+- Confinement no longer breaks the runtime's own lazy imports: `--sandbox=strict`
+  denied read access to the `jocky` package directory, so a script calling
+  `mem.is_memfd()` died with `EACCES` on `jocky/exec/__init__.py`. The package
+  directory is granted as a read root in every level.
+- Sandbox `apply()` accepts `extra_read`/`extra_write`, so a caller that must
+  keep reading after a ruleset is installed (the test runner reading its corpus)
+  can say so.
+
 ## [1.3.0] — 2026-09-15
 
 ### Added

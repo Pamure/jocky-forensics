@@ -1,0 +1,59 @@
+# The error model: what raises, what is catchable, and what a message says.
+
+# try/catch turns a runtime error into a value
+let caught = ""
+try {
+  let boom = 1 / 0
+} catch e {
+  set caught = e
+}
+expect(caught, "division by zero", "the message is the error text")
+
+# a caught error does not stop the program
+expect(caught.len() > 0, true, "execution continues after a catch")
+
+# the error() builtin raises a catchable error with exactly the given message
+let explicit = ""
+try { error("custom failure") } catch e { set explicit = e }
+expect(explicit, "custom failure", "error() surfaces its message")
+
+# natives report their failures through the same channel
+let denied = ""
+try { mem.syscall(39) } catch e { set denied = e }
+assert(denied.contains("capability is disabled"),
+       "a denied capability is a catchable error, not a crash")
+
+# errors raised inside a called function reach the caller's handler
+fn boom() { return 1 / 0 }
+let from_call = ""
+try { boom() } catch e { set from_call = e }
+expect(from_call, "division by zero", "errors unwind across frames")
+
+# handlers can recover and keep going inside a loop
+let recovered = 0
+for n in [1, 0, 2, 0, 3] {
+  try { let ratio = 10 / n } catch e { set recovered = recovered + 1 }
+}
+expect(recovered, 2, "each failing iteration is caught separately")
+
+# expect_throws asserts the error exists without naming it
+expect_throws(fn() { return 1 / 0 }, "division by zero raises")
+expect_throws(fn() { error("x") }, "error() raises")
+expect_throws(fn() { let xs = [1]
+  return xs[5] }, "index out of range raises")
+expect_throws(fn() { return undefined_name }, "an undefined name raises")
+expect_throws(fn() { return nil + 1 }, "adding nil raises")
+expect_throws(fn() { return "a" < 1 }, "comparing different types raises")
+
+# a closure that *does* raise passes, and the check it records is a pass
+expect(expect_throws(fn() { error("boom") }, "error() raises and is caught by the harness"), true,
+       "expect_throws returns true when the closure raised")
+
+# host-level surprises are reported as errors too, not as crashes
+let host_error = ""
+try { let value = mem.uname().sysname() } catch e { set host_error = e }
+assert(host_error != "", "calling a string as a function is reported")
+
+# errors are recorded on the result when they are not caught at all: the
+# uncaught path is exercised by the runner, not here (this file must pass).
+assert(true, "reached the end of the file")

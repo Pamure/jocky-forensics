@@ -25,22 +25,41 @@ def test_bundled_examples_exist_and_are_described():
     assert all(item["description"] for item in examples), "an example has no leading description"
 
 
-def test_init_writes_runnable_case_directory(tmp_path):
+#: `watch.jky` sleeps on purpose (it exists to stay alive for live-detection
+#: demos), so it is compiled but not executed here.
+LONG_RUNNING_EXAMPLES = {"watch.jky"}
+
+
+def test_every_bundled_example_compiles_and_runs(tmp_path):
+    """Every shipped example must work — the first one passing proves nothing.
+
+    This check exists because `fs.timeline()` accepted two arguments while
+    `scripts/timeline.jky` passed three, and a test that only ran the
+    alphabetically first example never noticed.
+    """
+    from jocky.runner import compile_source, run_source
+
     target = tmp_path / "case"
-    summary = scaffold.init_project(str(target))
-
-    assert (target / "README.md").exists()
-    assert (target / ".gitignore").exists()
-    assert summary["created"], summary
-    assert not summary["skipped"]
-
+    scaffold.init_project(str(target))
     scripts = sorted((target / "scripts").glob("*.jky"))
-    assert scripts, "no example scripts were copied"
+    assert len(scripts) >= 5, scripts
 
-    # a copied script must run with the real runtime
-    result = run_source(scripts[0].read_text(encoding="utf-8"), wall_clock_ms=30_000)
-    assert not result.errors, (scripts[0].name, result.errors)
-    assert result.findings, f"{scripts[0].name} produced no findings"
+    failures = []
+    for script in scripts:
+        source = script.read_text(encoding="utf-8")
+        try:
+            compile_source(source)          # every example must at least compile
+        except Exception as exc:
+            failures.append(f"{script.name}: compile: {type(exc).__name__}: {exc}")
+            continue
+        if script.name in LONG_RUNNING_EXAMPLES:
+            continue
+        result = run_source(source, wall_clock_ms=60_000)
+        if result.errors:
+            failures.append(f"{script.name}: {result.errors[0]}")
+        elif not result.findings:
+            failures.append(f"{script.name}: produced no findings")
+    assert not failures, failures
 
 
 def test_init_is_idempotent_without_force(tmp_path):

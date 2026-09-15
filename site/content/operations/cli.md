@@ -28,6 +28,7 @@ jocky --help
 | [`run`](#run) | jocky run |
 | [`serve`](#serve) | jocky serve |
 | [`sign`](#sign) | jocky sign |
+| [`test`](#test) | jocky test |
 | [`triage`](#triage) | jocky triage |
 | [`verify`](#verify) | jocky verify |
 
@@ -258,6 +259,26 @@ usage: jocky sign [-h] [--key-file KEY_FILE] [--json] directory
 | `directory` |  |
 | `--key-file` | key file (or set JOCKY_EVIDENCE_KEY) |
 | `--json` |  |
+
+
+## test
+
+```text
+usage: jocky test [-h] [--pattern PATTERN] [--wall-ms WALL_MS]
+                  [--sandbox {off,vm,ro,strict}] [--allow ALLOW] [--json]
+                  [--verbose]
+                  [path]
+```
+
+| Option | Description |
+|---|---|
+| `path` | file or directory (default: tests/lang) (default: `tests/lang`) |
+| `--pattern` | glob within the directory (default: `*.jky`) |
+| `--wall-ms` |  (default: `30000.0`) |
+| `--sandbox` | run every test under confinement (default: `off`) |
+| `--allow` | grant privileged capabilities to the tests (comma list) |
+| `--json` |  |
+| `--verbose` |  |
 
 
 ## triage

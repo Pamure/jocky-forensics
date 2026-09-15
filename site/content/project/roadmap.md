@@ -60,6 +60,30 @@ conclude, or only how comfortably they conclude it?*
 | **CI with a reproducible environment** (no in-tree `venv`, lock file, pinned base image) | Nothing is verified on push; the Docker image build is untested in this environment | S | `lim-dx.md` |
 | **Signing with a non-symmetric key** (minisign/`ssh-keygen`/cosign adapter; optional RFC 3161 timestamping) | HMAC proves integrity to whoever holds the key; non-repudiation needs a signature primitive the standard library does not provide | M | `res-evidence-integrity.md` |
 
+## Capability research (2026-09)
+
+Six studies asked what a forensic language should be able to do and where JOCKY
+stands. Reports: `research/findings/cap-*.md`. Shipped from them in v1.4.0: the
+in-language test facility, denial auditing, the sandbox package read grant, and
+three language-consistency fixes the corpus exposed.
+
+| Gap | Evidence | Effort | Source |
+|---|---|---|---|
+| **Pattern matching in the language** — string matching is literal-only, and the nine intrusion regexes are hard-coded in `detect.py`, unreachable from scripts (`regex` → undefined name) | `fs.grep`/`match`/`capture` proposed | M | `cap-forensic-features.md` |
+| **Time on findings + timeline merge** — mtimes are raw floats, findings carry no `ts`, `fs.timeline` sorts one root | blocks correlation with journald/auditd | M | `cap-forensic-features.md` |
+| **Structured ingestion** — JSON is the only parser; no CSV/JSONL/XML/Protobuf | triage of exported artifacts | S–M | `cap-forensic-features.md` |
+| **`needs` capability declaration + `jocky capabilities <script>`** — grants are per-run, never declared, and a script can currently *catch* a refusal (now audited in the result, but not pre-declared) | Deno/WASI/Starlark comparison | M | `cap-capability-models.md` |
+| **Per-path read narrowing** — `fs.read` reaches anything readable; Landlock grants are additive to fixed read roots | NIST SP 800-61r3 least-privilege | M | `cap-capability-models.md` |
+| **Cost model for natives** — a native costs one step regardless of bytes read, so `fs.scan` can exhaust memory "within budget" | `cap-performance-envelope.md` | S | `cap-forensic-features.md` |
+| **Editor tooling** — no Pygments lexer, TextMate/tree-sitter grammar, LSP, formatter or REPL; a prototype lexer tokenised 1,082 lines with zero errors in 22 rules | 24 `.jky` files exist to highlight | S (lexer) / L (LSP) | `cap-tooling.md` |
+| **Fixture replay** — `jocky test --record` so a corpus can run against captured `/proc` snapshots instead of the live host | today every collector test depends on the host | M | `cap-dsl-survey.md` |
+
+Closest external analogue: **Velociraptor VQL** — a host-native query language
+with versioned artifacts served from a central server; JOCKY's namespaces mirror
+its plugins and `serve`/`agent` mirror hunts, while JOCKY adds the bytecode VM,
+per-build polymorphic artifacts and two capability-gated natives
+(`cap-dsl-survey.md`).
+
 ## Explicitly out of scope
 
 Recorded so the boundary is not rediscovered as a "gap" every review:
