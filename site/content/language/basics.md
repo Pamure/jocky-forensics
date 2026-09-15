@@ -366,10 +366,10 @@ the file does not affect where they appear. `jocky run --json` prints the whole
 result object — `findings`, `output`, `errors`, `steps`, `truncated`; see
 [Functions & errors](/docs/language/functions-errors) for a complete example.
 
-`json_encode`/`json_decode` convert between script values and JSON text. In the
-result object, findings are converted to plain host data — a function value
-becomes `"<fn <lambda>>"` and map keys become strings. Printing a finding that
-holds a function on the terminal instead shows its host dataclass repr.
+`json_encode`/`json_decode` convert between script values and JSON text.
+Findings are converted to plain host data before they are printed or
+serialised — a function value becomes `"<fn <lambda>>"` and map keys become
+strings.
 
 ## Syntax rules that surprise people
 

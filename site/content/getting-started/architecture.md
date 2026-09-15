@@ -382,15 +382,14 @@ runner.py            <- imports lang, poly.encoder, rt.builtins, exec.fileless
 
 Consequences worth knowing:
 
-- `jocky.lang` depends only on `jocky.errors`, so the compiler and VM can be
-  used with no collectors, no encoder and no network — the runtime is injected
-  as the `natives` mapping.
+- `jocky.lang` depends only on `jocky.errors`, so the compiler and VM work with
+  no collectors, encoder or network — the runtime is injected as `natives`.
 - `jocky.rt.procfs` imports nothing from the package, and `filefs`, `netfs` and
   `sysinfo` import only `procfs`, so collectors can be called directly from
   Python or from a test without a VM.
 - `jocky.poly` depends on `jocky.lang.compiler` for the opcode table, and
-  nothing in `jocky.lang` depends on `jocky.poly`: the artifact format is a
-  consumer of the compiler, not part of it.
+  nothing in `jocky.lang` depends on `jocky.poly`: the artifact format consumes
+  the compiler rather than being part of it.
 - The CLI imports heavyweight submodules inside each command function, so
   `jocky --version` and `jocky doctor` start without loading the agent, the
   harness or the TLS stack.
