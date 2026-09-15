@@ -53,10 +53,12 @@ total syscalls observed: 17404
 ```text
 $ python3 trace_syscalls.py ./venv/bin/jocky fileless /tmp/jky-exp/dwell20.jky
 processes ever seen in tree: 5
-total syscalls observed: 11374
-      2  execve        0  execveat    6  memfd_create
-    520  openat      928  read        2  socket      2  connect
+total syscalls observed: 11487
 socket(domain, type, proto) calls: [(1, 526337, 0), (1, 526337, 0)]
+      0  fork          0  vfork       2  clone     6  clone3    2  execve
+      0  execveat      6  memfd_create            0  unlinkat  0  creat
+     96  getdents64  696  openat   1269  read      10  write
+      2  socket        2  connect     0  bind      0  listen
 ```
 
 Read the second table carefully, because it is the honest version of the
@@ -75,8 +77,9 @@ fileless story:
   network socket is created. These two calls appear in the fileless child and
   not in the equivalent source-mode run; I could not attribute them to a line of
   JOCKY code, so they are recorded rather than explained away.
-* 520 `openat` and 928 `read` calls: reading the host is the job. Those are the
-  syscalls an audit rule or an eBPF program attaches to.
+* 696 `openat` and 1269 `read` calls: reading the host is the job. Those are the
+  syscalls an audit rule or an eBPF program attaches to, and their exact counts
+  move with the payload and with how many processes the host is running.
 
 The privileged surfaces an observer would use exist on this host and are simply
 not available to us as an ordinary user:
