@@ -198,7 +198,7 @@ rather than guessing. Flipping the byte by hand shows the contract in action:
 
 ```bash
 $ ./venv/bin/jocky build scripts/smoke.jky -o /tmp/smoke.build
-wrote /tmp/smoke.build (2148 bytes, sha256 003f8b60d26494f7...)
+wrote /tmp/smoke.build (2038 bytes, sha256 346067e7fa0523d0...)
 $ python3 -c "
 import pathlib
 raw = bytearray(pathlib.Path('/tmp/smoke.build').read_bytes())
@@ -215,10 +215,21 @@ $ echo $?
 The same rule governs the canonical inner serialisation, `b"JKYW"` plus
 `WIRE_VERSION = 1` in `jocky/poly/wire.py`. Policy: `ARTIFACT_VERSION` (and
 `WIRE_VERSION`) change **only** when the byte layout changes, never because the
-package version changed — a payload built by 1.1.0 still decodes under 1.2.0
-because the format did not move. A format change is a breaking change for every
+package version changed. You can check that claim against the history rather than
+trust it — the format constant is visible at every tag:
+
+```bash
+$ for tag in v1.1.0 v1.2.0; do echo -n "$tag: "; git show $tag:jocky/poly/encoder.py | grep -m1 '^ARTIFACT_VERSION'; done
+v1.1.0: ARTIFACT_VERSION = 1
+v1.2.0: ARTIFACT_VERSION = 1
+$ git show v1.1.0:jocky/poly/wire.py | grep -m1 '^WIRE_VERSION'
+WIRE_VERSION = 1
+```
+
+So the artifact format did not move between 1.1.0 and 1.2.0, and a payload built
+by either decodes under the other. A format change is a breaking change for every
 artifact built by an older release, so it is announced in the release notes and
-expects a MINOR bump of the package version at least.
+expects at least a MINOR bump of the package version.
 
 ### HTTP API
 
@@ -246,7 +257,7 @@ the package version, because `pyproject.toml` reads it dynamically:
 
 ```bash
 $ ./venv/bin/python -m pip wheel --no-deps -w /tmp/wheel .
-...
+  Created wheel for jocky-forensics: filename=jocky_forensics-1.2.0-py3-none-any.whl size=130008 sha256=eb0e447fd033f14987c3d16dc55d88d81b6d12dbf1e2da94c6c4d07aada9baf0
 Successfully built jocky-forensics
 $ ls /tmp/wheel
 jocky_forensics-1.2.0-py3-none-any.whl
@@ -256,42 +267,54 @@ Processing /tmp/wheel/jocky_forensics-1.2.0-py3-none-any.whl
 Would install jocky-forensics-1.2.0
 ```
 
+(pip also prints the ephemeral cache directory it staged the wheel in; that path
+is noise. The sha256 above is of the wheel this tree produced.)
+
 The pin is exact and enforced by pip's resolver: `==1.2.0` matches the 1.2.0
 wheel and nothing else. There is no published index for this project yet
 (`project.urls` in `pyproject.toml` still carries placeholder URLs), so the
 wheel is the artefact you host and pin against — an internal index or a
 `--find-links` directory both work.
 
-**A git tag.** The source of truth for reproducing a case:
+**A git tag.** A tag is the source of truth for reproducing a case, and its
+content can be inspected without touching your working tree:
 
 ```bash
-git checkout v1.2.0
-./venv/bin/python -m pip install .
-./venv/bin/jocky --version
+$ git rev-parse v1.2.0^{commit}
+fb1f261830c80e8a608765cfc169527899872c2f
+$ git show v1.2.0:jocky/__init__.py | sed -n '13p'
+__version__ = "1.2.0"
+$ git show v1.1.0:jocky/__init__.py | sed -n '13p'
+__version__ = "1.1.0"
 ```
 
-**A container image.** The `Dockerfile` installs the tree it is given, so the
-image version is the checkout's version:
+Building the pinned source is then `git checkout v1.2.0` followed by installing
+that tree — the identity of the tag, its commit and the version string inside it
+are the three things to record together.
 
-```bash
-docker build -t jocky:1.2.0 .
-```
+**A container image.** The `Dockerfile` installs the tree it is given
+(`RUN pip install --no-cache-dir .`), so an image's version is the checkout's
+version; building is `docker build -t jocky:1.2.0 .`.
 
-The image build is not tested in this environment — the checks that were run are
-that the `Dockerfile` has no dangling line continuations and that
-`pip install .` now succeeds, which is what the image's `RUN` step performs.
-Because the dependency set is empty, the image contains Python, `openssl`, and
-JOCKY; `ps`, `ss` and `lsof` are deliberately absent, so an image that behaves
-differently from the host shows up immediately.
+This image build is **not verified in this environment** — there is no Docker
+daemon available here. What *was* checked is the two things that previously
+broke it: the `Dockerfile` has no dangling line continuations (every `\` is
+followed by a real instruction), and `pip` can build this project again after the
+`pyproject.toml` license metadata was fixed — the same step the image runs.
+Because the dependency set is empty and `procps` is deliberately absent from the
+image, an image that behaves differently from the host would be obvious
+immediately.
 
-**Which string to cite.** One caveat about the development venv: an editable
+**Which string to cite.** One caveat about a development venv: an editable
 install records the version it was installed at, so `pip show jocky-forensics`
 can lag the source — it reported `1.1.0` while the tree declared `1.2.0`. The
-authoritative answer is always the package itself:
+authoritative answers come from the package and the tag:
 
 ```bash
-./venv/bin/jocky --version   # jocky 1.2.0
-git describe --tags          # v1.2.0
+$ ./venv/bin/jocky --version
+jocky 1.2.0
+$ git describe --tags
+v1.2.0
 ```
 
 For a report, quote the tag; for a machine, quote the wheel filename.

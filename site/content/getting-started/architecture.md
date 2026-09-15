@@ -119,7 +119,19 @@ at safe points.
 - **No host coupling.** `VM(natives=…)` takes a mapping of names to functions.
   The VM has no import of `jocky.rt`; the forensic runtime is injected.
 
-The budget contract is observable from the outside:
+The budget contract is observable from the outside. The script below loops
+forever inside a `try`/`catch` that would print if the breach were catchable:
+
+```jocky
+# limits.jky - a budget breach must not be catchable by the script itself
+let n = 0
+try {
+  while true { set n = n + 1 }
+} catch err {
+  print("caught inside the script: {err}")
+}
+emit {"kind": "unreachable", "n": n}
+```
 
 ```bash
 jocky run /tmp/limits.jky --max-steps 100000 --json
@@ -255,13 +267,24 @@ signing during a run would spawn `openssl` and break the measured invariant
 ## Where measurement lives, and why
 
 Every number this project publishes comes from one harness,
-`jocky/evidence.py`, run as:
+`jocky/evidence.py`. It is a real run, not a fixture — a five-iteration pass
+takes about eleven seconds and writes the whole bundle:
 
 ```bash
-jocky evidence --iterations 1000 --out evidence
+jocky evidence --iterations 5 --out /tmp/ev
 ```
 
-It writes raw logs next to its narrative report:
+```text
+artifacts.json
+audit.json
+detection.json
+polymorphism.csv
+report.md
+runs.json
+```
+
+The checked-in bundle under `evidence/` was produced by the same command with
+`--iterations 1000 --out evidence`. Each file has one job:
 
 | File | Contents |
 |---|---|
@@ -363,12 +386,15 @@ runner.py            <- imports lang, poly.encoder, rt.builtins, exec.fileless
 
 Consequences worth knowing:
 
-- `jocky.lang` has no dependency on `/proc`, on the encoder or on the network,
-  so the language tests run without a Linux collector.
-- `jocky.rt.procfs` has no dependency on the language, so collectors can be
-  called directly from Python or from a test without a VM.
-- `jocky.poly` depends on the compiler's opcode table, which is why adding an
-  opcode changes the wire format version and the encoder in the same commit.
+- `jocky.lang` depends only on `jocky.errors`, so the compiler and VM can be
+  used with no collectors, no encoder and no network — the runtime is injected
+  as the `natives` mapping.
+- `jocky.rt.procfs` imports nothing from the package, and `filefs`, `netfs` and
+  `sysinfo` import only `procfs`, so collectors can be called directly from
+  Python or from a test without a VM.
+- `jocky.poly` depends on `jocky.lang.compiler` for the opcode table, and
+  nothing in `jocky.lang` depends on `jocky.poly`: the artifact format is a
+  consumer of the compiler, not part of it.
 - The CLI imports heavyweight submodules inside each command function, so
   `jocky --version` and `jocky doctor` start without loading the agent, the
   harness or the TLS stack.

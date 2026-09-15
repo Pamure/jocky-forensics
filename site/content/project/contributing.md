@@ -190,22 +190,22 @@ invariants rather than machine-specific values.
 What that means in practice:
 
 - **Assert the observable contract.** `findings(source) == [[1, 3, 4]]` for a loop with
-  `break`/`continue`; `result.findings` and `result.output` staying separate channels
-  for `emit` and `print`. Never assert on opcode names, private helper names, or the
-  source text of the implementation.
+  `break`/`continue`; `result.findings` and `result.output` staying separate channels for
+  `emit` and `print`. Never assert on opcode names, private helper names, or the source
+  text of the implementation.
 - **Cover boundaries and error paths.** `f(1)` for a two-argument function must report
-  `expects 2 argument`; `xs[4]` on a one-element list must report `out of range`;
-  `1 / 0` must be catchable with `try`/`catch`. A budget hit (`max_steps`,
-  `wall_clock_ms`) is uncatchable and sets `truncated`.
-- **Pin invariants, not snapshots.** `end > start` for every mapping, a timeline sorted
-  by `mtime`, `{0, 1, 2} <= fds`, io counters that do not go backwards, kernel values
-  equal to `os.uname()`.
+  `expects 2 argument`; `xs[4]` on a one-element list must report `out of range`; `1 / 0`
+  must be catchable with `try`/`catch`. A budget hit (`max_steps`, `wall_clock_ms`) is
+  uncatchable and sets `truncated`.
+- **Pin invariants, not snapshots.** `end > start` for every mapping, a timeline sorted by
+  `mtime`, `{0, 1, 2} <= fds`, io counters that do not go backwards, kernel values equal to
+  `os.uname()`.
 - **Include a negative test where a false positive is the risk.** The checks were tuned
   against this host until the finding set was explainable, so the suite also asserts the
   absence of the artefact — a plain interpreter has no anonymous executable memfd
   mappings, and the two kernel module views agree.
-- **Clean up what you create.** Temp files are unlinked in `finally:`, sockets are closed
-  in a fixture, temporary directories use `tempfile.TemporaryDirectory`.
+- **Create real artefacts and clean them up.** Temp files are unlinked in `finally:`,
+  sockets are closed in a fixture, temporary directories use `tempfile.TemporaryDirectory`.
 - **Keep regressions once they are fixed.** The test that reproduced the bug stays, with
   the reason in the docstring: `test_io_counters_are_read_for_this_process` records that
   the path was once a literal instead of being built from the pid.
@@ -226,9 +226,7 @@ matching `jocky/rt/*.py` module.
    proc_ns = {
        ...
        "pids": _fn("proc.pids", lambda vm, a: procfs.list_pids(), 0, 0),
-       "info": _fn("proc.info", lambda vm, a: procfs.info(
-           _int(a[0]), with_fds=_bool(a[1]) if len(a) > 1 else False,
-           with_maps=_bool(a[2]) if len(a) > 2 else False), 1, 3),
+       "threads": _fn("proc.threads", lambda vm, a: procfs.read_threads(_int(a[0])), 1, 1),
    }
    ```
 

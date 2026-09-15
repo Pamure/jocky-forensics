@@ -8,7 +8,7 @@ module system — scripts call into the built-in runtime namespaces (`proc`,
 `emit`.
 
 Everything on this page was executed with this repository's CLI
-(`jocky 1.0.0`); the output blocks are verbatim.
+(`jocky 1.2.0`); the output blocks are verbatim.
 
 ## Running a script
 

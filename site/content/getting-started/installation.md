@@ -22,8 +22,8 @@ real output, continue to [Quickstart](/docs/getting-started/quickstart).
 | `memfd_create` and executable `/proc/self/fd` (optional) | fileless execution | `doctor` → `memfd_create`, `fileless end-to-end` |
 
 The document host is an unprivileged account (uid 1000) on
-`Linux 6.6.87.2-microsoft-standard-WSL2` with Python 3.12.3, so every output
-quoted below was produced without root.
+`Linux 6.6.87.2-microsoft-standard-WSL2`, Python 3.12.3: every output below was
+produced without root.
 
 ## Install from source with a virtual environment
 
@@ -32,22 +32,16 @@ Run this from the repository root:
 ```bash
 python3 -m venv venv
 ./venv/bin/pip install -e .
-```
-
-```text
-Successfully installed jocky-forensics-1.1.0
-```
-
-The editable install (`-e`) means edits to `jocky/*.py` take effect on the next
-command with no reinstall, which is what you want while writing scripts.
-
-```bash
 ./venv/bin/jocky --version
 ```
 
 ```text
+Successfully installed jocky-forensics-1.1.0
 jocky 1.1.0
 ```
+
+The editable install (`-e`) means edits to `jocky/*.py` take effect on the next
+command with no reinstall, which is what you want while writing scripts.
 
 ## Install the package with pip
 
@@ -83,8 +77,9 @@ pipx install .
 ```
 
 The run quoted here used `PIPX_HOME`/`PIPX_BIN_DIR` overrides so the
-documentation host's real pipx environment was left untouched; with the
-defaults the script lands in `~/.local/bin`.
+documentation host's real pipx environment was untouched; with the defaults the
+script lands in `~/.local/bin`. `pipx` is only useful when JOCKY is not going to
+be co-installed with other Python tooling.
 
 ## Docker
 

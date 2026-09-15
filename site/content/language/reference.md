@@ -1,6 +1,6 @@
 # Reference
 
-Normative summary of JOCKY 1.0.0 as implemented in this repository: the grammar
+Normative summary of JOCKY 1.2.0 as implemented in this repository: the grammar
 from `jocky/lang/parser.py`, lexical rules from `jocky/lang/lexer.py`, and the
 instruction set from `jocky/lang/compiler.py` (`OPCODES`) with execution
 semantics in `jocky/lang/vm.py`. Anything the parser rejects is not in the
