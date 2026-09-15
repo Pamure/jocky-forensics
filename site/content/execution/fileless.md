@@ -64,7 +64,7 @@ try:
 except OSError:
     pass
 result = run_bytes(data, wall_clock_ms=float(os.environ.get("JKY_WALL", "60000")),
-                   ctx=policy_ctx(os.environ["JKY_ALLOW"]))
+                   ctx=policy_ctx(os.environ.get("JKY_ALLOW")))
 sys.stdout.write("JKY_RESULT " + json.dumps(result.to_dict()))
 ```
 
@@ -213,22 +213,22 @@ run (`evidence/report.md` §3):
 **5. With `--json`.** The command reports what it observed:
 
 ```bash
-./venv/bin/jocky fileless /tmp/self_probe.jky --json | jq '{ok, exit_code, pid, duration_ms, evidence}'
+./venv/bin/jocky fileless /tmp/jdocs/self_probe.jky --json | jq '{ok, exit_code, pid, duration_ms, evidence: {exe: .evidence.exe, memfd_map_count: .evidence.memfd_map_count, observed: .evidence.observed, in_memory: .evidence.in_memory}}'
 ```
 
 ```text
 {
   "ok": true,
   "exit_code": 0,
-  "pid": 41899,
-  "duration_ms": 288.653,
+  "pid": 50190,
+  "duration_ms": 177.635,
   "evidence": {
     "exe": "/memfd:python3 (deleted)",
     "memfd_map_count": 4,
     "observed": true,
     "in_memory": {
       "interpreter_bytes": 8020928,
-      "package_zip_bytes": 113352,
+      "package_zip_bytes": 118638,
       "payload_bytes": 409
     }
   }

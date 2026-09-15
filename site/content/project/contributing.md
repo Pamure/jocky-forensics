@@ -35,13 +35,13 @@ FILELESS
   [ok  ] memfd_create                 available
   [ok  ] fileless end-to-end          exe=/memfd:python3 (deleted) memfd_maps=4
 
-ready: 11 ok, 1 warning(s), 0 failure(s) in 285 ms
+ready: 12 ok, 1 warning(s), 0 failure(s) in 183 ms
 ```
 
-(The elided groups are `PACKAGING`, `COLLECTION`, the direct-syscall probe and
-`MANAGEMENT`.) A warning is not a failure: `effective uid 1000` means the collectors
-will report your own processes and only what you may read, which is the normal state on
-a workstation.
+(The elided groups are `PACKAGING`, `COLLECTION`, the direct-syscall probe, `CONFINEMENT`
+and `MANAGEMENT`.) A warning is not a failure: `effective uid 1000` means the collectors
+will report your own processes and only what you may read, which is the normal state on a
+workstation.
 
 ### Run what you changed
 
@@ -100,7 +100,7 @@ $ ./venv/bin/python -m jocky disasm /tmp/snippet.jky
 # one file while you work
 $ ./venv/bin/python -m pytest tests/test_language.py
 .........................................                                [100%]
-41 passed in 0.20s
+41 passed in 0.14s
 ```
 
 `pytest` is configured in `pyproject.toml` (`testpaths = ["tests"]`,
@@ -330,11 +330,11 @@ markdown under `site/content/`, served at `/docs/<slug>`:
 
 ```bash
 $ cd site && npm run gen
-gen_versions: current=1.1.0 tags=0 unreleased_commits=0
+gen_versions: current=1.2.0 tags=2 unreleased_commits=4
 gen_reference: wrote site/content/language/standard-library.md (1652 bytes)
 gen_reference: wrote site/content/runtime/api.md (2501 bytes)
 gen_reference: wrote site/content/runtime/detection.md (6252 bytes)
-gen_reference: wrote site/content/operations/cli.md (6631 bytes)
+gen_reference: wrote site/content/operations/cli.md (6879 bytes)
 gen: 2/2 generator(s) ran
 ```
 

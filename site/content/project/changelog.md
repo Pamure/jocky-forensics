@@ -17,15 +17,26 @@ compatibility policy. What is planned next is in the [roadmap](/docs/project/roa
 
 ## [Unreleased]
 
-Documentation content only: the released code is `v1.2.0`, and the commits since are the
-remaining pages of this site — the language reference and the runtime, execution,
-operations and security sections — plus parity between the SvelteKit build and the
-zero-dependency static builder.
+Three commits after `v1.2.0`: the remaining pages of this site, parity between the
+SvelteKit build and the zero-dependency static builder, and one CLI rendering fix. The
+suite collects 125 tests across nine files
+(`./venv/bin/python -m pytest tests/ --collect-only -q`).
 
 ### Added
 
-- Content pages for getting started, language, runtime, execution, operations, security
-  and project sections, each command and output taken from a real run against this tree.
+- Content pages for getting started, language, runtime, execution, operations, security and
+  project sections, each command and output taken from a real run against this tree.
+
+### Fixed
+
+- Findings render identically on the terminal and through `--json`. Both paths now
+  serialise through `to_plain`, so a finding that carries a function no longer prints a
+  dataclass repr (with VM internals) in one view and `<fn <lambda>>` in the other:
+
+  ```text
+  $ ./venv/bin/python -m jocky run /tmp/fnfind.jky
+  {"kind": "fn_finding", "callable": "<fn <lambda>>", "name": "demo"}
+  ```
 
 ## [1.2.0] — 2026-09-15
 

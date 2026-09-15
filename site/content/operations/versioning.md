@@ -37,13 +37,17 @@ A release is an annotated git tag on `main`, named `v<package version>`:
 $ git tag --list
 v1.1.0
 v1.2.0
-$ git describe --tags
-v1.2.0-2-g83629c7
-$ git log --oneline --decorate -3
-83629c7 (HEAD -> main) docs: language reference pages (verified examples), remaining content in flight
-234faaf docs: content pages, static-builder parity, sandbox documentation
+$ git log --oneline --decorate -3 v1.2.0
 fb1f261 (tag: v1.2.0) v1.2.0: Landlock sandbox, docs site and release versioning
+67d5945 (tag: v1.1.0) JOCKY v1.1.0: forensic scripting runtime, hardening and evidence
+$ git rev-parse --short v1.2.0^{commit}
+fb1f261
 ```
+
+Quoting `v1.2.0` rather than `HEAD` in the log command keeps the output stable:
+tags do not move, `HEAD` does. `git describe --tags` is the command to run
+against the working tree when you want "tag plus commits since"; the number in
+the middle changes with every commit, so record it, not this page.
 
 The tags are annotated, so `git cat-file -t v1.2.0` answers `tag`, not `commit`.
 The tag *object* and the commit it points at are different hashes — use the
@@ -95,6 +99,10 @@ site/src/lib/versions.generated.js: OK
 site/static/versions.json: OK
 site/content/project/releases.md: OK
 ```
+
+Of the generator's output, `unreleased_commits` is the one value that changes
+with every commit; the version, the tag list and the file contents only change
+when a tag or the package version does.
 
 `versions.json` is what the banner actually renders:
 
@@ -338,8 +346,8 @@ authoritative answers come from the package and the tag:
 ```bash
 $ ./venv/bin/jocky --version
 jocky 1.2.0
-$ git describe --tags
-v1.2.0
+$ git rev-parse --short v1.2.0^{commit}
+fb1f261
 ```
 
 For a report, quote the tag; for a machine, quote the wheel filename.

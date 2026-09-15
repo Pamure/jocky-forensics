@@ -303,8 +303,7 @@ before and after to prove fileless mode writes nothing, and the detector is
 pointed at the runtime's own fileless process to prove the two sides agree.
 
 `evidence/report.md` on this checkout was generated on 2026-09-15 19:14:23 on
-the development host (kernel `6.6.87.2-microsoft-standard-WSL2`, Python 3.12.3)
-and reports, among other rows:
+the development host (kernel `6.6.87.2-microsoft-standard-WSL2`, Python 3.12.3):
 
 ```text
 ## 1. Polymorphic builds
@@ -327,10 +326,9 @@ and reports, among other rows:
 ```
 
 Numbers are timestamped and host-specific on purpose: they describe a
-measurement, not a specification. The
-[Evidence harness](/docs/operations/evidence) page explains each stage and how
-to re-run it; [Honest limits](/docs/security/limits) lists what none of this
-measures.
+measurement, not a specification. [Evidence harness](/docs/operations/evidence)
+explains each stage and how to re-run it; [Honest limits](/docs/security/limits)
+lists what none of this measures.
 
 ## Module map
 
