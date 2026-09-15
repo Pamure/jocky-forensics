@@ -39,8 +39,8 @@ jocky run /tmp/case/scripts/triage.jky
 ```
 
 ```text
-{"kind": "summary", "host": "stormbreaker", "kernel": "6.6.87.2-microsoft-standard-WSL2", "processes": 94, "sockets": 92, "counts": {"info": 1, "low": 32, "medium": 0, "high": 0, "critical": 0}, "duration_ms": 586.093}
-{"kind": "tail", "high_or_critical": 0, "total_findings": 33}
+{"kind": "summary", "host": "stormbreaker", "kernel": "6.6.87.2-microsoft-standard-WSL2", "processes": 121, "sockets": 88, "counts": {"info": 1, "low": 28, "medium": 33, "high": 0, "critical": 0}, "duration_ms": 461.756}
+{"kind": "tail", "high_or_critical": 0, "total_findings": 62}
 ```
 
 Each `emit` in the script becomes one JSON object on stdout, in the order the
@@ -74,21 +74,17 @@ for f in interesting {
 emit {"kind": "tail", "high_or_critical": len(interesting), "total_findings": len(report.findings)}
 ```
 
+`--json` wraps the same findings in the run result, adding `output` (what
+`print` produced), `errors`, `steps`, `native_calls`, `duration_ms` and
+`truncated`.
+
 `det.triage()` runs every detection check in one pass and returns a structured
 report; `report.counts` is the severity histogram, `report.scanned` records how
 much of the host was readable, and `report.findings` is a list of maps with
 `severity`, `check`, `title` and `evidence`.
 
-Two lines came back on this host and neither is high or critical: the runtime
-does not manufacture drama. The counts move with host activity — the shape of
-the output does not.
-
-### The same run as structured data
-
-`--json` wraps the findings in the run result instead of printing them as JSON
-lines, adding `output` (what `print` produced), `errors`, `steps`,
-`native_calls`, `duration_ms` and `truncated`. It is the same data as above,
-with a wrapper.
+Two lines came back on this host and neither is high or critical. The counts
+move with host activity; the shape of the output does not.
 
 ## 3. Filter findings by severity
 
@@ -122,16 +118,16 @@ jocky run /tmp/case/scripts/severity.jky
 ```
 
 ```text
-scanned 118 processes, 57 sockets
+scanned 121 processes, 88 sockets
 critical: 0
 high: 0
-medium: 30
-low: 27
+medium: 33
+low: 28
 info: 1
 ```
 
-`print` is the human channel; `emit` is the machine channel. Step 6 shows the
-same script with something to report, which is where the `emit` line appears.
+`print` is the human channel and `emit` the machine channel; step 6 shows the
+same script with something to report.
 
 ## 4. Build a polymorphic artifact
 
@@ -173,23 +169,14 @@ jocky build /tmp/case/scripts/hunt.jky --repeat 3 -o /tmp/case/rep.build
 Three builds, three distinct SHA-256 digests and three different sizes, all
 from one unchanged source file (`source_sha256` is the same in every build; the
 `sample` object is reflowed onto one line above for width).
-`jocky exec --inspect` reads the header of an artifact without running it:
+`jocky exec --inspect` reads the artifact header without running it (reflowed here for width):
 
 ```bash
 jocky exec /tmp/case/hunt.build --inspect
 ```
 
-```json
-{
-  "build_hash": "d72b0b3161c620d5",
-  "artifact_hash": "11f5697e94426ab15eea3b24e14c73a3d0cc0b67c757dfd1ee7543f272220c2d",
-  "size": 2630,
-  "opmap_size": 50,
-  "nops": 209,
-  "const_count": 32,
-  "proto_count": 1,
-  "seed_hex": "5d8ad55cbc271124836f4efc8de4aa38363c99fce5155693a0d4de865d6d1c8a"
-}
+```.text
+{"build_hash": "d72b0b3161c620d5", "artifact_hash": "11f5697e94426ab15eea3b24e14c73a3d0cc0b67c757dfd1ee7543f272220c2d", "size": 2630, "opmap_size": 50, "nops": 209, "const_count": 32, "proto_count": 1, "seed_hex": "5d8ad55cbc271124836f4efc8de4aa38363c99fce5155693a0d4de865d6d1c8a"}
 ```
 
 `opmap_size` is the number of permuted opcodes, `nops` the count of junk
@@ -290,9 +277,8 @@ are read from `/proc/<pid>/maps`.
 
 The loop reports every memory-resident process on the host, so on a busy
 machine other blocks can appear alongside this one. Telling them apart is the
-defender's problem: the process name is `jky` (set by the bootstrap, not by the
-payload) and the image has no path, so the memfd backing is the only
-distinguishing evidence in `/proc`.
+defender's problem: the name is `jky`, set by the bootstrap rather than by the
+payload, and the image has no path.
 
 Nothing was written to the filesystem by that run. The evidence harness
 measures this by snapshotting the filesystem before and after — fileless mode
@@ -323,10 +309,9 @@ The `emit` line appears before the `print` lines because the CLI prints the
 findings list first, even though the emit happens last in the script.
 
 If you cannot find the process, you are probably running it with `--private`,
-which marks it non-dumpable: that hides it from other same-uid processes and
-from your own triage. The default is deliberately visible so that the detection
-claim in this quickstart can be reproduced. See
-[Fileless execution](/docs/execution/fileless) for the trade-off.
+which marks it non-dumpable and hides it from same-uid inspection — including
+your own triage. The default is visible so this detection claim stays
+reproducible; see [Fileless execution](/docs/execution/fileless).
 
 ## 7. Confine a run (optional)
 
@@ -335,6 +320,15 @@ claim in this quickstart can be reproduced. See
 grants writes only under the working directory, `ro` grants no writes at all,
 and `strict` additionally denies `socket(2)` through a seccomp filter — a
 script that needs the network has to run with `vm` or `off`:
+
+```jocky
+# sock.jky - can the script create a socket? (needs --allow syscall)
+try {
+  emit {"socket": mem.syscall(41, 2, 1, 0)}
+} catch err {
+  print("socket syscall: {err}")
+}
+```
 
 ```bash
 jocky run /tmp/case/scripts/sock.jky --allow syscall --sandbox=strict
@@ -358,12 +352,9 @@ medium: 0
 low: 14
 ```
 
-Those numbers come from one host at one moment and move with host activity; the
-direction does not. Use `off` on your own analysis host, where the script is
-yours and you want the whole picture; use `vm` or stricter when running a script
-you have not read, and expect to grant the paths it legitimately needs.
-`jocky doctor` reports kernel support under the `CONFINEMENT` group, and the
-level semantics are also in `jocky run --help`.
+The numbers move with host activity; the direction does not. Use `off` on an
+analysis host where you want the whole picture, and `vm` or stricter for a script
+you have not read — `jocky doctor` reports kernel support under `CONFINEMENT`.
 
 ## 8. Built-in triage without a script
 
@@ -399,5 +390,5 @@ with severity and data source for each, is in
 - [Architecture](/docs/getting-started/architecture) — the language pipeline, the encoder and the evidence harness.
 - [Language basics](/docs/language/basics) — `let`/`set`, loops, functions and closures.
 - [Collectors](/docs/runtime/collectors) — what `proc`, `net`, `fs`, `sys` and `ioc` return.
-- [Execution modes](/docs/execution/modes) — when to use `run`, `exec` or `fileless`.
+- [Execution modes](/docs/execution/modes) — `run`, `exec` or `fileless`.
 - [Evidence harness](/docs/operations/evidence) — re-run the measurements quoted above.

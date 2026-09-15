@@ -348,7 +348,7 @@ measured reasons:
   only below 95% coverage, so one hidden process among 120 moves coverage from
   0.395 to 0.392 and changes nothing — while removing the process from every
   check. The page that shows a host defeating exactly one check is
-  `/docs/security/threat-model`; the section is there because the mitigation
+  [Threat model](/docs/security/threat-model); the section is there because the mitigation
   above does not cover it.
 
 ## Claim vs what we actually verified
@@ -374,15 +374,15 @@ measured reasons:
 | "Survives an EDR" | **not claimed** — an EDR can kill the process; no EDR was available to measure against on this host | self-detection measurement above |
 | "A clean triage means a clean host" | **no** — coverage was 0.36–0.40 as uid 1000; `partial_visibility` fires below 95% and does not notice a single hidden process | triage runs with and without a hidden process |
 | "Findings are evidence" | findings are **snapshots**: a finding's pid was already gone when inspected; consecutive scans differed | `/proc/<pid>/exe` after exit; two triage runs |
-| "Frontable" | the client mechanics exist (separate SNI and `Host`); no CDN is involved and none is claimed | `/docs/operations/management` |
+| "Frontable" | the client mechanics exist (separate SNI and `Host`); no CDN is involved and none is claimed | [Server & agents](/docs/operations/management) |
 
 ## Where the limits point
 
 The same runtime ships the detector for every technique it uses
-(`/docs/runtime/detection`), the fileless mechanics are described with their
-telemetry in `/docs/execution/fileless`, the artifact format and its honest
-limitation in `/docs/execution/artifacts`, and the evidence that a reviewer can
-re-check in `/docs/operations/evidence`. What is not fixed yet is listed with
-effort and rationale in `/docs/project/roadmap`; what an attacker can do to the
+([Detection checks](/docs/runtime/detection)), the fileless mechanics are described with their
+telemetry in [Fileless execution](/docs/execution/fileless), the artifact format and its honest
+limitation in [Polymorphic artifacts](/docs/execution/artifacts), and the evidence that a reviewer can
+re-check in [Evidence harness](/docs/operations/evidence). What is not fixed yet is listed with
+effort and rationale in [Roadmap](/docs/project/roadmap); what an attacker can do to the
 tool itself, and what JOCKY can and cannot conclude about a compromised host, is
-`/docs/security/threat-model`.
+[Threat model](/docs/security/threat-model).

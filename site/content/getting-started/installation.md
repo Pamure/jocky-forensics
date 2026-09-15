@@ -21,9 +21,8 @@ real output, continue to [Quickstart](/docs/getting-started/quickstart).
 | uid 0 (optional) | reading other users' `/proc` entries; without it you see only your own processes | `doctor` → `effective uid` |
 | `memfd_create` and executable `/proc/self/fd` (optional) | fileless execution | `doctor` → `memfd_create`, `fileless end-to-end` |
 
-The document host is an unprivileged account (uid 1000) on
-`Linux 6.6.87.2-microsoft-standard-WSL2`, Python 3.12.3: every output below was
-produced without root.
+The document host is an unprivileged account (uid 1000) running Python 3.12.3 on
+`Linux 6.6.87.2-microsoft-standard-WSL2`: every output below was produced without root.
 
 ## Install from source with a virtual environment
 
@@ -172,8 +171,8 @@ next steps:
 `.jocky-agent/`, `*.jky.build`, `*.jky.artifact`, `evidence/`).
 
 ```text
-{"kind": "summary", "host": "stormbreaker", "kernel": "6.6.87.2-microsoft-standard-WSL2", "processes": 94, "sockets": 92, "counts": {"info": 1, "low": 32, "medium": 0, "high": 0, "critical": 0}, "duration_ms": 586.093}
-{"kind": "tail", "high_or_critical": 0, "total_findings": 33}
+{"kind": "summary", "host": "stormbreaker", "kernel": "6.6.87.2-microsoft-standard-WSL2", "processes": 121, "sockets": 88, "counts": {"info": 1, "low": 28, "medium": 33, "high": 0, "critical": 0}, "duration_ms": 461.756}
+{"kind": "tail", "high_or_critical": 0, "total_findings": 62}
 ```
 
 Two JSON lines of findings, exit status 0. Process, socket and finding counts

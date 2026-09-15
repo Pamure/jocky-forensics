@@ -14,6 +14,7 @@ tagged commit, and `jocky --version` reports the same string.
 
 Commits after the latest tag:
 
+- `e899240 docs: complete the site (all 24 pages), fix app-state usage and indented fences`
 - `8ea8347 docs: latest agent verification edits`
 - `1b973e6 site: sitemap, robots.txt and a 404 page from the static builder`
 - `2323641 docs: agent verification passes (fileless, architecture, versioning, changelog, contributing)`
