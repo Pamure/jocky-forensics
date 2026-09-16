@@ -78,6 +78,22 @@ def _sys_backend() -> Any:
     return _windows() or sysinfo
 
 
+def _uptime() -> Dict[str, float]:
+    """Uptime and boot time, from whichever backend this platform has.
+
+    ``sysinfo.uptime()`` reads ``/proc/uptime``, so on Windows it answers
+    ``0`` — and a script that asks how long the host has been up would be told
+    "zero seconds" rather than being told the value is unavailable. ``winapi``
+    reads the same two values through ``GetTickCount64`` and the boot-time
+    clock, so the platform gets real numbers instead of a placeholder that
+    looks like data.
+    """
+    backend = _windows()
+    if backend is not None:
+        return {"seconds": backend.uptime_seconds(), "boot_time": backend.boot_time()}
+    return sysinfo.uptime()
+
+
 #: Capabilities a script must be granted explicitly (`jocky run --allow …`).
 #: Both of these hand a script powers that go well beyond reading the host:
 #: raw syscalls can signal or kill processes, and memfd execution runs arbitrary
@@ -557,7 +573,7 @@ def namespaces() -> Dict[str, Any]:
         "mounts": _fn("sys.mounts", lambda vm, a: sysinfo.mounts(), 0, 0),
         "memory": _fn("sys.memory", lambda vm, a: sysinfo.memory(), 0, 0),
         "loadavg": _fn("sys.loadavg", lambda vm, a: sysinfo.loadavg(), 0, 0),
-        "uptime": _fn("sys.uptime", lambda vm, a: sysinfo.uptime(), 0, 0),
+        "uptime": _fn("sys.uptime", lambda vm, a: _uptime(), 0, 0),
         "cpu": _fn("sys.cpu", lambda vm, a: sysinfo.cpu(), 0, 0),
         "users": _fn("sys.users", lambda vm, a: sysinfo.logged_in_users(), 0, 0),
         "kallsyms_visible": _fn("sys.kallsyms_visible", lambda vm, a: sysinfo.kallsyms_visible(), 0, 0),

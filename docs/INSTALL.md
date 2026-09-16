@@ -126,6 +126,11 @@ table rather than the container's.
 ./venv/bin/jocky run scripts/quickstart.jky    # guided tour of the language
 ```
 
+**[docs/VERIFY.md](VERIFY.md) has five manual tests** — one per claim, each with
+a pass condition and the numbers measured on Windows 11 and Linux, so you can
+confirm the tool does what it says on your own machine rather than taking the
+README's word for it.
+
 Reproduce the project's own measurements (about a minute at the default count):
 
 ```bash

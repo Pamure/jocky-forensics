@@ -192,6 +192,7 @@ tests/          language semantics, runtime collectors, live detection, encoder,
 evidence/       generated proof: raw logs + report.md
 docs/DESIGN.md  deeper design notes: language spec, artifact format, telemetry matrix
 docs/INSTALL.md install guide: Linux, Windows, Docker, capability matrix, troubleshooting
+docs/VERIFY.md  five manual tests you can run to check each claim yourself
 research/       background research behind the design (EDR evasion, in-memory
                 execution, BYOVD, CDN fronting, DSL security, network forensics)
 knowledge.md    consolidated problem-statement analysis and citation index

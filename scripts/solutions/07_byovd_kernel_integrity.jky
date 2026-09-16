@@ -34,12 +34,19 @@
 # integrity. Bits 12 and 13 are the ones that matter here: "out-of-tree module
 # loaded" and "unsigned module loaded". They are cheap, kernel-authored, and
 # cannot be hidden by a userland rootkit that is not already privileged.
+#
+# On Windows there is no such file, so `taint.value` is nil rather than 0. That
+# distinction matters: `nil != 0` is *true*, so the obvious `taint.value != 0`
+# reports a clean Windows host as tainted. The concept is absent, and the honest
+# report is "not applicable here", not "false" and certainly not "true".
 let taint = sys.taint()
+let taint_known = taint.value != nil
 
 emit {
   "kind": "kernel_taint_state",
   "severity": "info",
-  "tainted": taint.value != 0,
+  "applicable": taint_known,
+  "tainted": taint_known and taint.value != 0,
   "out_of_tree": taint.out_of_tree,
   "unsigned": taint.unsigned,
   "forced": taint.forced,
@@ -85,14 +92,21 @@ for f in byovd_findings {
 # module table this script is reasoning about.
 let modules = sys.modules()
 
+# Only meaningful where the kernel publishes taint bits at all; on Windows the
+# answer is "no such signal", which is different from "the signal disagrees".
+let taint_agrees = nil
+if taint_known {
+  set taint_agrees = (len(flagged_modules) > 0) == (taint.value != 0)
+}
+
 emit {
   "kind": "module_inventory",
   "severity": "info",
   "count": len(modules),
   "flagged": flagged_modules,
   "worst_severity": worst,
-  "taint_agrees": (len(flagged_modules) > 0) == (taint.value != 0),
-  "note": "taint_agrees false means a flagged module is not reflected in the kernel taint bits, or the reverse — worth a look either way"
+  "taint_agrees": taint_agrees,
+  "note": "taint_agrees false means a flagged module is not reflected in the kernel taint bits, or the reverse — worth a look either way; nil means this platform publishes no taint bits"
 }
 
 # -----------------------------------------------------------------------------
