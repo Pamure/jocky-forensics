@@ -451,6 +451,35 @@ def cmd_evidence(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ci(args: argparse.Namespace) -> int:
+    """The polymorphic build gate a CI job runs on every commit.
+
+    Exits non-zero when two artifacts collide or a sampled rebuild produces
+    different findings, so a regression in the encoder fails the build instead
+    of shipping.
+    """
+    from jocky import ci
+    report = ci.gate(_read(args.script), count=args.count, sample=args.sample)
+    if args.markdown:
+        print(ci.render_markdown(report))
+    elif args.json:
+        _emit(report, True)
+    else:
+        builds = report.get("builds") or {}
+        equiv = report.get("equivalence") or {}
+        sizes = builds.get("sizes") or {}
+        print(f"polymorphic build gate: {'PASS' if report['ok'] else 'FAIL'}"
+              f" — {report.get('reason', '')}")
+        print(f"  builds        {builds.get('count', 0)}")
+        print(f"  unique hashes {builds.get('unique_hashes', 0)}")
+        if sizes:
+            print(f"  size range    {sizes.get('min', 0)}–{sizes.get('max', 0)} bytes")
+        print(f"  build rate    {builds.get('build_rate_per_s', 0):.0f}/s")
+        print(f"  equivalence   {equiv.get('sampled', 0)} sampled, "
+              f"{len(equiv.get('mismatches') or [])} mismatch(es)")
+    return 0 if report["ok"] else 1
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from jocky.agent import server
     token = args.token or os.environ.get("JOCKY_TOKEN")
@@ -709,6 +738,24 @@ def build_parser() -> argparse.ArgumentParser:
                          help="require a certificate valid against the system trust store "
                               "(default: self-signed server authenticated by --pin)")
     p_agent.set_defaults(func=cmd_agent)
+
+    p_ci = sub.add_parser("ci", help="polymorphic build gate: every build unique, every build equivalent",
+        epilog="Examples:\n"
+               "  jocky ci --script scripts/hunt.jky --count 256\n"
+               "  jocky ci --script scripts/hunt.jky --count 64 --markdown >> \"$GITHUB_STEP_SUMMARY\"\n"
+               "  jocky ci --script scripts/triage.jky --count 32 --sample 4 --json",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_ci.add_argument("--script", default=os.path.join("scripts", "hunt.jky"),
+                      help="source script to build repeatedly (default: scripts/hunt.jky)")
+    p_ci.add_argument("--count", type=int, default=256,
+                      help="artifacts to build; each one must hash differently (default: 256)")
+    p_ci.add_argument("--sample", type=int, default=8,
+                      help="artifacts to re-execute and compare against a source run "
+                           "(default: 8)")
+    p_ci.add_argument("--markdown", action="store_true",
+                      help="emit Markdown for $GITHUB_STEP_SUMMARY")
+    p_ci.add_argument("--json", action="store_true")
+    p_ci.set_defaults(func=cmd_ci)
     return parser
 
 

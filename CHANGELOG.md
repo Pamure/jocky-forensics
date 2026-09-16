@@ -1,24 +1,67 @@
 # Changelog
 
-## Unreleased — hardening pass
+## [1.6.0] — 2026-09-16
+
+Closes the remaining SIH26148 deliverables: the automated CI/CD pipeline
+(pillar 2), BYOVD/kernel integrity (pillar 3), the web management console
+(pillar 4) and Windows collection (deliverable 1), on top of a security and
+robustness pass.
+
+### Added — SIH26148 pillars
+- **`jocky ci` + `.github/workflows/polymorphism.yml`** — the automated
+  polymorphic pipeline (pillar 2, deliverable 4). Builds 256 artifacts per
+  push, fails on any hash collision, and re-executes a sample to compare
+  findings against a source run, so uniqueness cannot drift from semantics.
+  Wall-clock-varying finding paths are measured (not assumed) and published as
+  `volatile_fields`; a script whose finding *shape* varies fails explicitly
+  rather than passing vacuously. Measured: 256/256 unique, 0 mismatches, ~508
+  builds/s, 1.4 s for the whole gate.
+- **`jocky/rt/byovd.py`** — kernel-module integrity (pillar 3): matches against
+  a curated 20-entry abused-driver list, out-of-tree/unsigned/force-loaded
+  taint classes, modules loaded long after boot, modules whose backing `.ko` was
+  deleted, and the global taint bits. Every Linux CVE was verified against the
+  CISA Known Exploited Vulnerabilities feed; the Windows drivers against the
+  CVE records and LOLDrivers. Read-only by design — nothing loads or modifies a
+  module. New natives: `det.byovd()`, `sys.taint()`, `sys.module_integrity()`,
+  `sys.vulnerable_drivers()`.
+- **`jocky/agent/dashboard.py` + `GET /`** — the web management console
+  (pillar 4, deliverable 3). Fleet status, job queue, findings table with
+  severity filters, job submission. One self-contained document (no CDN, no
+  build step, CSP `default-src 'none'`), DOM built with `textContent` so
+  attacker-influenced agent names cannot become stored XSS.
+- **`jocky/rt/winapi.py`** — Windows collection (deliverable 1) through pure
+  `ctypes`, emitting the same key names as `procfs`/`netfs` so scripts run
+  unchanged. No `tasklist`, `netstat`, `wmic` or PowerShell. Dispatched through
+  `_proc_backend`/`_net_backend`/`_sys_backend` in `builtins.py`.
+- **`scripts/solutions/07_byovd_kernel_integrity.jky`** — playbook covering the
+  BYOVD precondition (`out_of_tree and unsigned`), taint corroboration and the
+  pivot to attribution.
+- **`scripts/quickstart.jky`** — a fully commented tour of the language and
+  every forensic namespace, runnable in all four modes.
 
 ### Security
 - `jocky/lang/vm.py`: hard cap `MAX_COLLECTION_SIZE = 10_000_000` on string/list concatenation, string/list repetition, and `MK_LIST`/`MK_MAP` counts. Closes an unbounded-allocation vector (`"a" * 10**9`).
 - `jocky/rt/pattern.py`: hard cap `MAX_REPEAT = 100_000` on `{n}`/`{n,m}` quantifier bounds at compile time. Turns a crafted pattern into a clear error instead of a step-budget exhaustion.
-- `jocky/rt/filefs.py`: `scan()` refuses to walk the pseudo filesystems (`/proc`, `/sys`, `/dev`, `/run`) *when passed as the root*, so a script that mistakenly scans them gets a diagnostic rather than a silent zero-finding run. Drop zones (`/dev/shm`, `/tmp`, `/var/tmp`) are still scanned — the previous prefix-based guard over-blocked them.
-- `jocky/poly/wire.py`: `Reader.count()` now also enforces `_MAX_COLLECTION_ITEMS` on top of the remaining-bytes check, so a crafted artifact cannot claim millions of items even when the buffer is huge. `Reader.blob()` enforces `_MAX_FIELD_SIZE`.
-- `jocky/agent/server.py`: token comparison reviewed end-to-end — only `hmac.compare_digest` is used. Added per-IP rate limiting: `MAX_AUTH_FAILURES = 10` failed auths in `AUTH_WINDOW_SECONDS = 60` returns `429 Too Many Requests` before the token is touched.
+- `jocky/rt/filefs.py`: `scan()` refuses to walk the pseudo filesystems (`/proc`, `/sys`, `/dev`, `/run`) *when passed as the root*, so a script that mistakenly scans them gets a diagnostic rather than a silent zero-finding run. Drop zones (`/dev/shm`, `/tmp`, `/var/tmp`) are still scanned — a prefix-based guard would have over-blocked them.
+- `jocky/poly/wire.py`: `Reader.count()` also enforces `_MAX_COLLECTION_ITEMS` on top of the remaining-bytes check, so a crafted artifact cannot claim millions of items even when the buffer is huge. `Reader.blob()` enforces `_MAX_FIELD_SIZE`.
+- `jocky/agent/server.py`: per-IP rate limiting on authentication failures (`MAX_AUTH_FAILURES = 10` in `AUTH_WINDOW_SECONDS = 60` → `429` before the token is touched); token comparison reviewed end-to-end, only `hmac.compare_digest`. Job `kind` is validated at submit time against `JOB_KINDS`, so a typo is refused with an actionable message instead of becoming a job the agent later reports as failed. Console responses carry CSP/nosniff/no-referrer; `/favicon.ico` answers publicly so a browser's per-load request cannot spend the operator's auth budget.
 - `jocky/sandbox.py`: `apply()` rejects an unknown level with `ValueError` naming the valid choices.
 
 ### Robustness
-- `jocky/rt/filefs.py`: `grep_file()` deadline check now runs every 1000 lines inside the inner split loop, and any line longer than `MAX_LINE_BYTES` is truncated before matching — a single very long line no longer bypasses both the byte cap and the wall-clock budget.
+- `jocky/rt/filefs.py`: `grep_file()` deadline check runs every 1000 lines inside the inner split loop, and any line longer than `MAX_LINE_BYTES` is truncated before matching — a single very long line no longer bypasses both the byte cap and the wall-clock budget.
 - `jocky/rt/procfs.py`: `read_fds()` distinguishes `PermissionError` (root-owned process), `FileNotFoundError` (process vanished), and other `OSError`s, and never propagates them out of a `/proc` walk.
 - `jocky/rt/netfs.py`: `_read_unix()` wraps each row parse in `try/except`, so one malformed line does not abort the table read.
-- `jocky/rt/detect.py`: `triage()` deduplicates findings sharing `(check, evidence.pid)`, keeping the highest-severity instance. Overlapping process checks no longer report the same pid twice.
+- `jocky/rt/detect.py`: `triage()` deduplicates findings sharing `(check, evidence.pid)`, keeping the highest-severity instance.
+- `jocky/rt/byovd.py`: in-tree module CVEs grade `info` and late loads grade `info`. On a normal host this is the difference between two permanent unactionable findings per run and none — `ip_tables` loads anywhere iptables is used, and `tls` loads the first time something enables kTLS.
 
-### Usability
-- `jocky/cli.py`: `run`, `exec`, `build`, `triage`, `evidence`, and `attest` subcommands gained worked examples in `--help`.
-- `scripts/quickstart.jky`: a fully commented tour of the language and every forensic namespace, runnable end-to-end in all four modes (`run`, `exec`, `fileless`, `--ndjson`).
+### Changed
+- `jocky/cli.py`: `run`, `exec`, `build`, `triage`, `evidence`, and `attest` subcommands gained worked examples in `--help`; `serve` prints the console URL.
+- `pyproject.toml`: `Source`/`Issues` point at the real repository (was a placeholder).
+- `__version__` is now `1.6.0`, matching the newest tag (`v1.5.0` had been tagged while `__version__` still said `1.4.0`).
+
+### Fixed
+- 8 unused imports removed (`binascii`, `field`, `Iterable`×2, `Optional`×2, `Tuple`×2).
+- Placeholder URLs removed from `CHANGELOG.md`, `site/content/project/changelog.md` and the site landing page's clone command.
 
 All notable changes to JOCKY are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
@@ -30,7 +73,7 @@ compatibility policy (see `docs/DESIGN.md` and the versioning page):
 * **minor** — backwards-compatible features (new natives, new checks);
 * **patch** — fixes only.
 
-## [Unreleased]
+## [1.5.0] — 2026-09-15
 
 ### Added
 - **Sigma rules run as written** (`sigma.check`/`sigma.summary`, `jocky sigma <rule> <input>`):
@@ -359,5 +402,11 @@ state-of-the-art review, plus the documentation and installation site.
   hash, audit-hook telemetry (0 child processes, 0 write-mode opens), and a
   live fileless-detection proof. Results in `evidence/report.md`.
 
-[Unreleased]: https://example.invalid/jocky/compare/v1.0.0...HEAD
-[1.0.0]: https://example.invalid/jocky/releases/tag/v1.0.0
+[Unreleased]: https://github.com/Pamure/jocky-forensics/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/Pamure/jocky-forensics/compare/v1.5.0...v1.6.0
+[1.5.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.5.0
+[1.4.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.4.0
+[1.3.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.3.0
+[1.2.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.2.0
+[1.1.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.1.0
+[1.0.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.0.0

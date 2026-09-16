@@ -285,3 +285,80 @@ def _b64(text: str) -> str:
 def _unb64(data: str) -> str:
     import base64
     return base64.b64decode(data).decode()
+
+
+# ------------------------------------------------------------------- console
+def _raw(server, path, method="GET", token=None):
+    """One raw HTTP exchange, for responses that are not JSON.
+
+    ``api()`` parses JSON, so the console (HTML) and HEAD (no body) need their
+    own probe. Returns ``(status, headers, body)``.
+    """
+    request = urllib.request.Request(server["url"] + path, method=method)
+    if token:
+        request.add_header("X-JKY-Token", token)
+    try:
+        with urllib.request.urlopen(request, context=_tls_context(), timeout=15) as resp:
+            return resp.status, dict(resp.headers), resp.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, dict(exc.headers), exc.read()
+
+
+def test_console_is_served_without_a_token(management_server):
+    """The console shell carries no data and no credential, so it is public —
+    the same reasoning as a login page. Its API calls still need the token,
+    which ``test_other_routes_require_the_token`` covers."""
+    status, headers, body = _raw(management_server, "/")
+    assert status == 200, status
+    assert headers["Content-Type"].startswith("text/html")
+    assert b"<!DOCTYPE html>" in body
+    # Self-contained by design: the server is expected to run on a range with
+    # no egress, where a CDN reference renders a blank page.
+    assert b"http://" not in body and b"https://" not in body
+    assert "default-src 'none'" in headers["Content-Security-Policy"]
+
+
+def test_console_route_alias(management_server):
+    status, _headers, body = _raw(management_server, "/dashboard")
+    assert status == 200 and b"<!DOCTYPE html>" in body
+
+
+def test_console_never_injects_fleet_supplied_text_as_markup(management_server):
+    """Agent names/hosts and finding titles are chosen by the remote side.
+
+    A console that built its DOM from markup strings would turn a hostile agent
+    name into stored XSS in the operator's browser, so the page must compose
+    elements and assign ``textContent``.
+    """
+    from jocky.agent.dashboard import DASHBOARD_HTML
+    assert "innerHTML" not in DASHBOARD_HTML
+    assert "textContent" in DASHBOARD_HTML
+
+
+def test_head_returns_headers_without_a_body(management_server):
+    """Probes and reverse proxies use HEAD; without it the stock handler
+    answers 501, which a monitor reads as a dead service rather than a live one."""
+    status, headers, body = _raw(management_server, "/", method="HEAD")
+    assert status == 200
+    assert body == b""
+    assert int(headers["Content-Length"]) > 0
+
+
+@pytest.mark.parametrize("kind", ["run", "exec", "bogus"])
+def test_unknown_job_kind_is_refused_at_submit(management_server, kind):
+    """A typo must fail where the operator can still fix it.
+
+    The agent's vocabulary is ``source``/``fileless``; anything else used to be
+    queued and then reported as ``unsupported job kind`` as a *result*, which
+    reads as a job that ran and failed rather than one that was never valid.
+    """
+    status, body = api(management_server, "/v1/jobs/submit", token=TOKEN,
+                       payload={"kind": kind, "payload_b64": _b64('emit 1')})
+    assert status == 400, body
+    assert "source" in body["error"] and "fileless" in body["error"]
+
+
+def test_empty_job_kind_is_refused(management_server):
+    status, body = api(management_server, "/v1/jobs/submit", token=TOKEN,
+                       payload={"kind": "", "payload_b64": _b64('emit 1')})
+    assert status == 400, body

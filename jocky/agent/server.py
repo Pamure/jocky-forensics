@@ -57,6 +57,31 @@ from jocky import __version__
 #: this is either a bug or an attempt to exhaust the server.
 MAX_BODY = 8 * 1024 * 1024
 
+#: Routes answered without a token. The console shell carries no data and no
+#: credential — everything it shows is fetched by the browser afterwards with
+#: the operator's own token — and ``/v1/health`` is a liveness probe. Listing
+#: them here (rather than an inline ``!=`` per handler) keeps the exception
+#: auditable: a new route is authenticated unless it is added on purpose.
+#:
+#: ``/favicon.ico`` is public for a non-obvious reason: browsers request it on
+#: every page load. If it fell through to the auth check it would answer 401,
+#: and each 401 is counted against the per-IP failure budget — so ten console
+#: reloads would lock the operator out of their own console. The page ships an
+#: inline ``data:`` icon, and this route covers every client that asks anyway.
+_PUBLIC_ROUTES = frozenset({"/v1/health", "/", "/dashboard", "/favicon.ico"})
+
+#: Content-Security-Policy for the console. The page is a single self-contained
+#: document, so the policy can be maximally strict: nothing may be loaded from
+#: anywhere (no CDN, no font host), no frames, no forms posting off-origin.
+#: Inline script/style are permitted because the alternative — external files —
+#: would require the image to ship static assets and create a second source of
+#: truth for the UI.
+CONSOLE_CSP = (
+    "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+    "connect-src 'self'; img-src 'self' data:; base-uri 'none'; "
+    "form-action 'none'; frame-ancestors 'none'"
+)
+
 #: Rate-limit parameters for authentication failures.
 MAX_AUTH_FAILURES = 10
 AUTH_WINDOW_SECONDS = 60
@@ -73,6 +98,14 @@ DEFAULT_STATE_DIR = ".jocky-server"
 _LOG_LOCK = threading.Lock()
 _LAST_SERVER: Optional[ThreadingHTTPServer] = None
 _LAST_BOUND_PORT: Optional[int] = None
+
+#: Job kinds an agent knows how to execute. Validated at submit time: without
+#: this, a typo reaches the agent, which reports ``unsupported job kind`` as a
+#: *result* — the operator sees a job that ran and failed, rather than a request
+#: that was never accepted. The set is the agent's contract (see
+#: ``jocky/agent/client.py:_execute``); keeping it here makes the rejection
+#: happen at the boundary where the operator can still fix it.
+JOB_KINDS = ("source", "fileless")
 
 JOB_STATUSES = ("queued", "running", "ok", "error")
 
@@ -578,8 +611,22 @@ class Handler(BaseHTTPRequestHandler):
     server_version = f"jocky-management/{__version__}"
     protocol_version = "HTTP/1.1"
 
+    #: Set by :meth:`do_HEAD`: identical headers to the GET, no body. Declared
+    #: as a class attribute so ``_dispatch`` never has to clear it.
+    _head_only = False
+
     # ----------------------------------------------------------- plumbing
     def do_GET(self) -> None:  # noqa: N802 - required by BaseHTTPRequestHandler
+        self._dispatch("GET")
+
+    def do_HEAD(self) -> None:  # noqa: N802
+        """Answer HEAD the way GET would, minus the body.
+
+        Uptime probes and reverse proxies prefer HEAD; without this method
+        ``BaseHTTPRequestHandler`` answers 501, which reads to a monitoring
+        system as a broken service rather than a live one.
+        """
+        self._head_only = True
         self._dispatch("GET")
 
     def do_POST(self) -> None:  # noqa: N802
@@ -598,7 +645,7 @@ class Handler(BaseHTTPRequestHandler):
         self._body_read = False
         started = time.perf_counter()
         try:
-            if route != "/v1/health":
+            if route not in _PUBLIC_ROUTES:
                 self._require_token()
             handler = _ROUTES.get((method, route))
             if handler is None:
@@ -674,9 +721,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_json(self, status: int, payload: Optional[Dict[str, Any]] = None) -> None:
         """Send one JSON response; ``payload=None`` means 204 (no body)."""
+        if payload is None:
+            self._send_body(status, b"", None)
+            return
+        self._send_body(status, json.dumps(payload, default=str).encode("utf-8"),
+                        "application/json")
+
+    def _send_body(self, status: int, body: bytes, content_type: Optional[str],
+                   extra_headers: Optional[List[Tuple[str, str]]] = None) -> None:
+        """Write one response; ``content_type=None`` means 204 (no body).
+
+        This is the only place the handler writes to the socket, so the framing
+        rules — Content-Length, and when the connection must close instead of
+        being reused — are stated exactly once.
+        """
         if self._responded:
             return
-        body = b"" if payload is None else json.dumps(payload, default=str).encode("utf-8")
         self._responded = True
         self._status = status
         if not self._body_read:
@@ -688,20 +748,44 @@ class Handler(BaseHTTPRequestHandler):
                 self.close_connection = True
         try:
             self.send_response(status)
-            if payload is None:
+            if content_type is None:
                 # 204 must not carry Content-Length; close so framing is unambiguous.
                 self.send_header("Connection", "close")
                 self.close_connection = True
             else:
-                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
+                for name, value in extra_headers or ():
+                    self.send_header(name, value)
             self.end_headers()
-            if body:
+            if body and not self._head_only:
                 self.wfile.write(body)
         except (BrokenPipeError, ConnectionResetError):
             self.close_connection = True
 
     # ------------------------------------------------------------- routes
+    def _h_dashboard(self, parsed: SplitResult) -> None:
+        """The operator console: static markup, therefore no token required.
+
+        Everything the page displays is fetched by the browser afterwards with
+        the operator's own token, so serving the shell to an anonymous caller
+        reveals only that a server is listening. The CSP is sent here because
+        this is the one response that renders markup.
+        """
+        from jocky.agent.dashboard import render
+        self._send_body(200, render(), "text/html; charset=utf-8",
+                        extra_headers=[("Content-Security-Policy", CONSOLE_CSP),
+                                       ("X-Content-Type-Options", "nosniff"),
+                                       ("Referrer-Policy", "no-referrer")])
+
+    def _h_favicon(self, parsed: SplitResult) -> None:
+        """204: the console carries its icon inline, so there is nothing to send.
+
+        Answering empty is deliberate. A browser that asks here must not consume
+        an authentication failure on the operator's IP (see ``_PUBLIC_ROUTES``).
+        """
+        self._send_body(204, b"", None)
+
     def _h_health(self, parsed: SplitResult) -> None:
         """Unauthenticated liveness probe: reachable, versioned, that is all."""
         self._send_json(200, {"status": "ok", "version": __version__})
@@ -773,6 +857,10 @@ class Handler(BaseHTTPRequestHandler):
         kind = _as_str(body, "kind")
         if not kind:
             raise _HTTPError(400, "kind must not be empty")
+        if kind not in JOB_KINDS:
+            raise _HTTPError(
+                400, f"unknown job kind {kind!r}; the agent executes: "
+                     f"{', '.join(JOB_KINDS)}")
         payload = _as_b64(body, "payload_b64")
         target = body.get("target")
         if target is not None and not isinstance(target, str):
@@ -801,6 +889,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 _ROUTES: Dict[Tuple[str, str], Callable[[Handler, SplitResult], None]] = {
+    ("GET", "/"): Handler._h_dashboard,
+    ("GET", "/dashboard"): Handler._h_dashboard,
+    ("GET", "/favicon.ico"): Handler._h_favicon,
     ("GET", "/v1/health"): Handler._h_health,
     ("POST", "/v1/enroll"): Handler._h_enroll,
     ("POST", "/v1/jobs/poll"): Handler._h_poll,
@@ -852,6 +943,7 @@ def serve(host: str = "127.0.0.1", port: int = 8443, token: Optional[str] = None
         _LAST_BOUND_PORT = bound_port
     # The banner carries the *actual* port so ``--port 0`` stays usable.
     print(f"jocky-server listening on https://{host}:{bound_port}", flush=True)
+    print(f"jocky-server console:   https://{host}:{bound_port}/", flush=True)
 
     try:
         httpd.serve_forever(poll_interval=0.2)

@@ -1,0 +1,65 @@
+name: polymorphism
+
+# The CI/CD half of the polymorphic engine: every push must show that 256
+# builds of one script are byte-unique *and* still equivalent to the source.
+# The gate therefore runs on the same script twice over — as a freshness claim
+# (unique hashes) and as a correctness claim (findings equal to a source run).
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+concurrency:
+  # A superseded push has nothing to say about the current tree; cancel it.
+  group: polymorphism-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  polymorphism:
+    name: polymorphic build gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install project and test dependencies
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run test suite
+        run: python -m pytest tests/ -q -o addopts=""
+
+      # --markdown prints the step-summary table and nothing else, so one gate
+      # run both decides the verdict (non-zero exit on FAIL) and produces the
+      # summary file.  The redirect happens either way: a failing gate still
+      # publishes the numbers that say why.
+      - name: Polymorphic build + equivalence gate
+        run: |
+          python -m jocky ci --script scripts/hunt.jky --count 256 --markdown > summary.md
+
+      - name: Publish step summary
+        if: always()
+        run: |
+          if [ -f summary.md ]; then
+            cat summary.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # Evidence, not just a colour: the JSON report (when the CLI writes one)
+      # and the markdown table are kept even when the gate failed, and a
+      # missing optional path must not turn a red gate into a confusing one.
+      - name: Upload polymorphism report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: polymorphism-report
+          path: |
+            summary.md
+            ci-report.json
+            artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

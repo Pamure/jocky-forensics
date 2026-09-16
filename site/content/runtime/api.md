@@ -10,15 +10,15 @@ arity-checked `NativeFn`; every read is a direct kernel-interface access
 
 | Namespace | Functions |
 |---|---|
-| [`det`](#det) | 13 |
+| [`det`](#det) | 14 |
 | [`fs`](#fs) | 19 |
 | [`ioc`](#ioc) | 1 |
 | [`mem`](#mem) | 6 |
 | [`net`](#net) | 7 |
-| [`proc`](#proc) | 13 |
+| [`proc`](#proc) | 16 |
 | [`re`](#re) | 7 |
 | [`sigma`](#sigma) | 2 |
-| [`sys`](#sys) | 15 |
+| [`sys`](#sys) | 18 |
 | [`time`](#time) | 6 |
 | [`tl`](#tl) | 3 |
 | [`yara`](#yara) | 2 |
@@ -37,6 +37,7 @@ print(result.findings, result.errors)
 
 | Call | Arity |
 |---|---|
+| `byovd` | 0..0 |
 | `deleted_exes` | 0..0 |
 | `deleted_open` | 0..0 |
 | `fileless` | 0..0 |
@@ -108,6 +109,7 @@ print(result.findings, result.errors)
 
 | Call | Arity |
 |---|---|
+| `cgroups` | 1..1 |
 | `cmdline` | 1..1 |
 | `deleted_open` | 0..0 |
 | `environ` | 1..1 |
@@ -117,8 +119,10 @@ print(result.findings, result.errors)
 | `io` | 1..1 |
 | `list` | 0..3 |
 | `maps` | 1..1 |
+| `namespaces` | 1..1 |
 | `pids` | 0..0 |
 | `socket_map` | 0..0 |
+| `status` | 1..1 |
 | `threads` | 1..1 |
 | `tree` | 0..0 |
 
@@ -154,12 +158,15 @@ print(result.findings, result.errors)
 | `kernel` | 0..0 |
 | `loadavg` | 0..0 |
 | `memory` | 0..0 |
+| `module_integrity` | 0..0 |
 | `modules` | 0..0 |
 | `mounts` | 0..0 |
 | `pid` | 0..0 |
 | `ppid` | 0..0 |
+| `taint` | 0..0 |
 | `uptime` | 0..0 |
 | `users` | 0..0 |
+| `vulnerable_drivers` | 0..0 |
 
 ## time
 

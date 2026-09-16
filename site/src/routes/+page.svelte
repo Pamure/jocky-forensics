@@ -4,7 +4,7 @@
 	const current = versions.find((entry) => entry.current) ?? versions[0];
 
 	const install = `# Python 3.12+, Linux. No third-party dependencies.
-git clone https://github.com/your-org/jocky.git && cd jocky
+git clone https://github.com/Pamure/jocky-forensics.git && cd jocky-forensics
 python3 -m venv venv && ./venv/bin/pip install -e .
 ./venv/bin/jocky doctor          # verify the host can run every mode`;
 

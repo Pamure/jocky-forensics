@@ -7,15 +7,57 @@ The version string lives in `jocky/__init__.py`: `pyproject.toml` reads it dynam
 
 ```bash
 $ ./venv/bin/jocky --version
-jocky 1.4.0
+jocky 1.6.0
 ```
 
-Releases are annotated tags (`git tag -l` lists `v1.1.0`, `v1.2.0`, `v1.3.0` and
-`v1.4.0`); the generated [releases page](/docs/project/releases) carries their commit
-ids and notes, and [Versioning & releases](/docs/operations/versioning) explains the
-compatibility policy. What is planned next is in the [roadmap](/docs/project/roadmap).
+Releases are annotated tags (`git tag -l` lists `v1.1.0`, `v1.2.0`, `v1.3.0`,
+`v1.4.0`, `v1.5.0` and `v1.6.0`); the generated [releases page](/docs/project/releases)
+carries their commit ids and notes, and [Versioning & releases](/docs/operations/versioning)
+explains the compatibility policy. What is planned next is in the
+[roadmap](/docs/project/roadmap).
 
-## [Unreleased]
+## [1.6.0] — 2026-09-16
+
+Closes the remaining SIH26148 deliverables: the automated CI/CD pipeline
+(pillar 2), BYOVD/kernel integrity (pillar 3), the web management console
+(pillar 4) and Windows collection (deliverable 1), on top of a security and
+robustness pass. The repository's `CHANGELOG.md` carries the full itemised list;
+this is the summary.
+
+### Added — SIH26148 pillars
+- **`jocky ci` + `.github/workflows/polymorphism.yml`** — the automated
+  polymorphic pipeline. Builds 256 artifacts per push, fails on any hash
+  collision, and re-executes a sample to compare findings against a source run,
+  so uniqueness cannot drift from semantics. Measured: 256/256 unique, 0
+  mismatches, ~508 builds/s.
+- **`jocky/rt/byovd.py`** — kernel-module integrity: a curated 20-entry
+  abused-driver list (Linux CVEs verified against the CISA KEV feed), the
+  out-of-tree/unsigned/force-loaded taint classes, modules loaded long after
+  boot, modules whose backing `.ko` was deleted, and the global taint bits.
+  Read-only by design. New natives `det.byovd()`, `sys.taint()`,
+  `sys.module_integrity()`, `sys.vulnerable_drivers()`.
+- **The web console** at `GET /` — fleet status, job queue, findings with
+  severity filters, job submission. One self-contained document: no CDN, no
+  build step, CSP `default-src 'none'`, DOM built with `textContent`.
+- **`jocky/rt/winapi.py`** — Windows collection through pure `ctypes`, emitting
+  the same key names as `procfs`/`netfs`. No `tasklist`, `netstat`, `wmic` or
+  PowerShell.
+- **`scripts/solutions/07_byovd_kernel_integrity.jky`** and
+  **`scripts/quickstart.jky`**.
+
+### Security
+- Hard allocation caps in the VM (`MAX_COLLECTION_SIZE`), the pattern engine
+  (`MAX_REPEAT`) and the artifact reader (`_MAX_COLLECTION_ITEMS`), each closing
+  a vector where the *input* decided the allocation size.
+- Per-IP rate limiting on server auth failures; job `kind` validated at submit
+  time; CSP/nosniff/no-referrer on the console.
+
+### Changed
+- `pyproject.toml` `Source`/`Issues` point at the real repository.
+- `__version__` is now `1.6.0` — `v1.5.0` had been tagged while `__version__`
+  still said `1.4.0`.
+
+## [1.5.0] — 2026-09-15
 
 ### Added
 - **Sigma rules run as written** (`sigma.check`/`sigma.summary`, `jocky sigma <rule> <input>`):
@@ -344,5 +386,10 @@ state-of-the-art review, plus the documentation and installation site.
   hash, audit-hook telemetry (0 child processes, 0 write-mode opens), and a
   live fileless-detection proof. Results in `evidence/report.md`.
 
-[Unreleased]: https://example.invalid/jocky/compare/v1.0.0...HEAD
-[1.0.0]: https://example.invalid/jocky/releases/tag/v1.0.0
+[Unreleased]: https://github.com/Pamure/jocky-forensics/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.5.0
+[1.4.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.4.0
+[1.3.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.3.0
+[1.2.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.2.0
+[1.1.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.1.0
+[1.0.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.0.0

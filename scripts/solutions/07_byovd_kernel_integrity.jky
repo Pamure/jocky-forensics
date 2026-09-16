@@ -1,0 +1,142 @@
+# 07_byovd_kernel_integrity.jky — kernel-module integrity and BYOVD triage.
+#
+# The problem this answers
+# ------------------------
+# "Bring Your Own Vulnerable Driver" is the technique that defeats endpoint
+# protection from below: the attacker installs a driver the vendor already
+# signed, then uses its IOCTL surface to read and write kernel memory, which is
+# where EDR callbacks and token structures live. Nothing about that driver is
+# malicious in isolation — it is a legitimate signed binary — so signature
+# scanning cannot find it. What *is* anomalous is the combination: a module
+# that is out-of-tree, unsigned, force-loaded, loaded long after boot, or still
+# resident after its backing file was deleted, plus the global taint bits the
+# kernel itself sets when any of that happens.
+#
+# This is the defensive half of SIH26148 pillar 3. JOCKY detects the technique
+# rather than shipping it: `sys.taint()`, `sys.vulnerable_drivers()` and
+# `det.byovd()` are read-only observations of `/proc` and `/sys`, and nothing
+# here loads, unloads or modifies a module.
+#
+# Why the severities are graded the way they are
+# ----------------------------------------------
+# An in-tree module with a patched CVE (ip_tables, overlay, nf_tables) loads on
+# ordinary hosts doing ordinary things. Grading those as high would put a
+# permanent, unactionable item in every triage result — which is how operators
+# are trained to ignore a detector. So `det.byovd()` grades them `info` with the
+# CVE retained, and reserves `critical`/`high` for third-party drivers, which is
+# the actual BYOVD shape. This script keeps that distinction and adds the
+# correlation the grader cannot do for you.
+
+# -----------------------------------------------------------------------------
+# 1. Global kernel state: what the kernel says about itself
+# -----------------------------------------------------------------------------
+# `/proc/sys/kernel/tainted` is a bitfield the kernel maintains about its own
+# integrity. Bits 12 and 13 are the ones that matter here: "out-of-tree module
+# loaded" and "unsigned module loaded". They are cheap, kernel-authored, and
+# cannot be hidden by a userland rootkit that is not already privileged.
+let taint = sys.taint()
+
+emit {
+  "kind": "kernel_taint_state",
+  "severity": "info",
+  "tainted": taint.value != 0,
+  "out_of_tree": taint.out_of_tree,
+  "unsigned": taint.unsigned,
+  "forced": taint.forced,
+  "flags": taint.flags,
+  "note": "bit 12 = out-of-tree module, bit 13 = unsigned module"
+}
+
+# A set taint bit is a fact about the running kernel, not a verdict: it is also
+# set by staging drivers and by out-of-tree modules the administrator installed
+# on purpose. It is recorded so the findings below have context.
+
+# -----------------------------------------------------------------------------
+# 2. The graded findings
+# -----------------------------------------------------------------------------
+# `det.byovd()` runs the whole class in one pass over /proc/modules and
+# /sys/module: known-vulnerable driver matched, out-of-tree, unsigned, forced,
+# loaded late, backing file deleted, plus the taint summary. Each finding
+# carries the module name in `evidence` so the next step can pivot on it.
+let byovd_findings = det.byovd()
+let flagged_modules = []
+let worst = "info"
+
+for f in byovd_findings {
+  emit f
+  if f.severity == "critical" or f.severity == "high" or f.severity == "medium" {
+    # `f.evidence.module` is present on every per-module check; the taint
+    # summary has none, and that is exactly the `get(default)` case.
+    let module_name = f.evidence.get("module", nil)
+    if module_name != nil and not contains(module_name, flagged_modules) {
+      flagged_modules.push(module_name)
+    }
+  }
+  if f.severity == "critical" { set worst = "critical" }
+  elif f.severity == "high" and worst != "critical" { set worst = "high" }
+}
+
+# -----------------------------------------------------------------------------
+# 3. Two independent views of the loaded set, for corroboration
+# -----------------------------------------------------------------------------
+# `sys.modules()` is the raw kernel list; `sys.taint()` is the kernel's own
+# summary. Reading both means a module that hides from one view still shows up
+# in the other — the same principle as the hidden-module check, applied to the
+# module table this script is reasoning about.
+let modules = sys.modules()
+
+emit {
+  "kind": "module_inventory",
+  "severity": "info",
+  "count": len(modules),
+  "flagged": flagged_modules,
+  "worst_severity": worst,
+  "taint_agrees": (len(flagged_modules) > 0) == (taint.value != 0),
+  "note": "taint_agrees false means a flagged module is not reflected in the kernel taint bits, or the reverse — worth a look either way"
+}
+
+# -----------------------------------------------------------------------------
+# 4. The check that actually decides the case
+# -----------------------------------------------------------------------------
+# A third-party driver that is *also* out-of-tree and *also* unsigned is the
+# full BYOVD precondition, and no legitimate update path produces it. That
+# combination is escalated here, because it is the only finding in this script
+# an analyst should treat as hostile without further work.
+#
+# `sys.modules()` is the raw kernel list; the integrity verdicts (`out_of_tree`,
+# `unsigned`, `forced`) come from per-module state under /sys/module/<name>/taint,
+# which is what `sys.module_integrity()` adds. The raw list is used above for the
+# inventory count; this loop needs the enriched view.
+for m in sys.module_integrity() {
+  if m.out_of_tree == true and m.unsigned == true {
+    emit {
+      "kind": "byovd_full_precondition",
+      "severity": "critical",
+      "module": m.name,
+      "taint": m.taint,
+      "path": m.sysfs_path,
+      "recommendation": "out-of-tree and unsigned together is the full BYOVD precondition; hash the module, identify its origin, and treat the kernel as untrusted until the load is explained"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 5. What an analyst does next
+# -----------------------------------------------------------------------------
+# The checks above answer "is the kernel in a state consistent with an ordinary
+# update path". They cannot answer "who did it" — a module load is an event, and
+# events live in timestamps. `byovd_late_loaded_module` carries the load time;
+# correlating it with process and package activity is the pivot that turns an
+# observation into attribution, and it is deliberately left to the analyst
+# because the same timestamp is benign on a host that installs drivers on
+# demand.
+#
+#   det.byovd()                      -> the graded findings
+#   sys.vulnerable_drivers()         -> the curated reference list (20 entries)
+#   sys.module_integrity()           -> per-module taint verdicts (out-of-tree,
+#                                       unsigned, forced) for your own policy
+#   sys.modules()                    -> the raw /proc/modules list
+#   tl.merge(det.byovd(), ...)       -> timeline correlation with other sources
+#
+# Nothing in this file writes to the kernel. Loading a vulnerable driver to test
+# a detector is the difference between studying a technique and deploying one.

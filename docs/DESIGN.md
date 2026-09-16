@@ -247,22 +247,131 @@ findings).
 * **Frontable mode** — the client can send a different SNI/Host than the
   address it dials, which is the client-side mechanic domain fronting needs.
   No CDN is involved locally; the code says so instead of implying otherwise.
+* **Console** — `GET /` serves a single-page operator interface
+  (`jocky/agent/dashboard.py`): fleet status, job queue, findings table with
+  severity filters, and a job submission form. It is one Python string with
+  inline CSS and JS because the container image copies only the `jocky`
+  package — a `templates/` directory would not be shipped, and a CDN reference
+  would render blank on the air-gapped range this is built for. It is served
+  **without** a token: the page holds no data and no credential, and everything
+  it displays is fetched afterwards with the operator's own token. Security
+  headers are sent with it (`default-src 'none'`, no frames, no forms), and the
+  DOM is built with `createElement`/`textContent` throughout, because agent
+  names and finding titles are attacker-influenced and a console that rendered
+  them as markup would be a stored-XSS hole in the operator's browser.
+  `/favicon.ico` answers 204 publicly: browsers request it per page load, and
+  letting it hit the auth path would spend the per-IP failure budget and lock
+  the operator out of their own console after ten reloads.
 
 ---
 
-## 7. Non-goals
+## 7. Kernel-module integrity (BYOVD)
 
-* Kernel-mode evasion (driver loading, callback removal) — out of scope for a
-  user-space forensic toolkit and ethically out of scope for this project.
-* Windows collection (procfs-specific collectors); the language, encoder and
-  agent protocol are platform-neutral and would port.
-* Tamper-proof evidence handling beyond hashing/verification: the harness
+BYOVD — bring your own vulnerable driver — is the technique that defeats
+endpoint protection from below: install a driver the vendor already signed, then
+use its IOCTL surface to reach kernel memory, where EDR callbacks live. Nothing
+about the driver is malicious in isolation, so signature scanning cannot find
+it. `jocky/rt/byovd.py` looks for the *state* that exploiting it produces:
+
+| Check | Source | Severity |
+|---|---|---|
+| `byovd_known_vulnerable_module` | `/proc/modules` vs a curated 20-entry list | critical/high for `third_party`; info for `in_tree` |
+| `byovd_out_of_tree_module` | taint `O` | medium |
+| `byovd_unsigned_module` | taint `E` | high |
+| `byovd_forced_module` | taint `F` | high |
+| `byovd_late_loaded_module` | `/sys/module/<name>` mtime vs boot | info |
+| `byovd_deleted_module_file` | module loaded, backing `.ko` gone | high |
+| `byovd_kernel_taint` | `/proc/sys/kernel/tainted` bits 12/13 | medium |
+
+Two grading decisions carry the design. **`scope` decides severity**: a
+`third_party` driver is the BYOVD shape — a signed binary the attacker brought
+with them — so a match is the finding; an `in_tree` module ships with the
+distribution kernel, and `ip_tables` loads on any host that uses iptables, so
+grading it high would place a permanent unactionable item in every triage
+result and teach the operator to ignore the detector. In-tree matches are
+reported at `info` with the CVE intact: "this kernel build exposes a publicly
+exploited module" is a patching question, not evidence of compromise. **A load
+timestamp is correlation input, not a verdict**, for the same reason
+`rwx_memory` is graded `low`: modules load on demand when a filesystem type is
+first mounted or a TLS socket enables kTLS, so `byovd_late_loaded_module` is
+`info` and its recommendation is to correlate with process and package activity.
+
+Every Linux CVE in the table was checked against the CISA Known Exploited
+Vulnerabilities feed, so "abused in the wild" is a claim with a citation rather
+than an adjective; the Windows drivers were checked against the CVE record and
+cross-referenced with the LOLDrivers dataset. The check is read-only — nothing
+in the module loads, unloads or modifies a module. Loading a vulnerable driver
+to test a detector is the difference between studying a technique and deploying
+one.
+
+---
+
+## 8. Cross-platform collection
+
+`jocky/rt/winapi.py` gives Windows the same collectors through pure `ctypes` —
+no `tasklist`, `netstat`, `wmic`, `driverquery` or PowerShell, for the same
+reason the Linux side never runs `ps` or `ss`: a triage that shells out leaves
+artefacts in the evidence and can be hooked. It emits the **same key names** as
+`procfs`/`netfs`, so a script runs unchanged on either platform.
+
+Dispatch lives in one place (`jocky/rt/builtins._proc_backend`, `_net_backend`,
+`_sys_backend`) and is resolved once per process, because probing for the
+Windows DLLs on every call would put a syscall in the middle of a script loop.
+The three resolvers exist because the Linux collectors are split across three
+modules — asking `procfs` for `listeners()` or `modules()` is an
+`AttributeError`, and the split makes that mistake impossible to make twice.
+
+Off Windows the module imports cleanly, `available()` is `False`, and every
+collector returns its empty value without raising. The pure helpers (byte-order
+decoding, `SOCKADDR` and SID layouts) are module-level functions over plain
+`int`/`bytes`, which is what makes the parts that are easy to get wrong
+unit-testable on Linux with synthetic buffers. Permission denials are never
+raised and never silently dropped: they are recorded through `access_errors()`
+and flagged on the affected row, so "there is nothing here" stays
+distinguishable from "this account was not allowed to look".
+
+---
+
+## 9. The CI gate
+
+Pillar 2 of the problem statement asks for a *CI/CD pipeline*, not just a
+mutation engine, so `jocky ci` (`.github/workflows/polymorphism.yml`) runs on
+every push: it builds 256 artifacts from one script, fails on any hash
+collision, and re-executes a sample to compare their findings against a source
+run. Uniqueness alone is not a property worth defending — a build that produces
+unique bytes *and different behaviour* is a broken build — so the two claims are
+checked together.
+
+The interesting part is the comparison. A script can legitimately emit
+wall-clock data (`smoke.jky` emits `sys.uptime().seconds`), which differs on
+every run, so a naive findings comparison could never pass and would be
+"fixed" by weakening it. Instead `verify_equivalence` runs the source twice
+more, diffs the three runs path-wise, and blanks exactly the paths that vary —
+publishing them as `volatile_fields`. A deterministic script gets an empty
+exclusion set and the gate stays strict. If the findings' *shape* varies between
+two source runs, every path would be blanked and the check would become
+vacuous, so that case fails explicitly rather than printing a green result that
+proves nothing.
+
+---
+
+## 10. Non-goals
+
+* **Kernel-mode evasion** (loading a driver, removing EDR callbacks) — out of
+  scope for a user-space forensic toolkit and ethically out of scope for this
+  project. The BYOVD work above is the detection half: it finds the state an
+  exploited driver leaves behind, and never creates one.
+* **Windows *execution*** — the collection layer is implemented (§8), but
+  fileless memfd execution and the Landlock sandbox are Linux mechanisms with
+  no Windows equivalent here. The language, encoder, CI gate and agent protocol
+  are platform-neutral and already portable.
+* **Tamper-proof evidence handling beyond hashing/verification**: the harness
   writes raw logs and hashes them, but chain-of-custody tooling is a different
   problem.
 
 ---
 
-## 8. Extension points
+## 11. Extension points
 
 * **New native** — add a `NativeFn` to the relevant namespace in
   `jocky/rt/builtins.py`; arity is checked by the VM.

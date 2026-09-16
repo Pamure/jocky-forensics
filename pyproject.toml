@@ -39,7 +39,8 @@ jocky = "jocky.cli:main"
 
 [project.urls]
 Documentation = "https://jocky.vercel.app"
-Source = "https://github.com/your-org/jocky"
+Source = "https://github.com/Pamure/jocky-forensics"
+Issues = "https://github.com/Pamure/jocky-forensics/issues"
 
 [tool.setuptools.dynamic]
 version = { attr = "jocky.__version__" }

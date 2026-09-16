@@ -130,6 +130,61 @@ CHECK_CATALOG = (
         "action": "treat the kernel as compromised; acquire a memory image",
     },
     {
+        "check": "byovd_known_vulnerable_module",
+        "severity": "varies",
+        "source": "/proc/modules vs a curated abused-driver list",
+        "summary": ("A loaded module matches a driver abused in published BYOVD "
+                    "research. Third-party drivers grade critical; in-tree modules "
+                    "with a patched flaw grade info."),
+        "action": ("third-party: treat the load as hostile. in-tree: compare the "
+                   "kernel build against the vendor fix — presence is not compromise"),
+    },
+    {
+        "check": "byovd_out_of_tree_module",
+        "severity": "medium",
+        "source": "/sys/module/<name>/taint (O)",
+        "summary": "Module was not shipped with this kernel build (taint bit 12).",
+        "action": "identify the vendor or package that installed the module",
+    },
+    {
+        "check": "byovd_unsigned_module",
+        "severity": "high",
+        "source": "/sys/module/<name>/taint (E)",
+        "summary": "Module carries no signature (taint bit 13) — the BYOVD precondition.",
+        "action": "hash the .ko and compare it against the distribution package manifest",
+    },
+    {
+        "check": "byovd_forced_module",
+        "severity": "high",
+        "source": "/sys/module/<name>/taint (F)",
+        "summary": "Module was force-loaded, bypassing vermagic and version checks.",
+        "action": "treat as deliberate tampering unless a maintenance action explains it",
+    },
+    {
+        "check": "byovd_late_loaded_module",
+        "severity": "info",
+        "source": "/sys/module/<name> mtime vs boot time",
+        "summary": ("Module appeared well after boot. Correlation input, not a "
+                    "verdict: modules load on demand for ordinary reasons."),
+        "action": "correlate the load time with process, cron and package-manager activity",
+    },
+    {
+        "check": "byovd_deleted_module_file",
+        "severity": "high",
+        "source": "/proc/modules vs /lib/modules/<release>",
+        "summary": "A loaded module's backing .ko is gone from disk.",
+        "action": "dump the module from memory before the host is rebooted",
+    },
+    {
+        "check": "byovd_kernel_taint",
+        "severity": "medium",
+        "source": "/proc/sys/kernel/tainted",
+        "summary": ("Global kernel taint bits 12/13 are set: out-of-tree and/or "
+                    "unsigned code is running in ring 0. A summary — the "
+                    "per-module findings carry the precise grade."),
+        "action": "enumerate the offending modules before drawing conclusions from any check",
+    },
+    {
         "check": "hijackable_path",
         "severity": "low",
         "source": "$PATH resolved through symlinks + /proc/mounts",
@@ -546,6 +601,22 @@ def hidden_modules(snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     return out
 
 
+def byovd(snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
+    """Kernel-module integrity: the BYOVD-shaped checks, as one callable.
+
+    Grouped behind a single function so ``triage`` can run it alongside the
+    others and pay for the ``/proc/modules`` + ``/sys/module`` walk once
+    (``byovd.byovd_findings`` shares that view across every per-module check),
+    and so a script can ask for just this class with ``det.byovd()``.
+
+    Kept out of the process ``Snapshot`` on purpose: this reads kernel module
+    state, not ``/proc/<pid>``, and folding it in would put a second, unrelated
+    sweep behind a name that promises process facts.
+    """
+    from jocky.rt import byovd as _byovd
+    return _byovd.byovd_findings()
+
+
 def world_writable_path(snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     """PATH directories the current user could plant a binary in."""
     out: List[Dict[str, Any]] = []
@@ -626,7 +697,8 @@ def triage(deep: bool = False, max_pids: int = 400) -> Dict[str, Any]:
     for check in (fileless_processes, memfd_fd_holders, deleted_executables,
                   temp_executables, rwx_regions, unusual_listeners,
                   deleted_open_files, ld_preload_check, suspicious_cmdline,
-                  hidden_modules, world_writable_path, injection_primitives):
+                  hidden_modules, world_writable_path, injection_primitives,
+                  byovd):
         try:
             findings.extend(check(snapshot=snapshot))   # type: ignore[call-arg]
         except Exception as exc:                # a failed check must not stop triage

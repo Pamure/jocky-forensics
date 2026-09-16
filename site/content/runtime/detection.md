@@ -12,6 +12,13 @@ Severity scale: `info < low < medium < high < critical`.
 
 | Check | Severity | Data source |
 |---|---|---|
+| `byovd_deleted_module_file` | high | /proc/modules vs /lib/modules/<release> |
+| `byovd_forced_module` | high | /sys/module/<name>/taint (F) |
+| `byovd_kernel_taint` | medium | /proc/sys/kernel/tainted |
+| `byovd_known_vulnerable_module` | varies | /proc/modules vs a curated abused-driver list |
+| `byovd_late_loaded_module` | info | /sys/module/<name> mtime vs boot time |
+| `byovd_out_of_tree_module` | medium | /sys/module/<name>/taint (O) |
+| `byovd_unsigned_module` | high | /sys/module/<name>/taint (E) |
 | `check_error` | info | internal |
 | `deleted_executable` | medium | /proc/<pid>/exe |
 | `deleted_open_file` | medium | /proc/<pid>/fd |
@@ -32,6 +39,62 @@ Severity scale: `info < low < medium < high < critical`.
 | `unusual_listener` | low | /proc/net/tcp{,6} + /proc/*/fd |
 
 ## What each check means
+
+### `byovd_deleted_module_file`
+
+A loaded module's backing .ko is gone from disk.
+
+- **Source:** /proc/modules vs /lib/modules/<release>
+- **Severity:** high
+- **Analyst action:** dump the module from memory before the host is rebooted
+
+### `byovd_forced_module`
+
+Module was force-loaded, bypassing vermagic and version checks.
+
+- **Source:** /sys/module/<name>/taint (F)
+- **Severity:** high
+- **Analyst action:** treat as deliberate tampering unless a maintenance action explains it
+
+### `byovd_kernel_taint`
+
+Global kernel taint bits 12/13 are set: out-of-tree and/or unsigned code is running in ring 0. A summary — the per-module findings carry the precise grade.
+
+- **Source:** /proc/sys/kernel/tainted
+- **Severity:** medium
+- **Analyst action:** enumerate the offending modules before drawing conclusions from any check
+
+### `byovd_known_vulnerable_module`
+
+A loaded module matches a driver abused in published BYOVD research. Third-party drivers grade critical; in-tree modules with a patched flaw grade info.
+
+- **Source:** /proc/modules vs a curated abused-driver list
+- **Severity:** varies
+- **Analyst action:** third-party: treat the load as hostile. in-tree: compare the kernel build against the vendor fix — presence is not compromise
+
+### `byovd_late_loaded_module`
+
+Module appeared well after boot. Correlation input, not a verdict: modules load on demand for ordinary reasons.
+
+- **Source:** /sys/module/<name> mtime vs boot time
+- **Severity:** info
+- **Analyst action:** correlate the load time with process, cron and package-manager activity
+
+### `byovd_out_of_tree_module`
+
+Module was not shipped with this kernel build (taint bit 12).
+
+- **Source:** /sys/module/<name>/taint (O)
+- **Severity:** medium
+- **Analyst action:** identify the vendor or package that installed the module
+
+### `byovd_unsigned_module`
+
+Module carries no signature (taint bit 13) — the BYOVD precondition.
+
+- **Source:** /sys/module/<name>/taint (E)
+- **Severity:** high
+- **Analyst action:** hash the .ko and compare it against the distribution package manifest
 
 ### `check_error`
 

@@ -14,12 +14,68 @@ from __future__ import annotations
 
 import json
 import os
+import platform
+import sys
 import time
 from typing import Any, Callable, Dict, List, Optional
 
 from jocky.errors import JockyRuntimeError
 from jocky.lang.vm import JockyLimitError, NativeFn, to_str, truthy
-from jocky.rt import detect, filefs, netfs, procfs, sysinfo, timeutil
+from jocky.rt import byovd, detect, filefs, netfs, procfs, sysinfo, timeutil
+
+#: The Windows collector backend, or ``None`` on a host that has none.
+#: Resolved at most once: :func:`available` probes for the Windows DLLs, and a
+#: script that loops over ``proc.list()`` must not pay for that probe per call.
+_WINAPI: Any = None
+_WINAPI_PROBED = False
+
+
+def _windows() -> Any:
+    """The Windows collectors, or ``None`` when this host is not Windows.
+
+    ``jocky.rt.winapi`` is imported lazily and only on Windows: it is a large
+    module of ``ctypes`` bindings that is dead weight on Linux, and importing it
+    unconditionally would run its probe on every host that merely *has* the
+    runtime installed.
+    """
+    global _WINAPI, _WINAPI_PROBED
+    if not _WINAPI_PROBED:
+        _WINAPI_PROBED = True
+        if sys.platform == "win32":
+            from jocky.rt import winapi
+            _WINAPI = winapi if winapi.available() else None
+    return _WINAPI
+
+
+def _proc_backend() -> Any:
+    """Collector module for process facts: ``winapi`` on Windows, ``procfs`` elsewhere.
+
+    Both expose the same key names by contract (see ``jocky/rt/winapi.py``), so
+    a script written against one runs unchanged on the other. Collectors with no
+    Windows counterpart (fds, maps, cgroups, namespaces) still call ``procfs``
+    directly — this exists only for the natives the two modules share.
+    """
+    return _windows() or procfs
+
+
+def _net_backend() -> Any:
+    """Collector module for socket facts: ``winapi`` on Windows, ``netfs`` elsewhere.
+
+    Separate from :func:`_proc_backend` because the Linux side splits these
+    across two modules — the socket tables live in ``netfs``, not ``procfs``,
+    and asking ``procfs`` for ``listeners()`` is an ``AttributeError``.
+    """
+    return _windows() or netfs
+
+
+def _sys_backend() -> Any:
+    """Collector module for kernel-module facts: ``winapi`` on Windows, ``sysinfo`` elsewhere.
+
+    Split out for the same reason: ``/proc/modules`` is parsed by ``sysinfo``,
+    not ``procfs``. On Windows the equivalent view is the loaded driver list,
+    which is what the BYOVD checks consume.
+    """
+    return _windows() or sysinfo
 
 
 #: Capabilities a script must be granted explicitly (`jocky run --allow …`).
@@ -391,7 +447,7 @@ def namespaces() -> Dict[str, Any]:
     """The host-facing namespaces."""
 
     proc_ns = {
-        "list": _fn("proc.list", lambda vm, a: procfs.list_processes(
+        "list": _fn("proc.list", lambda vm, a: _proc_backend().list_processes(
             limit=_int(a[0]) if a else None,
             with_fds=_bool(a[1]) if len(a) > 1 else False,
             with_maps=_bool(a[2]) if len(a) > 2 else False), 0, 3),
@@ -405,27 +461,29 @@ def namespaces() -> Dict[str, Any]:
         "threads": _fn("proc.threads", lambda vm, a: procfs.read_threads(_int(a[0])), 1, 1),
         "environ": _fn("proc.environ", lambda vm, a: procfs.read_environ(_int(a[0])), 1, 1),
         "io": _fn("proc.io", lambda vm, a: procfs.read_io(_int(a[0])), 1, 1),
-        "cmdline": _fn("proc.cmdline", lambda vm, a: procfs.read_cmdline(_int(a[0])), 1, 1),
-        "exe": _fn("proc.exe", lambda vm, a: procfs.read_exe(_int(a[0])), 1, 1),
+        "cmdline": _fn("proc.cmdline", lambda vm, a: _proc_backend().read_cmdline(_int(a[0])), 1, 1),
+        "exe": _fn("proc.exe", lambda vm, a: _proc_backend().read_exe(_int(a[0])), 1, 1),
         "deleted_open": _fn("proc.deleted_open", lambda vm, a: procfs.deleted_open_files(), 0, 0),
         "socket_map": _fn("proc.socket_map", lambda vm, a: {str(k): v for k, v in procfs.socket_inode_map().items()}, 0, 0),
-        "pids": _fn("proc.pids", lambda vm, a: procfs.list_pids(), 0, 0),
+        "pids": _fn("proc.pids", lambda vm, a: _proc_backend().list_pids(), 0, 0),
         "cgroups": _fn("proc.cgroups", lambda vm, a: procfs.read_cgroups(_int(a[0])), 1, 1),
         "namespaces": _fn("proc.namespaces", lambda vm, a: procfs.read_namespaces(_int(a[0])), 1, 1),
         "status": _fn("proc.status", lambda vm, a: procfs.read_status(_int(a[0])), 1, 1),
     }
 
     net_ns = {
-        "connections": _fn("net.connections", lambda vm, a: netfs.connections(
+        "connections": _fn("net.connections", lambda vm, a: _net_backend().connections(
             include_unix=_bool(a[0]) if a else False,
             with_process=_bool(a[1]) if len(a) > 1 else True), 0, 2),
-        "listeners": _fn("net.listeners", lambda vm, a: netfs.listeners(), 0, 0),
-        "established": _fn("net.established", lambda vm, a: netfs.established(), 0, 0),
-        "unusual_listeners": _fn("net.unusual_listeners", lambda vm, a: netfs.unusual_listeners(), 0, 0),
-        "interfaces": _fn("net.interfaces", lambda vm, a: netfs.interfaces(), 0, 0),
-        "routes": _fn("net.routes", lambda vm, a: netfs.routes(), 0, 0),
+        "listeners": _fn("net.listeners", lambda vm, a: _net_backend().listeners(), 0, 0),
+        "established": _fn("net.established", lambda vm, a: _net_backend().established(), 0, 0),
+        "unusual_listeners": _fn("net.unusual_listeners", lambda vm, a: [
+            c for c in _net_backend().listeners()
+            if c.get("local_port") not in netfs.COMMON_LISTEN_PORTS], 0, 0),
+        "interfaces": _fn("net.interfaces", lambda vm, a: _net_backend().interfaces(), 0, 0),
+        "routes": _fn("net.routes", lambda vm, a: _net_backend().routes(), 0, 0),
         "by_process": _fn("net.by_process", lambda vm, a: {
-            str(k): v for k, v in netfs.connections_by_process().items()}, 0, 0),
+            str(k): v for k, v in _net_backend().connections_by_process().items()}, 0, 0),
     }
 
     fs_ns = {
@@ -488,8 +546,13 @@ def namespaces() -> Dict[str, Any]:
         "pid": _fn("sys.pid", lambda vm, a: os.getpid(), 0, 0),
         "ppid": _fn("sys.ppid", lambda vm, a: os.getppid(), 0, 0),
         "kernel": _fn("sys.kernel", lambda vm, a: sysinfo.kernel(), 0, 0),
-        "hostname": _fn("sys.hostname", lambda vm, a: os.uname().nodename, 0, 0),
-        "modules": _fn("sys.modules", lambda vm, a: sysinfo.modules(), 0, 0),
+        "hostname": _fn("sys.hostname", lambda vm, a: platform.node(), 0, 0),
+        "modules": _fn("sys.modules", lambda vm, a: _sys_backend().modules(), 0, 0),
+        "module_integrity": _fn("sys.module_integrity",
+                                lambda vm, a: byovd.loaded_modules(), 0, 0),
+        "taint": _fn("sys.taint", lambda vm, a: byovd.taint_state(), 0, 0),
+        "vulnerable_drivers": _fn("sys.vulnerable_drivers",
+                                  lambda vm, a: [dict(entry) for entry in byovd.KNOWN_VULNERABLE], 0, 0),
         "hidden_modules": _fn("sys.hidden_modules", lambda vm, a: sysinfo.hidden_modules(), 0, 0),
         "mounts": _fn("sys.mounts", lambda vm, a: sysinfo.mounts(), 0, 0),
         "memory": _fn("sys.memory", lambda vm, a: sysinfo.memory(), 0, 0),
@@ -514,6 +577,7 @@ def namespaces() -> Dict[str, Any]:
         "deleted_open": _fn("det.deleted_open", lambda vm, a: detect.deleted_open_files(), 0, 0),
         "ld_preload": _fn("det.ld_preload", lambda vm, a: detect.ld_preload_check(), 0, 0),
         "hidden_modules": _fn("det.hidden_modules", lambda vm, a: detect.hidden_modules(), 0, 0),
+        "byovd": _fn("det.byovd", lambda vm, a: detect.byovd(), 0, 0),
         "world_writable_path": _fn("det.world_writable_path", lambda vm, a: detect.world_writable_path(), 0, 0),
         "persistence": _fn("det.persistence", lambda vm, a: detect.persistence(), 0, 0),
     }

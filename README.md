@@ -12,9 +12,12 @@ language**:
 |---|---|
 | New programming language + compiler | `jocky/lang/` — hand-written lexer → recursive-descent parser → bytecode compiler → stack VM (closures, `try/catch`, step/clock budgets) |
 | Polymorphic scripts (unique hashes, altered entry points/imports) | `jocky/poly/` — per-build opcode permutation, slot remapping, constant encryption + splitting, junk insertion, keystream-encrypted payload, integrity footer |
+| Automated CI/CD polymorphic pipeline | `jocky/ci.py` + `.github/workflows/polymorphism.yml` — `jocky ci` builds N artifacts per commit, fails the build on any hash collision, and compares re-executed findings against a source run so uniqueness cannot drift from semantics |
 | Living-off-the-land execution (no noisy API calls / file-less) | `jocky/rt/` + `jocky/exec/` — pure `/proc`, `/proc/net`, `/sys` collection (**zero external binaries**), direct syscalls via a generated trampoline, and **true fileless execution** (interpreter + runtime + payload in memfds → `/proc/<pid>/exe = /memfd:python3 (deleted)`) |
-| Central management interface | `jocky/agent/` — TLS server with token auth, sqlite job/finding store, polling agents, frontable client mode (separate SNI/Host) |
-| Detection counterpart | `jocky/rt/detect.py` — finds the very techniques above (fileless processes, executable memfd mappings, deleted executables, hidden kernel modules, injected `LD_*`, suspicious command lines, IOC correlation) |
+| BYOVD / kernel-integrity forensics | `jocky/rt/byovd.py` — loaded-module integrity: known-vulnerable driver matches (20 curated entries, CVE-checked), out-of-tree/unsigned/force-loaded taint classes, modules loaded long after boot, modules whose backing `.ko` was deleted, and the global taint bits. Read-only: nothing here loads or modifies a module |
+| Central management interface | `jocky/agent/` — TLS server with token auth, sqlite job/finding store, polling agents, frontable client mode (separate SNI/Host), and a **self-contained web console** at `GET /` (no CDN, no build step, CSP-restricted, DOM built with `textContent` so hostile agent names cannot become XSS) |
+| Cross-platform collection | `jocky/rt/winapi.py` — Windows equivalents of the process/socket/module collectors through pure `ctypes` (**no `tasklist`, `netstat`, `wmic` or PowerShell**), emitting the same key names as the Linux side so a script runs unchanged on either |
+| Detection counterpart | `jocky/rt/detect.py` — finds the very techniques above (fileless processes, executable memfd mappings, deleted executables, hidden kernel modules, injected `LD_*`, suspicious command lines, vulnerable drivers, IOC correlation) |
 
 Everything claimed here is **measured** by `python -m jocky evidence`, which
 writes raw logs plus `evidence/report.md`.

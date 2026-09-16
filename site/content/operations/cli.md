@@ -16,6 +16,7 @@ jocky --help
 | [`agent`](#agent) | jocky agent |
 | [`attest`](#attest) | jocky attest |
 | [`build`](#build) | jocky build |
+| [`ci`](#ci) | jocky ci |
 | [`disasm`](#disasm) | jocky disasm |
 | [`doctor`](#doctor) | jocky doctor |
 | [`evidence`](#evidence) | jocky evidence |
@@ -87,6 +88,22 @@ usage: jocky build [-h] [-o OUTPUT] [--repeat REPEAT] [--deterministic]
 | `--repeat` | build N times and report hash uniqueness (default: `1`) |
 | `--deterministic` | reproduce identical bytes from --seed-hex (no per-build entropy) |
 | `--seed-hex` | build seed as hex (with --deterministic for reproducible output) |
+| `--json` |  |
+
+
+## ci
+
+```text
+usage: jocky ci [-h] [--script SCRIPT] [--count COUNT] [--sample SAMPLE]
+                [--markdown] [--json]
+```
+
+| Option | Description |
+|---|---|
+| `--script` | source script to build repeatedly (default: scripts/hunt.jky) (default: `scripts/hunt.jky`) |
+| `--count` | artifacts to build; each one must hash differently (default: 256) (default: `256`) |
+| `--sample` | artifacts to re-execute and compare against a source run (default: 8) (default: `8`) |
+| `--markdown` | emit Markdown for $GITHUB_STEP_SUMMARY |
 | `--json` |  |
 
 
