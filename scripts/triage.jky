@@ -19,7 +19,10 @@ let interesting = filter(report.findings, fn(f) {
 })
 
 for f in interesting {
-  emit {"severity": f.severity, "check": f.check, "title": f.title, "evidence": f.evidence}
+  # `kind` is set from the runtime detector's `check` so that a finding from this
+  # script can be filtered the same way as a finding from any other script; the
+  # original fields are kept alongside it.
+  emit {"kind": f.check, "severity": f.severity, "check": f.check, "title": f.title, "evidence": f.evidence}
 }
 
 emit {"kind": "tail", "high_or_critical": len(interesting), "total_findings": len(report.findings)}

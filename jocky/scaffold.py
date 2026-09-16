@@ -14,6 +14,15 @@ from typing import Any, Dict, List
 
 EXAMPLE_DIR = Path(__file__).resolve().parent / "examples"
 
+#: The script library, when this package is being run from a source checkout.
+#: ``jocky examples`` answers "what does this project ship", and the answer that
+#: matters is the library in ``scripts/`` — every topic directory included — not
+#: the handful of starters that happen to be packaged as data files. An installed
+#: wheel has no ``scripts/`` tree, so the packaged examples remain the fallback,
+#: and each entry reports which directory it came from so the two are never
+#: silently mixed.
+LIBRARY_DIR = Path(__file__).resolve().parent.parent / "scripts"
+
 GITIGNORE = """\
 # jocky case directory
 .jocky-server/
@@ -67,9 +76,69 @@ See the documentation for the full native API.
 
 
 def bundled_examples() -> List[Path]:
+    """The starter scripts copied into a new case directory by ``init_project``."""
     if not EXAMPLE_DIR.is_dir():
         return []
     return sorted(path for path in EXAMPLE_DIR.glob("*.jky"))
+
+
+def library_scripts() -> List[Path]:
+    """Every script this installation can run, as ``jocky examples`` lists them.
+
+    A source checkout has the whole library; an installed wheel has only the
+    packaged starters, and returning those is the honest answer rather than an
+    error.
+    """
+    if LIBRARY_DIR.is_dir():
+        found = sorted(LIBRARY_DIR.rglob("*.jky"))
+        if found:
+            return found
+    return bundled_examples()
+
+
+def _description(path: Path) -> str:
+    """The script's own one-line statement of the question it answers.
+
+    The convention in this library is a first comment line naming the file
+    (``01_thing.jky — the question``) followed by the sentence continuing onto
+    the next line. A bare filename is not a description, so it is dropped and
+    the wording after it is kept; the comment block is then joined and trimmed to
+    its first sentence, because a listing whose descriptions repeat the file
+    names tells the reader nothing.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    stem = path.stem
+    collected: List[str] = []
+    for line in lines[:40]:
+        stripped = line.strip()
+        if not stripped or not stripped.startswith("#"):
+            break
+        text = stripped.lstrip("#").strip()
+        if not text:
+            break
+        if not collected and text.startswith(stem):
+            text = text[len(stem):]
+            if text.startswith(".jky"):
+                text = text[4:]
+            text = text.lstrip(" -—:.").strip()
+            if not text:
+                # The line was only the filename: keep reading.
+                continue
+        collected.append(text)
+        joined = " ".join(collected)
+        if len(joined) > 140 or joined.endswith((".", "?", "!")):
+            break
+    if not collected:
+        return ""
+    joined = " ".join(collected).strip()
+    for stop in (". ", "? ", "! "):
+        head, _sep, _tail = joined.partition(stop)
+        if _sep and head:
+            return head + _sep.strip()
+    return joined
 
 
 def init_project(directory: str = ".", force: bool = False) -> Dict[str, Any]:
@@ -117,17 +186,27 @@ def init_project(directory: str = ".", force: bool = False) -> Dict[str, Any]:
 
 
 def example_scripts() -> List[Dict[str, str]]:
-    """Name → first-line description for `jocky examples`."""
-    out: List[Dict[str, str]] = []
-    for path in bundled_examples():
-        first = ""
+    """One row per shipped script, for ``jocky examples``.
+
+    Each row carries the script's path relative to the library root (so
+    ``solutions/07_byovd_kernel_integrity.jky`` keeps its topic directory in the
+    name), its own description, and the group it belongs to — ``starter`` for the
+    scripts ``jocky init`` copies, ``library`` for the rest.
+    """
+    rows: List[Dict[str, str]] = []
+    # The scripts `jocky init` copies are the packaged starters; everything else
+    # is library material a case directory gets on request.
+    starters = {path.name for path in bundled_examples()}
+    for path in library_scripts():
         try:
-            for line in path.read_text(encoding="utf-8").splitlines():
-                stripped = line.strip()
-                if stripped.startswith("#"):
-                    first = stripped.lstrip("# ").strip()
-                    break
-        except OSError:
-            first = ""
-        out.append({"name": path.name, "description": first, "path": str(path)})
-    return out
+            name = path.relative_to(LIBRARY_DIR).as_posix()
+        except ValueError:
+            # The packaged fallback directory is not under LIBRARY_DIR.
+            name = path.name
+        rows.append({
+            "name": name,
+            "description": _description(path) or name,
+            "group": "starter" if path.name in starters else "library",
+            "path": str(path),
+        })
+    return rows

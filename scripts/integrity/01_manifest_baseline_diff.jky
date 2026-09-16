@@ -1,0 +1,374 @@
+# 01_manifest_baseline_diff.jky — compare this host's files against the
+# hash manifest that was taken before, and name everything that changed.
+#
+# The problem this answers
+# ------------------------
+# Every other script in this library answers "what does the host look like now".
+# A baseline answers the question an incident actually turns on: "what is
+# different from when we knew it was clean". Without one, an analyst compares
+# against memory, a package database, or nothing.
+#
+# The manifest this reads is the one this project already produces:
+# ``jocky attest <dir>`` writes ``manifest.json`` with a SHA-256 per file, a hash
+# chain over them, and the chain head. This script recomputes the hashes over
+# that directory and reports the differences — and, because the chain is a
+# sequence, it can also tell whether the manifest itself was truncated after it
+# was written (the head must equal the last entry's chain).
+#
+# Where the manifest comes from
+# -----------------------------
+# In order: ``JOCKY_MANIFEST`` in this process's own environment, then
+# ``manifest.json`` in the directory this script was started from. That means a
+# run is reproducible from the command line:
+#
+#     JOCKY_MANIFEST=/cases/ws-014/manifest.json jocky run scripts/integrity/01_manifest_baseline_diff.jky
+#
+# If neither exists the script says so and exits: "no baseline" is a fact worth
+# reporting, and a comparison against nothing would be worse than none.
+#
+# What each finding means
+# -----------------------
+# ``manifest_baseline``              (info) the manifest that was used: path, how
+#                                    many files it covers, when it was written,
+#                                    and the chain head.
+# ``manifest_not_found``             (info) no manifest was found, with the paths
+#                                    that were searched.
+# ``manifest_unreadable``            (low) the manifest exists and could not be
+#                                    read or parsed.
+# ``manifest_file_modified``         high — the file's SHA-256 no longer matches:
+#                                    the content changed since the baseline.
+# ``manifest_file_missing``          high — a file the baseline covers is gone.
+# ``manifest_file_size_changed``     high — the size differs; always accompanied
+#                                    by a hash difference, and reported because a
+#                                    size is something a reviewer can check by
+#                                    hand.
+# ``manifest_path_outside_directory`` medium — the manifest lists a path that
+#                                    resolves outside the directory it describes.
+#                                    Reported and never read: an input file must
+#                                    not choose what this run opens.
+# ``manifest_unlisted_file``         medium — a file inside the attested directory
+#                                    that the manifest does not mention: it
+#                                    appeared after the baseline was taken.
+# ``manifest_touched_after_attestation``
+#                                    low — the content still matches but the
+#                                    kernel's change time is newer than the
+#                                    baseline: the file was rewritten with the
+#                                    same bytes, or copied into place. Content
+#                                    hashes cannot see this; ctime can.
+# ``manifest_chain_head_mismatch``   high — the manifest's own chain head does not
+#                                    match its last entry, so entries were removed
+#                                    from it after it was written. The baseline
+#                                    itself is not trustworthy, which changes how
+#                                    every other finding here should be read.
+# ``manifest_diff_summary``          counts by category.
+#
+# Cost: one hash per listed file, plus one bounded directory walk. Reads only —
+# this never writes to the attested directory, and it will not follow a manifest
+# out of the directory it describes (a manifest's ``path`` fields are joined onto
+# the manifest's own directory and anything resolving outside it is reported
+# rather than read).
+
+let searched = []
+
+fn current_directory() {
+  # The directory this run was started from, read from this process's own /proc
+  # entry — the script has no notion of a working directory of its own, and a
+  # relative default would otherwise depend on something the caller cannot see.
+  let self = proc.info(sys.pid())
+  let cwd = self.get("cwd", nil)
+  if cwd == nil {
+    return "/"
+  }
+  return cwd
+}
+
+fn manifest_candidates() {
+  let paths = []
+  # The script's own environment is readable, so an operator can point a run at a
+  # baseline without editing the script.
+  let environment = []
+  try {
+    set environment = proc.environ(sys.pid())
+  } catch e {
+    set environment = []
+  }
+  for variable in environment {
+    if variable.starts_with("JOCKY_MANIFEST=") {
+      paths.push(variable.substr(15, 400))
+    }
+  }
+  let cwd = current_directory()
+  paths.push(cwd + "/manifest.json")
+  paths.push(cwd + "/evidence/manifest.json")
+  return paths
+}
+
+let manifest_path = nil
+let manifest_outcome = {"ok": true, "content": ""}
+for candidate in manifest_candidates() {
+  searched.push(candidate)
+  if manifest_path == nil and fs.exists(candidate) {
+    set manifest_path = candidate
+    try {
+      set manifest_outcome.content = fs.read(candidate, 262144)
+    } catch e {
+      set manifest_outcome.ok = false
+    }
+  }
+}
+
+if manifest_path == nil {
+  emit {
+    "kind": "manifest_not_found",
+    "severity": "info",
+    "searched": searched,
+    "recommendation": "take a baseline (`jocky attest <dir>`) before the next change window, or point this run at an existing one with JOCKY_MANIFEST=<path>: without a baseline this script has nothing to compare, which is a statement about the case, not a clean result"
+  }
+  emit {
+    "kind": "manifest_diff_summary",
+    "severity": "info",
+    "manifest": nil,
+    "compared": 0,
+    "note": "no baseline was available, so nothing was compared"
+  }
+} else {
+  if not manifest_outcome.ok {
+    emit {
+      "kind": "manifest_unreadable",
+      "severity": "low",
+      "manifest": manifest_path,
+      "recommendation": "the manifest exists but could not be read: check its permissions and whether the case directory is still mounted, and re-run with privilege before concluding anything about the files it covers"
+    }
+  } else {
+    let manifest = nil
+    let parsed = true
+    try {
+      set manifest = json_decode(manifest_outcome.content)
+    } catch e {
+      set parsed = false
+    }
+    if not parsed or manifest == nil {
+      emit {
+        "kind": "manifest_unreadable",
+        "severity": "low",
+        "manifest": manifest_path,
+        "reason": "the file is not valid JSON",
+        "recommendation": "a manifest that cannot be parsed cannot be trusted: re-take the baseline, and treat whatever produced this file as part of the question"
+      }
+    } else {
+      let entries = manifest.get("entries", [])
+      let base_directory = fs.dirname(manifest_path)
+      let generated_at = manifest.get("generated_at", nil)
+      let attested_epoch = nil
+      if generated_at != nil {
+        set attested_epoch = time.parse(generated_at)
+      }
+
+      emit {
+        "kind": "manifest_baseline",
+        "severity": "info",
+        "manifest": manifest_path,
+        "base_directory": base_directory,
+        "version": manifest.get("version", nil),
+        "file_count": manifest.get("file_count", len(entries)),
+        "total_bytes": manifest.get("total_bytes", nil),
+        "generated_at": generated_at,
+        "attested_epoch": attested_epoch,
+        "chain_head": manifest.get("chain_head", nil),
+        "note": manifest.get("note", nil),
+        "exclusions": manifest.get("exclude", [])
+      }
+
+      # -----------------------------------------------------------------------
+      # 1. The manifest's own integrity, before anything is compared against it
+      # -----------------------------------------------------------------------
+      # The chain head is the last entry's chain. If they disagree, the file was
+      # truncated after it was written, and every "missing file" below is a
+      # statement about the truncated list rather than about the filesystem.
+      if len(entries) > 0 {
+        let last = entries[len(entries) - 1]
+        let recorded_head = manifest.get("chain_head", nil)
+        let last_chain = last.get("chain", nil)
+        if recorded_head != nil and last_chain != nil and recorded_head != last_chain {
+          emit {
+            "kind": "manifest_chain_head_mismatch",
+            "severity": "high",
+            "manifest": manifest_path,
+            "chain_head": recorded_head,
+            "last_entry_chain": last_chain,
+            "entries": len(entries),
+            "recommendation": "the manifest's head does not match its own last entry, so entries were removed after it was written: the baseline is not a complete record of what it claims to cover, and every difference below has to be read with that in mind. The anchor kept off-host (or the signature) is what settles which version is real"
+          }
+        }
+      }
+
+      # -----------------------------------------------------------------------
+      # 2. Every file the baseline covers
+      # -----------------------------------------------------------------------
+      let compared = 0
+      let modified = 0
+      let missing = 0
+      let touched = 0
+      let listed = {}
+
+      for entry in entries {
+        let relative = entry.get("path", nil)
+        if relative == nil {
+          continue
+        }
+        # A path that climbs out of the attested directory is reported rather
+        # than read: a manifest is an input file, and an input file must not
+        # choose what this run opens.
+        if relative.starts_with("/") or contains("..", relative) {
+          emit {
+            "kind": "manifest_path_outside_directory",
+            "severity": "medium",
+            "manifest": manifest_path,
+            "path": relative,
+            "reason": "the manifest names a path outside its own directory",
+            "recommendation": "read the manifest before trusting it: a baseline that lists paths outside the tree it describes is either malformed or written to make this comparison read something else"
+          }
+          continue
+        }
+        let absolute = base_directory + "/" + relative
+        listed.set(relative, true)
+        set compared = compared + 1
+
+        if not fs.exists(absolute) {
+          set missing = missing + 1
+          emit {
+            "kind": "manifest_file_missing",
+            "severity": "high",
+            "manifest": manifest_path,
+            "path": absolute,
+            "baseline_sha256": entry.get("sha256", nil),
+            "baseline_size": entry.get("size", nil),
+            "recommendation": "the baseline covers this file and it is gone: recover it from the backup, the package, or a memory image of any process that had it open, and check what else changed in the same directory — a deletion is rarely the only one"
+          }
+          continue
+        }
+
+        let live_sha = nil
+        let hashed = true
+        try {
+          set live_sha = fs.hash(absolute)
+        } catch e {
+          set hashed = false
+        }
+        if not hashed {
+          emit {
+            "kind": "manifest_file_unreadable",
+            "severity": "low",
+            "manifest": manifest_path,
+            "path": absolute,
+            "note": "the file is there and could not be hashed by this run, so it is neither confirmed nor contradicted; re-run with privilege before calling it unchanged"
+          }
+          continue
+        }
+
+        let baseline_sha = entry.get("sha256", nil)
+        let metadata = fs.stat(absolute)
+        if baseline_sha != nil and live_sha != baseline_sha {
+          set modified = modified + 1
+          emit {
+            "kind": "manifest_file_modified",
+            "severity": "high",
+            "manifest": manifest_path,
+            "path": absolute,
+            "baseline_sha256": baseline_sha,
+            "current_sha256": live_sha,
+            "baseline_size": entry.get("size", nil),
+            "current_size": metadata.get("size", nil),
+            "mtime_iso": time.iso(metadata.get("mtime", 0)),
+            "ctime_iso": time.iso(metadata.get("ctime", 0)),
+            "recommendation": "copy the current file before touching it and preserve the baseline copy too: the pair of hashes is what identifies which version is which, and a replacement can be reverted from the manifest only if both are kept"
+          }
+          if entry.get("size", nil) != metadata.get("size", nil) {
+            emit {
+              "kind": "manifest_file_size_changed",
+              "severity": "high",
+              "manifest": manifest_path,
+              "path": absolute,
+              "baseline_size": entry.get("size", nil),
+              "current_size": metadata.get("size", nil),
+              "recommendation": "the size changed as well as the hash, which is the plainest possible evidence of a different file: quote both numbers in the report, because they need no tooling to check"
+            }
+          }
+          continue
+        }
+
+        # ---------------------------------------------------------------------
+        # 3. Content matches, but the file was rewritten after the baseline
+        # ---------------------------------------------------------------------
+        # The kernel's change time moves on any metadata write, including writing
+        # the same bytes again. Content hashing cannot see that; this can, and it
+        # is the shape of a file restored to its original content after use.
+        if attested_epoch != nil and metadata != nil {
+          let ctime = metadata.get("ctime", 0)
+          if ctime > attested_epoch + 2 {
+            set touched = touched + 1
+            emit {
+              "kind": "manifest_touched_after_attestation",
+              "severity": "low",
+              "manifest": manifest_path,
+              "path": absolute,
+              "ctime_iso": time.iso(ctime),
+              "attested_iso": time.iso(attested_epoch),
+              "sha256": live_sha,
+              "recommendation": "the content matches the baseline but the file was changed after it was taken: either it was rewritten with the same bytes (a restore, a copy, a deployment that did not alter it) or its metadata was touched. Neither is an intrusion by itself and both are worth explaining, because the next question is what the file was used for in between"
+            }
+          }
+        }
+      }
+
+      # -----------------------------------------------------------------------
+      # 4. Files that appeared after the baseline
+      # -----------------------------------------------------------------------
+      # The walk is bounded and stays inside the attested directory, so a case
+      # directory that contains a huge tree cannot turn this into a full-disk
+      # scan. Files the manifest excluded are reported as unlisted on purpose:
+      # the exclusion is recorded in the manifest and the operator can compare.
+      let unlisted = 0
+      for found in fs.scan(base_directory, 3000, nil, 4) {
+        if found.is_dir {
+          continue
+        }
+        let name = fs.basename(found.path)
+        if name == "manifest.json" or name == "manifest.head" or name == "manifest.sig" {
+          continue
+        }
+        let relative = found.path.substr(len(base_directory) + 1, 400)
+        if listed.has(relative) {
+          continue
+        }
+        set unlisted = unlisted + 1
+        emit {
+          "kind": "manifest_unlisted_file",
+          "severity": "medium",
+          "manifest": manifest_path,
+          "path": found.path,
+          "size": found.size,
+          "mtime_iso": time.iso(found.mtime),
+          "magic": found.magic,
+          "recommendation": "this file is inside the attested directory and the baseline does not list it, so it appeared afterwards: hash it, read it, and decide whether it belongs — an unlisted file in a case directory is either new evidence or something placed where the analyst's tools will be run"
+        }
+      }
+
+      # -----------------------------------------------------------------------
+      # 5. Summary
+      # -----------------------------------------------------------------------
+      emit {
+        "kind": "manifest_diff_summary",
+        "severity": "info",
+        "manifest": manifest_path,
+        "compared": compared,
+        "modified": modified,
+        "missing": missing,
+        "touched_but_unchanged": touched,
+        "unlisted": unlisted,
+        "collected_at_iso": time.iso(time.now()),
+        "note": "compared counts entries in the manifest that were checked; unlisted counts files found in the directory that the manifest does not cover. Together they bound the comparison"
+      }
+    }
+  }
+}

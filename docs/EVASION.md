@@ -123,7 +123,29 @@ runtime, so its text is never submitted for scanning in the first place. That is
 a property of *not being a script host* rather than a technique, and it applies
 equally to any Python program.
 
-## 5. What was not tested, and what does not follow
+## 5. The telemetry matrix — what each layer *can* see
+
+"Not detected by Defender" is a statement about one engine. A useful evaluation
+says what every layer sees, because the layers differ enormously in reach and
+only the last one is undefeatable from user space.
+
+| Layer | Sees this run as | JOCKY's position |
+|---|---|---|
+| **Static file scan** (on-disk artifact) | A 2.7–4.5 KB encrypted blob with a per-build opcode map. Nothing for a signature to match. | Measured: 29/29 clean. This is what the encoder is for. |
+| **AMSI** | **Nothing.** No `.jky` byte is ever submitted: CPython does not integrate with AMSI, and the script is read by JOCKY's own lexer rather than by PowerShell, WSH or the .NET runtime. Proved functional on this host by PowerShell refusing to load a Mimikatz string. | A property of not being a script host, not a technique. It applies to any Python program. |
+| **User-mode API hooks** (Defender's engine) | `OpenProcess` on 254 pids (140 denied), `NtQuerySystemInformation`, `VirtualQueryEx` walks, `ReadProcessMemory`. Read-only queries, but visible. | Deliberately un-hidden; nothing here patches or unhooks anything. |
+| **ETW / ETW-TI** (kernel telemetry providers) | Process creation, image loads, and any memory-protection change. A fileless run shows an `execve` of `/proc/self/fd/N` on Linux and would show the equivalent image load on Windows. | **Not defended against, and not testable here** — no ETW consumer was instrumented. A privileged observer sees this and nothing in JOCKY attempts otherwise. |
+| **Kernel / LSM telemetry** (eBPF, auditd, Windows driver callbacks) | Everything: every syscall, every file read, the memfd creation, the process tree. | Out of reach by design. The README says so; a user-space tool cannot hide from the kernel it runs on. |
+| **Network inspection** | Nothing in this evaluation — the agent's management channel was not exercised. If used, a TLS-inspecting gateway sees an HTTPS session to the server's address. | No CDN, and domain fronting is not claimed (it is dead). Plain HTTPS to a host you own. |
+| **Behavioural rules** (lineage, child processes, file drops) | **No child processes, no file writes, no registry writes, no persistence.** Measured by the audit hook over a real collection run: 0 child-process events, 0 write-mode opens. | This is the technique the problem statement asks for, and it is measured rather than asserted. |
+
+The honest reading: JOCKY is quiet in the dimensions the problem statement names
+— no noisy tooling, no files, no stable signature — and **transparent** in the
+dimensions a user-space tool cannot influence. A SIGINT-grade observer with
+kernel telemetry is not the threat model this evaluation addresses, and claiming
+otherwise would be the kind of unbacked assertion this report exists to avoid.
+
+## 6. What was not tested, and what does not follow
 
 Stated plainly, because a scope that is not written down gets assumed:
 
@@ -152,7 +174,7 @@ follows that a signature-driven engine has nothing to match. Behaviour-based and
 kernel-based detection were out of scope for this evaluation, and the README's
 limits section says the same thing in different words.
 
-## 6. Reproducing this
+## 7. Reproducing this
 
 The harnesses live in `evidence/evasion/`. From a Windows checkout:
 

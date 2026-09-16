@@ -1,0 +1,351 @@
+# 02_process_file_mismatch_scan.jky — does each process's identity match the file
+# it is actually running?
+#
+# The problem this answers
+# ------------------------
+# A process has two names — the file it was started from (`/proc/<pid>/exe`) and
+# the kernel's 15-character task name (`/proc/<pid>/comm`) — plus the command line
+# it advertises (`/proc/<pid>/cmdline`). All three are writable by the process
+# itself, and every one of them is what a human reads when they look at a
+# terminal. So the mismatches between them are exactly the disguises an intrusion
+# uses: a userland binary that calls itself `kworker/0:1`, a system command that
+# is really a symlink into a writable directory, a process that has scrubbed its
+# own command line. Each one is a single syscall for the attacker and a single
+# comparison for the analyst.
+#
+# What each finding means
+# -----------------------
+# ``kernel_thread_masquerade``      critical/medium — the task name matches a
+#                                   kernel thread but the process has an
+#                                   executable file or a command line. Kernel
+#                                   threads have neither: the kernel never gives
+#                                   them an `exe` symlink and never an argv, so
+#                                   a process that has both cannot be one. This
+#                                   is `prctl(PR_SET_NAME)` used as a disguise,
+#                                   and it is the single most reliable of these
+#                                   checks.
+# ``binary_in_writable_location``   high — the executable runs from a place a
+#                                   normal account can write (a drop zone, a home
+#                                   directory, /media). It is the general form of
+#                                   the drop-zone check the runtime already
+#                                   makes, applied to every process rather than
+#                                   to one class of path. (The obvious check —
+#                                   "the binary is a symlink into a writable
+#                                   directory" — is *not* here, and cannot be: the
+#                                   kernel resolves symlinks at exec, so
+#                                   `/proc/<pid>/exe` shows the final file, never
+#                                   the link that was typed. Verified with a
+#                                   binary launched through /etc/alternatives.)
+# ``binary_writable_by_others``     high — the running executable is writable by
+#                                   its group or by everyone, so whoever can write
+#                                   it decides what the next invocation does.
+# ``binary_owned_by_non_root``      medium — a binary under a system prefix owned
+#                                   by an account that is not root. Packages
+#                                   install root-owned files; something else put
+#                                   this one there or changed its owner.
+# ``binary_with_multiple_names``    low — the inode has more than one link, so
+#                                   another name for the same file exists
+#                                   somewhere. The path in `exe` is only one of
+#                                   its names, and the others are where a copy
+#                                   hides after this one is deleted.
+# ``binary_on_noexec_mount``        high — the binary runs from a filesystem
+#                                   mounted `noexec`. Either the mount is not what
+#                                   the operator thinks, or the code was mapped
+#                                   before the policy changed, or the mount is
+#                                   a later one that shadows the real path. All
+#                                   three are worth knowing.
+# ``process_without_argv``          medium — an executable process with an empty
+#                                   command line that is not a kernel thread.
+#                                   Emptying argv is a deliberate act; on most
+#                                   hosts this is the only way it happens.
+# ``cwd_deleted``                   medium — the working directory no longer
+#                                   exists: the directory was removed while the
+#                                   process kept it open, which is how a build-up
+#                                   is cleaned up from underneath a live process.
+# ``process_identity_summary``      counts, including how many processes were
+#                                   unreadable, which is what bounds the rest.
+#
+# Read-only: this reads `/proc` and the filesystem's metadata. It never signals,
+# attaches to or inspects the memory of a process.
+
+let drop_zones = ["/tmp/", "/dev/shm/", "/var/tmp/", "/run/shm/"]
+let writable_location_prefixes = ["/tmp/", "/dev/shm/", "/var/tmp/", "/run/shm/",
+                                  "/home/", "/root/", "/media/", "/mnt/",
+                                  "/var/spool/", "/var/cache/"]
+
+# Names the kernel gives its own threads. Matching one of these in `comm` is only
+# suspicious in combination with an `exe` or an argv, so the patterns are kept
+# broad: the discrimination is in what the process *has*, not in the name.
+let kernel_thread_patterns = [
+  r"^kworker", r"^ksoftirqd", r"^kswapd", r"^kthreadd", r"^migration",
+  r"^rcu_", r"^rcu[osg]", r"^watchdog", r"^kblockd", r"^jbd2", r"^kauditd",
+  r"^scsi_", r"^kdmflush", r"^khugepaged", r"^oom_reaper", r"^loop[0-9]",
+  r"^xfs-", r"^nfsd", r"^kcompactd", r"^irq/", r"^cpuhp", r"^netns",
+  r"^edac-poller", r"^devfreq", r"^ttm_swap", r"^blkcg", r"^bioset",
+  r"^ata_", r"^kpsmoused", r"^ext4-", r"^kmemleak", r"^writeback",
+  r"^crypto", r"^kstr", r"^ipv6_addrconf", r"^kdevtmpfs", r"^kthrotld",
+  r"^deferwq", r"^kvm", r"^sockdiag", r"^kworker/", r"^kdev", r"^md[0-9]?"
+]
+
+fn looks_like_kernel_thread(name) {
+  for pattern in kernel_thread_patterns {
+    if re.test(pattern, name) {
+      return true
+    }
+  }
+  return false
+}
+
+fn in_drop_zone(path) {
+  for zone in drop_zones {
+    if path.starts_with(zone) {
+      return true
+    }
+  }
+  return false
+}
+
+fn in_writable_location(path) {
+  for prefix in writable_location_prefixes {
+    if path.starts_with(prefix) {
+      return true
+    }
+  }
+  return false
+}
+
+# The mount that holds a path, longest mountpoint first — the same rule the kernel
+# uses to decide which filesystem a path belongs to.
+let mount_table = sys.mounts()
+
+fn filesystem_for(path) {
+  let best = nil
+  let best_len = -1
+  for mount in mount_table {
+    let point = mount.mountpoint
+    if path == point or path.starts_with(point + "/") {
+      if len(point) > best_len {
+        set best = mount
+        set best_len = len(point)
+      }
+    }
+  }
+  return best
+}
+
+let processes = proc.list(600)
+let processes_scanned = 0
+let masquerades = 0
+let writable_location = 0
+let noexec_binaries = 0
+let no_argv = 0
+let deleted_cwd = 0
+
+for process in processes {
+  let name = process.name
+  let exe = process.exe
+  let cmdline = process.cmdline
+  let cwd = process.cwd
+
+  # Only processes whose state is not a zombie are examined: a zombie has no
+  # mappings, no cwd and no argv left, and every comparison against it is noise.
+  if process.state == "Z" {
+    continue
+  }
+  set processes_scanned = processes_scanned + 1
+
+  # ---------------------------------------------------------------------------
+  # 1. A userland process wearing a kernel thread's name
+  # ---------------------------------------------------------------------------
+  if looks_like_kernel_thread(name) {
+    let has_exe = exe != nil and exe != ""
+    let has_argv = cmdline != nil and cmdline != ""
+    if has_exe or has_argv {
+      set masquerades = masquerades + 1
+      let grade = "critical"
+      let why = "a kernel thread has no executable file and no command line, and this process has both"
+      if has_exe and not has_argv {
+        set grade = "high"
+        set why = "a kernel thread has no executable file, and this process has one"
+      }
+      emit {
+        "kind": "kernel_thread_masquerade",
+        "severity": grade,
+        "pid": process.pid,
+        "task_name": name,
+        "exe": exe,
+        "cmdline": cmdline,
+        "uid": process.uid,
+        "ppid": process.ppid,
+        "started_iso": time.iso(process.start_epoch),
+        "reason": why,
+        "recommendation": "the task name was chosen by the process itself (`prctl(PR_SET_NAME)` or an argv[0] of the same), which is a disguise rather than a coincidence. Reconstruct what the binary does from `exe` and from its parent rather than from the name a human would see in `top`; and note that a process can only be named this way deliberately"
+      }
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 2. What the executed file *is*, where it runs from
+  # ---------------------------------------------------------------------------
+  if exe != nil and exe.starts_with("/") and not exe.ends_with("(deleted)") {
+    let metadata = fs.stat(exe)
+    if metadata != nil and metadata.is_file {
+      # Where it runs from. The grade separates the two readings of the same
+      # fact: a binary in a drop zone is a payload until explained, while a
+      # user's own tool in their own home is what every workstation has — and
+      # still the shape a user-level implant takes, which is why it is reported
+      # at medium rather than dropped. The dangerous middle is a binary one
+      # account runs out of a directory another account can write, and that is
+      # graded high.
+      if in_writable_location(exe) {
+        set writable_location = writable_location + 1
+        let grade = "medium"
+        let why = "the process runs its own binary from a user-writable directory, which is how a locally installed tool and a user-level implant both look"
+        if in_drop_zone(exe) {
+          set grade = "high"
+          set why = "the executable runs from a world-writable drop zone"
+        } elif metadata.uid != nil and process.uid != nil and metadata.uid != process.uid {
+          set grade = "high"
+          set why = "the file is owned by another account, so the account running it is not the account that controls it"
+        }
+        emit {
+          "kind": "binary_in_writable_location",
+          "severity": grade,
+          "pid": process.pid,
+          "exe": exe,
+          "cmdline": cmdline,
+          "uid": process.uid,
+          "mode": metadata.mode,
+          "owner_uid": metadata.uid,
+          "mtime_iso": time.iso(metadata.mtime),
+          "reason": why,
+          "recommendation": "a running executable lives where a normal account can write, so the next invocation runs whatever is there at that moment. Preserve the file (it can be replaced under you), hash it, and identify who created it — the answer is either an installer the fleet knows about or the foothold you are looking for"
+        }
+      }
+
+      # Whether anyone else can replace it.
+      let group_write = metadata.mode_str.substr(5, 6) == "w"
+      if metadata.world_writable or group_write {
+        emit {
+          "kind": "binary_writable_by_others",
+          "severity": "high",
+          "pid": process.pid,
+          "exe": exe,
+          "cmdline": cmdline,
+          "mode": metadata.mode,
+          "mode_str": metadata.mode_str,
+          "owner_uid": metadata.uid,
+          "group_writable": group_write,
+          "world_writable": metadata.world_writable,
+          "recommendation": "the executable is writable by more than its owner, so the account that can write it decides what this command does next: compare its hash against the package manifest, restore the mode, and check who has been able to write it — every invocation since the change is suspect"
+        }
+      }
+
+      # Ownership against the location's expectation.
+      let system_prefix = exe.starts_with("/usr/") or exe.starts_with("/bin/") or exe.starts_with("/sbin/") or exe.starts_with("/lib/") or exe.starts_with("/opt/") or exe.starts_with("/snap/") or exe.starts_with("/usr/local/")
+      if system_prefix and metadata.uid != nil and metadata.uid != 0 {
+        emit {
+          "kind": "binary_owned_by_non_root",
+          "severity": "medium",
+          "pid": process.pid,
+          "exe": exe,
+          "owner_uid": metadata.uid,
+          "mode": metadata.mode,
+          "mtime_iso": time.iso(metadata.mtime),
+          "recommendation": "a binary under a system prefix belongs to root in every package; this one belongs to another account, which means a copy, a hand-install, or a chown. Find that account: it can rewrite the file, and the invocation you are looking at may not be the version the package shipped"
+        }
+      }
+
+      # Other names for the same file.
+      if metadata.nlink != nil and metadata.nlink > 1 and metadata.is_file {
+        emit {
+          "kind": "binary_with_multiple_names",
+          "severity": "low",
+          "pid": process.pid,
+          "exe": exe,
+          "inode": metadata.inode,
+          "links": metadata.nlink,
+          "cmdline": cmdline,
+          "recommendation": "the inode has more than one name, so this path is only one way to reach the file: deleting it does not remove the payload, and the other name can be anywhere the same filesystem is mounted, including a writable directory. Search by inode and device, not by name"
+        }
+      }
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 3. A binary executing from a noexec mount
+  # ---------------------------------------------------------------------------
+  if exe != nil and exe.starts_with("/") and not exe.ends_with("(deleted)") {
+    let mount = filesystem_for(exe)
+    if mount != nil and mount.noexec {
+      set noexec_binaries = noexec_binaries + 1
+      emit {
+        "kind": "binary_on_noexec_mount",
+        "severity": "high",
+        "pid": process.pid,
+        "exe": exe,
+        "mountpoint": mount.mountpoint,
+        "fstype": mount.fstype,
+        "options": mount.options,
+        "cmdline": cmdline,
+        "recommendation": "the filesystem this binary runs from is mounted noexec, so either the mount is not the one the operator believes it is, or the code was mapped before the policy changed, or the executable bit is irrelevant because an interpreter is reading it. Read /proc/<pid>/mountinfo for this process: mount namespaces differ, and the one that matters is the process's own"
+      }
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 4. A process with no command line
+  # ---------------------------------------------------------------------------
+  # Kernel threads are excluded by name (they legitimately have none) and zombies
+  # by state. What remains is a userland process that was started with an empty
+  # argv, which is a deliberate act.
+  if exe != nil and exe != "" and (cmdline == nil or cmdline == "") and not looks_like_kernel_thread(name) {
+    set no_argv = no_argv + 1
+    emit {
+      "kind": "process_without_argv",
+      "severity": "medium",
+      "pid": process.pid,
+      "name": name,
+      "exe": exe,
+      "uid": process.uid,
+      "ppid": process.ppid,
+      "cwd": cwd,
+      "started_iso": time.iso(process.start_epoch),
+      "recommendation": "the process has an executable file and no command line at all: `ps` and every terminal view of it will show something else or nothing. Read the binary, its parent and its open descriptors instead, and treat the empty argv as a statement the process made about itself"
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 5. A working directory that no longer exists
+  # ---------------------------------------------------------------------------
+  if cwd != nil and cwd.ends_with("(deleted)") {
+    set deleted_cwd = deleted_cwd + 1
+    emit {
+      "kind": "cwd_deleted",
+      "severity": "medium",
+      "pid": process.pid,
+      "name": name,
+      "exe": exe,
+      "cmdline": cmdline,
+      "cwd": cwd,
+      "uid": process.uid,
+      "recommendation": "the process is sitting in a directory that was removed while it held it open, which is how a staging directory is cleaned up without stopping the process that used it. Recover the directory's contents from the process's own descriptors (/proc/<pid>/fd for the directory, and its open files) before terminating it"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 6. Summary
+# -----------------------------------------------------------------------------
+emit {
+  "kind": "process_identity_summary",
+  "severity": "info",
+  "processes_listed": len(processes),
+  "processes_scanned": processes_scanned,
+  "kernel_thread_masquerades": masquerades,
+  "binaries_in_writable_locations": writable_location,
+  "binaries_on_noexec_mounts": noexec_binaries,
+  "processes_without_argv": no_argv,
+  "deleted_working_directories": deleted_cwd,
+  "note": "zombies are skipped and unreadable processes are absent from every count: an empty result here means 'nothing matched among what this run could read', and processes_scanned is the number that makes that statement checkable"
+}

@@ -70,7 +70,20 @@ let flagged_modules = []
 let worst = "info"
 
 for f in byovd_findings {
-  emit f
+  # `det.byovd()` speaks the runtime detector's shape (`check`, `title`,
+  # `evidence`). It is re-emitted with a `kind` as well so that every finding this
+  # library produces can be filtered by the same field, while the original
+  # `check` and `title` are carried through untouched — the runtime's own view
+  # stays intact and the two cannot drift apart.
+  let evidence = f.get("evidence", {})
+  emit {
+    "kind": f.get("check", "byovd_finding"),
+    "severity": f.severity,
+    "check": f.get("check", ""),
+    "title": f.get("title", ""),
+    "evidence": evidence,
+    "recommendation": f.get("recommendation", "")
+  }
   if f.severity == "critical" or f.severity == "high" or f.severity == "medium" {
     # `f.evidence.module` is present on every per-module check; the taint
     # summary has none, and that is exactly the `get(default)` case.

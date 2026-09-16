@@ -5,8 +5,16 @@
 # 1. Kernel Module View Discrepancy (Rootkit Detection)
 # Compares /proc/modules (what kernel exposes) vs /sys/module (sysfs runtime view)
 let hidden_mods = sys.hidden_modules()
+
+# Counters for the summary row at the end: a clean run must still say what it
+# looked at, or "no findings" cannot be told apart from "not collected".
+let hidden_count = 0
+let preload_entries = 0
+let env_hits = 0
+let path_hits = 0
 if len(hidden_mods.get("in_sys_not_proc", [])) > 0 {
   for mod_name in hidden_mods.in_sys_not_proc {
+    set hidden_count = hidden_count + 1
     emit {
       "kind": "hidden_lkm_rootkit",
       "severity": "critical",
@@ -19,6 +27,7 @@ if len(hidden_mods.get("in_sys_not_proc", [])) > 0 {
 # 2. Dynamic Linker Preload Tampering (/etc/ld.so.preload)
 let preload = fs.ld_preload()
 if preload.exists and len(preload.entries) > 0 {
+  set preload_entries = len(preload.entries)
   emit {
     "kind": "ld_preload_persistence",
     "severity": "critical",
@@ -33,6 +42,7 @@ for p in proc.list(400) {
   let env_vars = proc.environ(p.pid)
   for env in env_vars {
     if contains("LD_PRELOAD=", env) or contains("LD_AUDIT=", env) or contains("LD_LIBRARY_PATH=", env) {
+      set env_hits = env_hits + 1
       emit {
         "kind": "process_environ_hijacking",
         "severity": "high",
@@ -49,6 +59,7 @@ for p in proc.list(400) {
 let path_entries = fs.path_dirs()
 for d in path_entries {
   if d.get("hijackable", false) {
+    set path_hits = path_hits + 1
     emit {
       "kind": "path_hijacking_vulnerability",
       "severity": "medium",
@@ -57,4 +68,16 @@ for d in path_entries {
       "recommendation": "PATH contains world-writable directory; unprivileged users can plant trojan binaries"
     }
   }
+}
+
+emit {
+  "kind": "stealth_persistence_summary",
+  "severity": "info",
+  "hidden_modules": hidden_count,
+  "module_views_in_sync": len(hidden_mods.in_proc_not_sys) == 0 and len(hidden_mods.in_sys_not_proc) == 0,
+  "ld_so_preload_present": preload.exists,
+  "ld_so_preload_entries": preload_entries,
+  "processes_with_injected_environment": env_hits,
+  "hijackable_path_directories": path_hits,
+  "note": "module_views_in_sync compares /proc/modules with /sys/module; a false value with hidden_modules 0 means the two views disagree in the other direction (a module in /proc but not in sysfs), which is reported per module above"
 }

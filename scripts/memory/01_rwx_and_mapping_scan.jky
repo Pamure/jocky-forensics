@@ -1,4 +1,4 @@
-# 01_rwx_and_deleted_mapping_scan.jky — what is mapped into the processes that
+# 01_rwx_and_mapping_scan.jky — what is mapped into the processes that
 # are running, and which of those mappings has no file behind it any more?
 #
 # The problem this answers
@@ -81,8 +81,23 @@ fn is_library(path) {
 let rwx_findings = det.rwx()
 let rwx_pids = {}
 for finding in rwx_findings {
-  emit finding
-  let pid = finding.evidence.get("pid", nil)
+  let evidence = finding.get("evidence", {})
+  let pid = evidence.get("pid", nil)
+  # det.rwx() speaks the runtime detector's shape (`check`, `title`, `evidence`),
+  # which is what `det.triage()` and the documentation generator consume. It is
+  # re-emitted here with a `kind` as well, so a consumer can filter this script's
+  # output by the same field every other script uses — and the original title and
+  # evidence are carried through untouched, so nothing is lost in the translation
+  # and the two views cannot disagree.
+  emit {
+    "kind": "rwx_memory_region",
+    "severity": finding.get("severity", "medium"),
+    "check": finding.get("check", "rwx_memory"),
+    "title": finding.get("title", ""),
+    "pid": pid,
+    "evidence": evidence,
+    "recommendation": finding.get("recommendation", "")
+  }
   if pid != nil {
     rwx_pids.set(str(pid), true)
   }

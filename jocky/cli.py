@@ -286,14 +286,17 @@ def cmd_init(args: argparse.Namespace) -> int:
 
 
 def cmd_examples(args: argparse.Namespace) -> int:
-    from jocky.scaffold import example_scripts
+    from jocky.scaffold import bundled_examples, example_scripts
     scripts = example_scripts()
     if args.json:
         _emit(scripts, True)
         return 0
+    width = max((len(item["name"]) for item in scripts), default=0)
     for item in scripts:
-        print(f"{item['name']:<14} {item['description']}")
-    print(f"\n{len(scripts)} bundled example(s); copy them into a case directory with `jocky init <dir>`")
+        print(f"{item['name']:<{width}}  {item['description']}")
+    starters = len(bundled_examples())
+    print(f"\n{len(scripts)} script(s) in the library; "
+          f"`jocky init <dir>` copies the {starters} starter script(s) into a case directory")
     return 0
 
 

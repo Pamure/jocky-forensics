@@ -34,6 +34,16 @@ jobs:
       - name: Run test suite
         run: python -m pytest tests/ -q -o addopts=""
 
+      # A number in prose must be reproducible by a command. This repository
+      # once carried a commit title claiming "108 DFIR solutions" while the tree
+      # held 15, and nothing failed because nothing was counting. This step is
+      # that counter: it fails the build when a live document states a count the
+      # tree contradicts.
+      - name: Claims audit
+        run: |
+          python tools/claims_audit.py -v
+          python tools/claims_audit.py >> "$GITHUB_STEP_SUMMARY"
+
       # --markdown prints the step-summary table and nothing else, so one gate
       # run both decides the verdict (non-zero exit on FAIL) and produces the
       # summary file.  The redirect happens either way: a failing gate still

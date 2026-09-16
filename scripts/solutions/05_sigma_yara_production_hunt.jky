@@ -18,8 +18,13 @@ let sigma_rule = join([
 ], "\n")
 
 let procs = proc.list(400)
+let sigma_hits = 0
+let entropy_hits = 0
+let yara_hits = 0
+let files_scanned = 0
 for p in procs {
   if sigma.check(sigma_rule, {"CommandLine": p.cmdline}) {
+    set sigma_hits = sigma_hits + 1
     emit {
       "kind": "sigma_detection_hit",
       "severity": "high",
@@ -38,10 +43,12 @@ for zone in drop_zones {
     let files = fs.scan(zone, 50, nil, 2)
     for f in files {
       if f.is_file and f.executable {
+        set files_scanned = files_scanned + 1
         # Calculate Shannon entropy (packed/encrypted payloads score near 8.0)
         try {
           let ent = fs.entropy(f.path, 0, 65536)
           if ent != nil and ent.packed_likely {
+            set entropy_hits = entropy_hits + 1
             emit {
               "kind": "high_entropy_dropzone_payload",
               "severity": "high",
@@ -77,6 +84,7 @@ for df in proc.deleted_open() {
     try {
       let head_bytes = fs.read_bytes(fd_path, 0, 1024)
       if yara.check(yara_rule, head_bytes) {
+        set yara_hits = yara_hits + 1
         emit {
           "kind": "yara_signature_in_deleted_fd",
           "severity": "critical",
@@ -90,4 +98,16 @@ for df in proc.deleted_open() {
     } catch e {
     }
   }
+}
+
+emit {
+  "kind": "rule_hunting_summary",
+  "severity": "info",
+  "processes_scanned": len(procs),
+  "sigma_rule": sigma.summary(sigma_rule).title,
+  "sigma_hits": sigma_hits,
+  "drop_zone_executables_hashed": files_scanned,
+  "high_entropy_payloads": entropy_hits,
+  "yara_hits_in_deleted_files": yara_hits,
+  "note": "sigma_hits 0 with processes_scanned above 0 means the rule was evaluated against every command line and matched none; that is a statement about this host, and it is only meaningful because the count of what was evaluated is printed next to it"
 }

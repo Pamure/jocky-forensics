@@ -6,6 +6,13 @@ let procs = proc.list(500, true, false)
 let host_pid = sys.pid()
 let host_ns = proc.namespaces(host_pid)
 
+# Counters for the summary row at the end. Without it a clean run emits nothing
+# at all, and "nothing was found" is indistinguishable from "the checks never
+# ran" — the single most expensive ambiguity in a report.
+let containers = 0
+let escapes = 0
+let privileged = 0
+
 for p in procs {
   # 1. Dual PID Namespace Detection (NSpid from /proc/<pid>/status)
   # When running in a container, NSpid carries [host_pid, container_pid]
@@ -18,12 +25,14 @@ for p in procs {
   
   # 3. Container Breakout Detection: Process runs with container cgroup but shares host mount namespace
   if p.get("is_container", false) {
+    set containers = containers + 1
     let p_ns = proc.namespaces(p.pid)
     let p_mnt = p_ns.get("mnt", "")
     let host_mnt = host_ns.get("mnt", "")
     
     # If a container process has the exact same mount namespace inode as host init/launcher:
     if p_mnt != "" and p_mnt == host_mnt and is_nested {
+      set escapes = escapes + 1
       emit {
         "kind": "container_mount_namespace_escape",
         "severity": "critical",
@@ -42,6 +51,7 @@ for p in procs {
   let capeff = p.get("capeff", "")
   if capeff != "" and p.get("is_container", false) {
     if contains("0000003fffffffff", capeff) or contains("000001ffffffffff", capeff) {
+      set privileged = privileged + 1
       emit {
         "kind": "privileged_container_execution",
         "severity": "high",
@@ -52,4 +62,15 @@ for p in procs {
       }
     }
   }
+}
+
+emit {
+  "kind": "container_escape_summary",
+  "severity": "info",
+  "processes_scanned": len(procs),
+  "container_processes": containers,
+  "mount_namespace_escapes": escapes,
+  "privileged_containers": privileged,
+  "host_pid": host_pid,
+  "note": "container_processes counts processes whose cgroup or NSpid marks them as namespaced; 0 means this host runs no containers, which is why the two escape checks above found nothing rather than why they are clean"
 }

@@ -69,8 +69,8 @@ let risky_patterns = [
   [r"(curl|wget)[^|]{0,160}\|\s*(ba|z|da)?sh\b", "download-and-execute", "critical"],
   [r"/dev/tcp/", "bash-reverse-shell", "critical"],
   [r"(base64|xxd)\s+(-d|--decode|-r)", "encoded-payload", "high"],
-  [r"(eval|exec)\s*\(", "dynamic-eval", "medium"],
-  [r"nc[a-z]*\s+[^\n]{0,80}\s-e\b", "netcat-exec", "critical"],
+  [r"\beval\s+[$(]|\bexec\s*\(", "dynamic-eval", "medium"],
+  [r"\b(nc|ncat|netcat)\b.{0,60}(-e|--exec)\b", "netcat-exec", "critical"],
   [r"chmod\s+\+x", "chmod-executable", "medium"],
   [r"(/tmp/|/var/tmp/|/dev/shm/|/run/shm/)", "references-drop-zone", "medium"],
   [r"(history\s+-c|rm\s+-rf?\s+/var/log|>\s*/var/log/)", "log-tampering", "high"]
