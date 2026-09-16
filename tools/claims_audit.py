@@ -123,6 +123,41 @@ def _commit_title_claims() -> list[str]:
     return found
 
 
+def _evidence_ledger_drift(measured: dict) -> list[str]:
+    """Check the numbers `docs/EVIDENCE.md` states about this repository.
+
+    The ledger is the artifact every other claim points at, so a number in it
+    that has silently drifted makes the whole file untrustworthy. Its E8 entry
+    states six measurements in one line; this parses them and re-derives each.
+
+    Only repository-derived numbers are checked. External ones — a Defender
+    signature version, a build rate — are records of a run and cannot be
+    re-derived without re-running the thing they describe.
+    """
+    path = REPO / "docs" / "EVIDENCE.md"
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8", errors="replace")
+    # The E8 measurement line, e.g.
+    #   `scripts 38 · test functions 390 · in-language checks 535 · ...`
+    match = re.search(r"`scripts (\d+) · test functions (\d+) · in-language checks "
+                      r"(\d+) ·\s*namespaces (\d+) · detection checks (\d+) · "
+                      r"version ([\d.]+)`", text)
+    if not match:
+        return ["docs/EVIDENCE.md: the E8 measurement line is missing or unparseable; "
+                "the ledger must state its numbers in the audited format"]
+    claimed = {
+        "scripts": (int(match.group(1)), measured["scripts"]),
+        "test functions": (int(match.group(2)), measured["test functions"]),
+        "in-language checks": (int(match.group(3)), measured["in-language checks"]),
+        "namespaces": (int(match.group(4)), measured["namespaces"]),
+        "detection checks": (int(match.group(5)), measured["detection checks"]),
+        "version": (match.group(6), measured["version"]),
+    }
+    return [f"docs/EVIDENCE.md: {name} claims {got!r}, measured {actual!r}"
+            for name, (got, actual) in claimed.items() if got != actual]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -142,6 +177,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  {key:22s} {value}")
 
     violations = _claimed_script_counts()
+    ledger = _evidence_ledger_drift(measured)
     titles = _commit_title_claims()
 
     print(f"\nscripts in tree: {measured['scripts']}")
@@ -152,17 +188,22 @@ def main(argv: list[str] | None = None) -> int:
         for title in titles:
             print(f"  {title}")
 
-    if violations:
-        print("\nCLAIM DRIFT — a document states a number the tree contradicts:")
-        for where, claimed, actual in violations:
-            print(f"  {where}: claims {claimed}, tree has {actual}")
+    if violations or ledger:
+        if violations:
+            print("\nCLAIM DRIFT — a document states a number the tree contradicts:")
+            for where, claimed, actual in violations:
+                print(f"  {where}: claims {claimed}, tree has {actual}")
+        if ledger:
+            print("\nLEDGER DRIFT — docs/EVIDENCE.md states a number that moved:")
+            for line in ledger:
+                print(f"  {line}")
         print("\nFix the document or fix the tree. Do not leave both.")
         return 1
 
     if measured["version"] != measured["latest tag"].lstrip("v"):
         print(f"\nnote: __version__ {measured['version']} does not match the newest "
               f"tag {measured['latest tag']} (informational, not a failure)")
-    print("\nno drift: every stated script count matches the tree")
+    print("\nno drift: stated script counts and the evidence ledger both match the tree")
     return 0
 
 

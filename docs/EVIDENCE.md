@@ -237,10 +237,12 @@ kind of unbacked assertion this file exists to prevent.
 **Claim:** every number the repository states is reproducible by a command.
 
 - **Command:** `python3 tools/claims_audit.py -v`
-- **Measured:** `scripts 38 · test functions 390 · in-language checks 535 ·
-  namespaces 13 · detection checks 30 · version 1.7.0`; "no drift: every stated
-  script count matches the tree". The audit is wired into CI, where a drift fails
-  the build.
+- **Measured:** `scripts 38 · test functions 400 · in-language checks 535 ·
+  namespaces 13 · detection checks 30 · version 1.7.0`; "no drift: stated script
+  counts and the evidence ledger both match the tree". The audit is wired into
+  CI, where a drift fails the build — and it checks **this file's own numbers**
+  as well as the README's, because a ledger that can silently drift is not a
+  ledger. It caught its first real drift the moment that check was added.
 - **Control:** the audit was written because a claim had already drifted — it
   found the `108 DFIR solutions` title unprompted, which is what makes it a
   working detector rather than a decorative script.
