@@ -160,7 +160,13 @@ def test_linux_host_without_procfs_still_fails(monkeypatch):
 
 
 def test_raw_syscall_check_reports_the_platform_not_an_exception(monkeypatch):
-    """Off Linux the raw path is unsupported, and the WARN must say why."""
+    """Off Linux the raw path is a platform fact: reported, never raised.
+
+    The status is ``NA`` rather than ``WARN`` because a warning implies
+    something might be wrong here, and nothing is — the mechanism belongs to a
+    different platform. The assertion that matters is the second one: the check
+    must not make a working install read as broken.
+    """
     from jocky.rt import raw
 
     monkeypatch.setattr(raw.sys, "platform", "win32")
@@ -174,9 +180,10 @@ def test_raw_syscall_check_reports_the_platform_not_an_exception(monkeypatch):
     report = diagnostics.Report()
     diagnostics._check_raw_syscalls(report)
     check = report.checks[0]
-    assert check.status == diagnostics.WARN
+    assert check.status == diagnostics.NA
     assert "Linux-only" in check.detail
-    assert check.fix
+    assert report.ok, "a Linux-only mechanism must not fail the report off Linux"
+    assert report.counts[diagnostics.FAIL] == 0
 
 
 def test_memfd_check_names_the_platform_off_linux(monkeypatch):
@@ -185,6 +192,31 @@ def test_memfd_check_names_the_platform_off_linux(monkeypatch):
     report = diagnostics.Report()
     diagnostics._check_memfd(report)
     check = report.checks[0]
-    assert check.status == diagnostics.FAIL
+    assert check.status == diagnostics.NA
     assert "win32" in check.detail
     assert "Linux" in check.detail
+    assert report.ok, "fileless being Linux-only must not fail a Windows install"
+
+
+def test_not_applicable_checks_do_not_block_the_verdict():
+    """The verdict distinguishes "broken" from "belongs to another platform".
+
+    A Windows operator reading ``NOT ready`` would go looking for a fault that
+    does not exist; the only thing standing between a working install and that
+    message is FAIL never being used for a platform limitation.
+    """
+    report = diagnostics.Report()
+    report.checks.append(diagnostics.Check("memfd_create", diagnostics.NA, "Linux-only"))
+    report.checks.append(diagnostics.Check("sandbox", diagnostics.NA, "Linux-only"))
+    report.checks.append(diagnostics.Check("proc table", diagnostics.OK, "232 processes"))
+    assert report.ok
+    assert report.counts[diagnostics.NA] == 2
+    assert report.counts[diagnostics.FAIL] == 0
+    text = diagnostics.format_report(report)
+    assert "ready" in text and "NOT ready" not in text
+    assert "2 not applicable on this platform" in text
+
+    # And a genuine fault still fails, so the new status cannot mask one.
+    report.checks.append(diagnostics.Check("proc table", diagnostics.FAIL, "denied"))
+    assert not report.ok
+    assert "NOT ready" in diagnostics.format_report(report)

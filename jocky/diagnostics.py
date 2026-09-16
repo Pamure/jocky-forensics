@@ -24,6 +24,11 @@ from typing import Any, Dict, List
 OK = "ok"
 WARN = "warn"
 FAIL = "fail"
+#: The mechanism belongs to a different platform, so there is nothing to fix.
+#: Kept distinct from FAIL — which means "this host is broken" — because telling
+#: a Windows operator to repair Landlock is telling them to fix the wrong thing,
+#: and a verdict of "NOT ready" for a working install is worse than no verdict.
+NA = "na"
 
 
 @dataclass
@@ -51,6 +56,7 @@ class Report:
             OK: sum(1 for c in self.checks if c.status == OK),
             WARN: sum(1 for c in self.checks if c.status == WARN),
             FAIL: sum(1 for c in self.checks if c.status == FAIL),
+            NA: sum(1 for c in self.checks if c.status == NA),
         }
 
     def to_dict(self) -> Dict[str, Any]:
@@ -222,9 +228,7 @@ def _check_memfd(report: Report) -> None:
     platform_reason = _memfd_platform_reason()
     if platform_reason:
         report.checks.append(
-            Check("memfd_create", FAIL, platform_reason,
-                  "fileless mode is Linux-only; use `jocky run` (source mode) on this host "
-                  "instead", group="fileless")
+            Check("memfd_create", NA, platform_reason, group="fileless")
         )
         return
     if not hasattr(os, "memfd_create"):
@@ -259,9 +263,8 @@ def _check_raw_syscalls(report: Report) -> None:
             # `supported` False means no configuration could help: the mechanism
             # belongs to a platform this host is not.
             report.checks.append(
-                Check("direct syscalls", WARN, str(probe.get("error") or "Linux-only mechanism"),
-                      "direct syscalls are a Linux-only mechanism; mem.syscall() is not "
-                      "available here", group="runtime")
+                Check("direct syscalls", NA,
+                      str(probe.get("error") or "Linux-only mechanism"), group="runtime")
             )
         else:
             report.checks.append(
@@ -281,9 +284,7 @@ def _check_fileless_end_to_end(report: Report) -> None:
     platform_reason = _memfd_platform_reason()
     if platform_reason:
         report.checks.append(
-            Check("fileless end-to-end", FAIL, platform_reason,
-                  "fileless mode is Linux-only (memfd plus /proc/self/fd); use source mode "
-                  "(`jocky run`) on this host", group="fileless")
+            Check("fileless end-to-end", NA, platform_reason, group="fileless")
         )
         return
     try:
@@ -379,9 +380,8 @@ def _check_sandbox(report: Report) -> None:
             # Off Linux there is no LSM to reach: this is a platform fact, not a
             # kernel build option the operator left out.
             report.checks.append(
-                Check("sandbox (Landlock)", WARN, str(probe.get("reason") or "Linux-only mechanism"),
-                      "Landlock is a Linux-only mechanism; every sandbox level is a no-op "
-                      "here and `jocky run --sandbox` reports it as unenforced",
+                Check("sandbox (Landlock)", NA,
+                      str(probe.get("reason") or "Linux-only mechanism"),
                       group="confinement")
             )
         else:
@@ -414,7 +414,7 @@ def run_checks(quick: bool = False) -> Report:
     return report
 
 
-SYMBOLS = {OK: "ok  ", WARN: "warn", FAIL: "FAIL"}
+SYMBOLS = {OK: "ok  ", WARN: "warn", FAIL: "FAIL", NA: "n/a "}
 
 
 def format_report(report: Report) -> str:
@@ -426,12 +426,13 @@ def format_report(report: Report) -> str:
             current_group = check.group
             lines.append(f"\n{current_group.upper()}")
         lines.append(f"  [{SYMBOLS.get(check.status, '????')}] {check.name:<28} {check.detail}")
-        if check.fix and check.status != OK:
+        if check.fix and check.status not in (OK, NA):
             lines.append(f"          -> {check.fix}")
     counts = report.counts
     verdict = "ready" if report.ok else "NOT ready"
-    lines.append(
-        f"\n{verdict}: {counts[OK]} ok, {counts[WARN]} warning(s), "
-        f"{counts[FAIL]} failure(s) in {report.duration_ms:.0f} ms"
-    )
+    parts = [f"{counts[OK]} ok", f"{counts[WARN]} warning(s)", f"{counts[FAIL]} failure(s)"]
+    # Only mentioned when non-zero, so a Linux host's line is unchanged.
+    if counts[NA]:
+        parts.append(f"{counts[NA]} not applicable on this platform")
+    lines.append(f"\n{verdict}: {', '.join(parts)} in {report.duration_ms:.0f} ms")
     return "\n".join(lines)
