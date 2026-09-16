@@ -7,14 +7,55 @@ The version string lives in `jocky/__init__.py`: `pyproject.toml` reads it dynam
 
 ```bash
 $ ./venv/bin/jocky --version
-jocky 1.6.0
+jocky 1.6.1
 ```
 
-Releases are annotated tags (`git tag -l` lists `v1.1.0`, `v1.2.0`, `v1.3.0`,
-`v1.4.0`, `v1.5.0` and `v1.6.0`); the generated [releases page](/docs/project/releases)
-carries their commit ids and notes, and [Versioning & releases](/docs/operations/versioning)
-explains the compatibility policy. What is planned next is in the
+Releases are annotated tags (`git tag -l` lists `v1.1.0` through `v1.6.1`); the
+generated [releases page](/docs/project/releases) carries their commit ids and
+notes, and [Versioning & releases](/docs/operations/versioning) explains the
+compatibility policy. What is planned next is in the
 [roadmap](/docs/project/roadmap).
+
+## [1.6.1] — 2026-09-16
+
+Fixes found by running the runtime against a **real Windows 11 host** rather
+than the Linux stub-DLL simulation. The language and collection were correct;
+the driver inventory, one ctypes call, and every path that assumed Linux were
+not.
+
+### Fixed
+- **`winapi.modules()` returned no usable drivers.** `EnumDeviceDrivers`
+  succeeds on Windows 10/11 while filling its buffer with zero base addresses
+  for a non-elevated caller, and the name lookup then answers `ntoskrnl.exe` for
+  every entry — 244 drivers, 0 distinct names. Every BYOVD check built on it
+  would have been a blind scan that *looked* clean. Now uses
+  `NtQuerySystemInformation`: same host, same token, 244 distinct names with
+  real sizes and paths.
+- **`winapi.list_processes()` failed with no arguments.** A
+  `class _TOKEN_USER(Structure)` shadowed the `_TOKEN_USER = 1`
+  information-class constant, so `GetTokenInformation` got a struct type where a
+  DWORD belongs. A small `limit=` hid it; the default call raised.
+- **`jocky build -o FILE --repeat N` wrote nothing** while exiting 0.
+- **Non-Linux platforms raised host exceptions instead of reporting** —
+  `os.uname()` and `ctypes.CDLL(None)` surfaced as `AttributeError`/`TypeError`
+  in `jocky doctor`. Each Linux-only mechanism now names the platform.
+- Windows crash-dump stack drivers (`dump_*.sys`) are resident with no image on
+  disk **by design** (3 of 244 on a healthy host); graded `info`, not `high`.
+
+### Added
+- `byovd_deleted_driver_file` and a coverage finding naming the checks that do
+  not apply on a platform.
+- [Install guide](/docs/getting-started/installation) covering Linux, Windows
+  and Docker, with a measured capability matrix.
+
+### Verified on real Windows
+```
+process table (winapi)   231 process(es) via Toolhelp32 + NtQuerySystemInformation
+network tables           135 socket(s) via GetExtendedTcpTable/GetExtendedUdpTable
+kernel drivers           244 (244 distinct names)
+script -> artifact -> executed from artifact, 0 errors
+jocky ci                 64 builds -> 64 unique hashes, 0 mismatches
+```
 
 ## [1.6.0] — 2026-09-16
 

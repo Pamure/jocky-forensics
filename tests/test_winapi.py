@@ -125,3 +125,45 @@ def test_format_sid():
     # S-1-5-21-1-2-3: four sub-authorities, big-endian authority id 5.
     domain_sid = b"\x01\x04\x00\x00\x00\x00\x00\x05" + struct.pack("<IIII", 21, 1, 2, 3)
     assert fn(domain_sid) == "S-1-5-21-1-2-3"
+
+
+def test_token_user_information_class_is_an_integer():
+    """``_TOKEN_USER`` is a ``TOKEN_INFORMATION_CLASS`` value, not a struct type.
+
+    Found on a real Windows host: a ``class _TOKEN_USER(ctypes.Structure)``
+    shadowed the constant, so ``GetTokenInformation(token, _TOKEN_USER, …)``
+    passed a type where a DWORD belongs and raised ``ctypes.ArgumentError``.
+    Only processes the account could actually open reached that line, so a small
+    ``list_processes(limit=…)`` hid it while ``list_processes()`` — the default
+    call a script makes — failed outright. This asserts the name resolves to an
+    int, which is what the API expects and what would have failed loudly at the
+    definition instead of at the first openable process.
+    """
+    from jocky.rt import winapi
+
+    assert isinstance(winapi._TOKEN_USER, int), (
+        "_TOKEN_USER must be the TokenUser information class (int); a same-named "
+        "struct shadows it and breaks GetTokenInformation"
+    )
+    assert winapi._TOKEN_USER == 1
+
+
+def test_get_token_information_declares_a_dword_class_argument():
+    """The binding must declare argument 2 as a DWORD, matching the API.
+
+    Pairs with the test above: the constant being an int is necessary but not
+    sufficient if the prototype asked for something else.
+    """
+    import ctypes
+    from jocky.rt import winapi
+
+    libs = winapi._dlls()
+    if libs is None:
+        import pytest
+        pytest.skip("Windows DLL bindings are unavailable off Windows")
+
+    argtypes = libs["advapi32"].GetTokenInformation.argtypes
+    assert argtypes is not None and len(argtypes) == 5
+    assert argtypes[1] is ctypes.c_uint32, (
+        f"TokenInformationClass must be a DWORD, got {argtypes[1]!r}"
+    )

@@ -176,6 +176,15 @@ CHECK_CATALOG = (
         "action": "dump the module from memory before the host is rebooted",
     },
     {
+        "check": "byovd_deleted_driver_file",
+        "severity": "high",
+        "source": "kernel module list vs the driver's image path (Windows)",
+        "summary": ("A loaded kernel driver's image file is missing on disk — the "
+                    "Windows ghost-driver signal."),
+        "action": ("dump the driver from memory and identify who loaded it before "
+                   "the host is rebooted"),
+    },
+    {
         "check": "byovd_kernel_taint",
         "severity": "medium",
         "source": "/proc/sys/kernel/tainted",

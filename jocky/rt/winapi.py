@@ -110,9 +110,20 @@ _TH32CS_SNAPPROCESS = 0x00000002
 _PROCESS_QUERY_INFORMATION = 0x0400
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _TOKEN_QUERY = 0x0008
+#: ``TOKEN_INFORMATION_CLASS.TokenUser``. A plain enum value, and it must stay
+#: one: a ``class _TOKEN_USER(ctypes.Structure)`` used to live in this module and
+#: shadowed this name, so ``GetTokenInformation`` received a struct type where a
+#: DWORD belongs. It raised ``ArgumentError`` only for processes the account could
+#: actually open — which is why passing a small ``limit`` hid it, and why
+#: ``proc.list()`` with no arguments failed outright on Windows. The SID needs no
+#: struct anyway: it is read through the pointer the buffer's first field holds.
+#: ``tests/test_winapi.py`` pins this name as an ``int`` so it cannot come back.
 _TOKEN_USER = 1
 _PROCESS_COMMAND_LINE_INFORMATION = 60
 _SYSTEM_EXTENDED_HANDLE_INFORMATION = 64
+#: ``SYSTEM_INFORMATION_CLASS.SystemModuleInformation`` — the kernel's own
+#: loaded-module list.
+_SYSTEM_MODULE_INFORMATION = 11
 
 _TCP_TABLE_OWNER_PID_ALL = 5
 _UDP_TABLE_OWNER_PID = 1
@@ -184,6 +195,29 @@ class _FILETIME(ctypes.Structure):
     _fields_ = [("dwLowDateTime", _DWORD), ("dwHighDateTime", _DWORD)]
 
 
+class _RTL_PROCESS_MODULE_INFORMATION(ctypes.Structure):
+    """One entry of the kernel's loaded-module list (296 bytes on x64).
+
+    ``FullPathName`` is a fixed 256-byte buffer and the short name begins at
+    ``OffsetToFileName`` *inside* it, so the name is sliced from that offset
+    rather than split on the separator — a path with no backslash in it would
+    otherwise be reported under the wrong name.
+    """
+
+    _fields_ = [
+        ("Section", _HANDLE),
+        ("MappedBase", _HANDLE),
+        ("ImageBase", _HANDLE),
+        ("ImageSize", _DWORD),
+        ("Flags", _DWORD),
+        ("LoadOrderIndex", ctypes.c_ushort),
+        ("InitOrderIndex", ctypes.c_ushort),
+        ("LoadCount", ctypes.c_ushort),
+        ("OffsetToFileName", ctypes.c_ushort),
+        ("FullPathName", ctypes.c_ubyte * 256),
+    ]
+
+
 class _PROCESS_MEMORY_COUNTERS(ctypes.Structure):
     """``PROCESS_MEMORY_COUNTERS`` (the EX variant is a strict prefix)."""
 
@@ -199,12 +233,6 @@ class _PROCESS_MEMORY_COUNTERS(ctypes.Structure):
         ("PagefileUsage", _SIZE_T),
         ("PeakPagefileUsage", _SIZE_T),
     ]
-
-
-class _TOKEN_USER(ctypes.Structure):
-    """``TOKEN_USER``: one ``SID_AND_ATTRIBUTES``; the SID bytes follow it."""
-
-    _fields_ = [("Sid", _HANDLE), ("Attributes", _DWORD)]
 
 
 class _MIB_IFROW(ctypes.Structure):
@@ -1574,60 +1602,96 @@ def routes() -> List[Dict[str, Any]]:
 
 
 # ------------------------------------------------------------------- modules
-def _driver_name(psapi: Any, base: Any, file_name: bool) -> str:
-    """One ``GetDeviceDriver{Base,File}NameW`` call for a driver base address."""
-    buffer = ctypes.create_unicode_buffer(_MAX_PATH * 2)
-    function = psapi.GetDeviceDriverFileNameW if file_name else psapi.GetDeviceDriverBaseNameW
-    try:
-        function(_HANDLE(base), buffer, len(buffer))
-    except (OSError, ValueError):
-        return ""
-    return buffer.value
+def _system_modules(errors: Optional[List[Dict[str, Any]]] = None
+                    ) -> Optional[List[Dict[str, Any]]]:
+    """The kernel's loaded-module list, via ``NtQuerySystemInformation``.
+
+    This is the only module inventory that works for an unprivileged analyst,
+    and that is a correction rather than a preference. ``EnumDeviceDrivers``
+    succeeds on Windows 10/11 while filling its buffer with **zero** base
+    addresses for a non-elevated caller; asking ``GetDeviceDriverBaseNameW`` for
+    the name at address zero then returns ``ntoskrnl.exe`` every time. The result
+    is a list of N identical entries — a blind scan that looks like a clean one,
+    which is precisely the failure this project treats as a defect. Measured on
+    the development host: ``EnumDeviceDrivers`` reported 244 drivers, 0 distinct
+    names; ``SystemModuleInformation`` on the same host and the same token
+    reported 244 drivers with 244 distinct names.
+
+    Only the load addresses are withheld from a normal account, and nothing here
+    needs them: BYOVD matching keys on the driver *name*, and the ghost-driver
+    signal keys on the path. Returns ``None`` when the query itself fails, so the
+    caller reports a gap instead of inventing rows.
+    """
+    libs = _dlls()
+    if libs is None:
+        return None
+    ntdll = libs["ntdll"]
+    size = _DWORD(0)
+    status = ntdll.NtQuerySystemInformation(
+        _SYSTEM_MODULE_INFORMATION, None, 0, ctypes.byref(size))
+    if status not in (_STATUS_INFO_LENGTH_MISMATCH, _STATUS_BUFFER_TOO_SMALL) or not size.value:
+        _report("NtQuerySystemInformation(Modules)",
+                "size probe failed (status 0x%08X)" % status, 0, errors)
+        return None
+    # The kernel can grow the list between the probe and the read; the standard
+    # remedy is headroom, and the count check below rejects a truncated buffer.
+    buffer = ctypes.create_string_buffer(size.value * 2)
+    status = ntdll.NtQuerySystemInformation(
+        _SYSTEM_MODULE_INFORMATION, buffer, len(buffer), ctypes.byref(size))
+    if status != _STATUS_SUCCESS:
+        _report("NtQuerySystemInformation(Modules)",
+                "status 0x%08X" % status, 0, errors)
+        return None
+
+    count = ctypes.cast(buffer, ctypes.POINTER(ctypes.c_ulong))[0]
+    entry_size = ctypes.sizeof(_RTL_PROCESS_MODULE_INFORMATION)
+    offset = ctypes.sizeof(ctypes.c_void_p)
+    if count <= 0 or offset + count * entry_size > len(buffer):
+        _report("NtQuerySystemInformation(Modules)",
+                f"implausible module count {count}", 0, errors)
+        return None
+
+    array = (_RTL_PROCESS_MODULE_INFORMATION * count).from_buffer(buffer, offset)
+    out: List[Dict[str, Any]] = []
+    for index in range(count):
+        entry = array[index]
+        raw = bytes(entry.FullPathName)
+        end = raw.find(b"\x00")
+        if end < 0:
+            end = len(raw)
+        full = raw[:end].decode("latin-1")
+        short = raw[min(entry.OffsetToFileName, end):end].decode("latin-1", "replace")
+        base = int(entry.ImageBase or 0)
+        out.append({
+            "name": short or full.rsplit("\\", 1)[-1],
+            "size": int(entry.ImageSize),
+            "refcount": int(entry.LoadCount),
+            "dependencies": [],
+            "state": None,
+            "address": "%016x" % base,
+            "path": full,
+            "base": base,
+            "load_order": int(entry.LoadOrderIndex),
+            "file_exists": _local_path_exists(_normalise_driver_path(full)),
+        })
+    return out
 
 
 def modules() -> List[Dict[str, Any]]:
     """Loaded **kernel drivers** — the Windows counterpart of ``/proc/modules``.
 
-    ``EnumDeviceDrivers`` reports the load base of every loaded driver without
-    needing any privilege beyond what a normal account has, which makes this the
-    one module inventory available during a live triage; it is also what the
-    BYOVD detector consumes, so the keys mirror
+    This is what the BYOVD detector consumes, so the keys mirror
     :func:`jocky.rt.sysinfo.modules`: ``name``, ``size``, ``refcount``,
-    ``dependencies``, ``state``, ``address``.
+    ``dependencies``, ``state``, ``address``. ``path``, ``base``, ``load_order``
+    and ``file_exists`` are additive — a loaded driver whose file is not on disk
+    is a ghost-driver signal, and ``file_exists`` is ``None`` (not ``False``)
+    when the path cannot be resolved or stat'ed, e.g. a ``\\Device\\...`` path.
 
-    ``size``, ``refcount``, ``dependencies`` and ``state`` stay ``None``/empty:
-    psapi returns only bases, and inventing values would make a BYOVD heuristic
-    fire on fiction.  ``address`` is the load base as the same 16-hex-digit text
-    the Linux reader emits; ``path``, ``base`` and ``file_exists`` are additive —
-    a mapped driver whose file is not on disk is a ghost-driver signal, and
-    ``file_exists`` is ``None`` (not ``False``) when the path cannot be resolved
-    or stat'ed, e.g. a ``\\Device\\...`` path or a share that must not be touched.
+    ``address`` is zero for a non-elevated caller, because Windows withholds
+    kernel load addresses: that is a documented visibility limit, not a missing
+    driver, and the name and size are still authoritative. ``state`` stays
+    ``None`` — the kernel module list carries no equivalent of the ``Live``/
+    ``Loading`` column in ``/proc/modules``, and inventing one would make a
+    BYOVD heuristic fire on fiction.
     """
-    libs = _dlls()
-    if libs is None:
-        return []
-    psapi = libs["psapi"]
-    needed = _DWORD(0)
-    if not psapi.EnumDeviceDrivers(None, 0, ctypes.byref(needed)) or not needed.value:
-        _fail("EnumDeviceDrivers(size)")
-        return []
-    count = needed.value // _POINTER_SIZE
-    bases = (_HANDLE * count)()
-    if not psapi.EnumDeviceDrivers(bases, needed.value, ctypes.byref(needed)):
-        _fail("EnumDeviceDrivers")
-        return []
-    out: List[Dict[str, Any]] = []
-    for base in bases:
-        path = _driver_name(psapi, base, True)
-        out.append({
-            "name": _driver_name(psapi, base, False),
-            "size": None,
-            "refcount": None,
-            "dependencies": [],
-            "state": None,
-            "address": "%016x" % int(base or 0),
-            "path": path,
-            "base": int(base or 0),
-            "file_exists": _local_path_exists(_normalise_driver_path(path)),
-        })
-    return out
+    return _system_modules() or []

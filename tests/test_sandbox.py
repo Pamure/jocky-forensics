@@ -83,7 +83,7 @@ def _run_child(level: str, tmpdir: str) -> dict:
 
 def test_probe_reports_availability():
     report = sandbox.probe()
-    assert set(report) >= {"available", "abi", "levels", "reason"}
+    assert set(report) >= {"available", "supported", "abi", "levels", "reason"}
     if not report["available"]:
         pytest.skip(f"kernel has no Landlock: {report['reason']}")
 
@@ -131,3 +131,40 @@ def test_vm_level_keeps_the_working_directory_writable(tmp_path):
     assert result["applied"] is True
     # /tmp is in the write set for vm level; the CLI's own cwd is granted too
     assert result["write_tmp"] is True
+
+
+# --------------------------------------------------------------- platforms
+def test_non_linux_host_reports_unavailable_instead_of_raising(monkeypatch):
+    """Landlock and seccomp are Linux mechanisms: off Linux there is nothing to apply.
+
+    ``sys.platform`` is read at call time, so patching it *is* the simulation.
+    The point of the test is that no host call is reached — ``ctypes.CDLL(None)``
+    raises ``TypeError: LoadLibrary() argument 1 must be str, not None`` on
+    Windows — and that ``apply`` still answers instead of raising, with
+    ``applied`` False so no caller can believe it is confined.
+    """
+    monkeypatch.setattr(sandbox.sys, "platform", "win32")
+
+    assert sandbox.unavailable_reason(), "a non-Linux host must give a reason"
+    assert sandbox.abi_version() is None
+
+    probe = sandbox.probe()
+    assert probe["available"] is False
+    assert probe["supported"] is False, "unsupported must differ from merely unavailable"
+    assert probe["abi"] is None
+    assert "win32" in probe["reason"]
+    assert probe["levels"] == list(sandbox.LEVELS)
+
+    report = sandbox.apply("strict")
+    assert report.applied is False
+    assert report.abi is None
+    assert "win32" in report.reason
+    assert report.seccomp is False
+    # the report shape the CLI and the VM consume is unchanged
+    assert set(report.to_dict()) >= {"level", "applied", "abi", "reason",
+                                     "rules_skipped", "rules", "network_blocked"}
+
+    # `off` keeps its own reason even here: it is a request, not a failure
+    assert sandbox.apply("off").reason == "confinement disabled by request"
+    with pytest.raises(ValueError):
+        sandbox.apply("paranoid")

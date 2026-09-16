@@ -176,14 +176,27 @@ def cmd_build(args: argparse.Namespace) -> int:
     build_kwargs = {"seed": seed, "deterministic": args.deterministic}
     if args.repeat > 1:
         infos: List[dict] = []
+        artifacts: List[bytes] = []
         for _ in range(args.repeat):
             artifact, meta = runner.build_artifact(source, **build_kwargs)
             meta["size"] = len(artifact)
             infos.append(meta)
+            artifacts.append(artifact)
         hashes = {m.get("artifact_hash") or m.get("build_hash") for m in infos}
-        _emit({"builds": len(infos), "unique_hashes": len(hashes),
-               "sizes": sorted({m["size"] for m in infos}),
-               "sample": infos[0]}, True)
+        report: Dict[str, object] = {
+            "builds": len(infos), "unique_hashes": len(hashes),
+            "sizes": sorted({m["size"] for m in infos}), "sample": infos[0],
+        }
+        # ``--repeat`` is a measurement (do N builds hash differently?), but an
+        # explicit ``-o`` is a request for a file, and returning a report while
+        # writing nothing gave exit 0 and no artifact. Honour the flag: the last
+        # build is the one written, and the report says which.
+        if args.output:
+            with open(args.output, "wb") as fh:
+                fh.write(artifacts[-1])
+            report["path"] = args.output
+            report["written_bytes"] = len(artifacts[-1])
+        _emit(report, True)
         return 0
     artifact, meta = runner.build_artifact(source, **build_kwargs)
     out = args.output or (args.script.rsplit(".", 1)[0] + ".jky.build")

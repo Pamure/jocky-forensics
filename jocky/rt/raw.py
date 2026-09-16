@@ -60,9 +60,26 @@ _SYSCALL_PROTO = ctypes.CFUNCTYPE(
 )
 
 
+def _platform_reason() -> Optional[str]:
+    """Why this host has no syscall facility at all, or ``None`` when it may.
+
+    The trampoline encodes the x86_64 ``syscall`` ABI and the fallback binds
+    ``libc.syscall()``; away from Linux neither exists — Windows has no
+    ``syscall(2)``, its libc stand-in (``msvcrt``) does not export one, and
+    ``ctypes.CDLL(None)`` does not even name the process image (it raises
+    ``TypeError: LoadLibrary() argument 1 must be str, not None``). So off Linux
+    the module is *unsupported*, not merely degraded, and every entry point
+    reports that instead of letting a host exception out.
+    """
+    if not sys.platform.startswith("linux"):
+        return (f"direct syscalls are a Linux-only mechanism "
+                f"(sys.platform={sys.platform!r})")
+    return None
+
+
 def _raw_supported() -> bool:
     """True only on x86_64 Linux, the one ABI the trampoline encodes."""
-    if not sys.platform.startswith("linux"):
+    if _platform_reason() is not None:
         return False
     return platform.machine().lower() in ("x86_64", "amd64")
 
@@ -142,8 +159,14 @@ class RawSyscall:
         """Issue syscall ``number`` with up to five integer arguments.
 
         Raises :class:`OSError` carrying ``errno``/``strerror`` when the kernel
-        reports failure, matching what a libc caller would see.
+        reports failure, matching what a libc caller would see. Raises
+        :class:`RuntimeError` when this host has no syscall facility at all
+        (:func:`_platform_reason`) — which is not a caller error and is why it
+        is reported as such rather than as a bogus errno.
         """
+        reason = _platform_reason()
+        if reason is not None:
+            raise RuntimeError(reason)
         if len(args) > _MAX_ARGS:
             raise ValueError(
                 f"syscall() takes at most {_MAX_ARGS} arguments, got {len(args)}")
@@ -227,7 +250,15 @@ def uname() -> Dict[str, str]:
     The decode is cross-checked against :func:`os.uname`: if our layout were
     wrong the fields would be garbage, and silently reporting garbage as
     forensic evidence is unacceptable.
+
+    Raises :class:`RuntimeError` where the mechanism cannot exist (see
+    :func:`_platform_reason`): syscall 63 is the Linux number, and ``os.uname``
+    does not even exist on Windows, so there is nothing to read and nothing to
+    cross-check against.
     """
+    reason = _platform_reason()
+    if reason is not None:
+        raise RuntimeError(reason)
     buf = ctypes.create_string_buffer(_UTS_SIZE)
     syscall(SYS_UNAME, ctypes.addressof(buf))
     raw = buf.raw
@@ -236,7 +267,11 @@ def uname() -> Dict[str, str]:
         .split(b"\0", 1)[0].decode("utf-8", "replace")
         for i, field in enumerate(_UTS_FIELDS)
     }
-    reference = os.uname()
+    # os.uname() is the reference implementation we check the decode against;
+    # platform.uname() carries the same fields and keeps the check alive on the
+    # (non-Linux) Unixes where the module is imported but the raw path is not.
+    uname_fn = getattr(os, "uname", None)
+    reference = uname_fn() if uname_fn is not None else platform.uname()
     for field in ("sysname", "nodename", "release", "version", "machine"):
         expected = getattr(reference, field)
         if result[field] != expected:
@@ -246,12 +281,48 @@ def uname() -> Dict[str, str]:
     return result
 
 
+def _kernel_release() -> str:
+    """Kernel release text, or the platform's own release if ``os.uname`` is absent.
+
+    Probe output calls this "kernel" on every platform, so it must not depend on
+    a Unix-only accessor to exist.
+    """
+    uname_fn = getattr(os, "uname", None)
+    if uname_fn is not None:
+        return uname_fn().release
+    return platform.release()
+
+
 def probe() -> Dict[str, object]:
-    """Report which syscall path is live on this host."""
+    """Report which syscall path is live on this host.
+
+    Always returns a dict, on every platform. Two keys carry the honest answer:
+    ``supported`` is ``False`` when the mechanism cannot exist here at all, and
+    ``error`` names the reason whenever ``available`` is ``False``. That lets a
+    caller separate "not applicable on this platform" from "available but
+    broken" without matching on exception text.
+    """
+    reason = _platform_reason()
+    if reason is not None:
+        return {
+            "available": False,
+            "supported": False,
+            "method": "unavailable",
+            "arch": platform.machine(),
+            "kernel": _kernel_release(),
+            "platform": sys.platform,
+            "error": reason,
+        }
     handle = _instance()
+    available = handle.available()
     return {
-        "available": handle.available(),
+        "available": available,
+        "supported": True,
         "method": handle.method,
         "arch": platform.machine(),
-        "kernel": os.uname().release,
+        "kernel": _kernel_release(),
+        "platform": sys.platform,
+        "error": "" if available else (
+            f"the x86_64 trampoline is unusable on this host (arch "
+            f"{platform.machine()}); libc.syscall() carries the calls instead"),
     }

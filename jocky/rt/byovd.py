@@ -34,10 +34,21 @@ Checks emitted by :func:`byovd_findings`
                                     like ``rwx_memory``)
 ``byovd_deleted_module_file``       module stays loaded while its ``.ko`` is
                                     gone from ``/lib/modules`` (high)
+``byovd_deleted_driver_file``       the same question on Windows: a resident
+                                    driver whose image file is not on disk (high)
 ``byovd_kernel_taint``              global taint bits 12/13 set (medium)
 ``partial_visibility``              reused from :mod:`jocky.rt.detect`: part of
-                                    the module view could not be read, so a
-                                    clean result is not conclusive (info)
+                                    the module view could not be read, or the
+                                    platform has no such concept, so a clean
+                                    result is not conclusive (info)
+
+Platform scope: the module list comes from the platform backend — ``/proc/modules``
+plus ``/sys/module`` on Linux, the kernel's ``SystemModuleInformation`` driver
+list through :mod:`jocky.rt.winapi` on Windows.  The taint-derived checks
+(out-of-tree, unsigned, forced) and the load-time check exist only where the
+kernel exposes per-module taint data, i.e. Linux; elsewhere they are reported as
+*not applicable* rather than as clean, because "no unsigned drivers" and "this
+platform has no such notion" must never look the same in a report.
 
 Check metadata (source, summary, remediation) is not repeated here: it lives in
 :data:`jocky.rt.detect.CHECK_CATALOG`, the single source of truth the test suite
@@ -65,6 +76,7 @@ from __future__ import annotations
 
 import errno
 import os
+import sys
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -147,6 +159,7 @@ EMITTED_CHECKS: Tuple[str, ...] = (
     "byovd_forced_module",
     "byovd_late_loaded_module",
     "byovd_deleted_module_file",
+    "byovd_deleted_driver_file",
     "byovd_kernel_taint",
     "partial_visibility",
 )
@@ -502,6 +515,60 @@ def _name_spellings(name: str) -> Tuple[str, ...]:
     return (name,) if dashed == name else (name, dashed)
 
 
+def _kernel_release() -> Optional[str]:
+    """The running kernel's release, or ``None`` on a platform without one.
+
+    ``os.uname`` is Unix-only, and BYOVD is not: on Windows there is no
+    ``/lib/modules/<release>`` and therefore no on-disk module tree to compare
+    against.  Callers must treat ``None`` as "this platform has no such notion"
+    and say so, never as an empty release name.
+    """
+    uname = getattr(os, "uname", None)
+    if uname is None:
+        return None
+    try:
+        return uname().release or None
+    except OSError:
+        return None
+
+
+def _disk_index_label() -> str:
+    """Cache key and evidence label for the module-tree index of this host."""
+    return _kernel_release() or f"platform:{sys.platform}"
+
+
+def _win_backend() -> Any:
+    """``jocky.rt.winapi`` when this host is Windows and it is usable, else ``None``.
+
+    Imported lazily because the module is large and only meaningful on Windows,
+    and because a Linux collector must never need it.  ``available()`` is itself
+    cached and reports whether the Windows DLL bindings loaded, so a Windows
+    host missing a library degrades to a reported gap rather than an exception.
+    """
+    if sys.platform != "win32":
+        return None
+    from jocky.rt import winapi
+
+    return winapi if winapi.available() else None
+
+
+def _sysfs_module_view() -> bool:
+    """True when this platform exposes per-module taint and load timestamps.
+
+    Only Linux does (``/sys/module/<name>`` plus ``/proc/sys/kernel/tainted``),
+    so the platform check comes first: on Windows those mechanics do not exist
+    and a path that happens to be present must not be allowed to pretend
+    otherwise.  The checks built on those sources are not "clean" elsewhere,
+    they are *undefined*: Windows has no per-driver taint flag, and reporting no
+    out-of-tree drivers while the concept does not exist would be the
+    blind-scan failure this project treats as a defect.  The aggregate says so
+    instead.
+    """
+    if sys.platform == "win32":
+        return False
+    return os.path.isdir(SYS_MODULE_ROOT) and os.path.exists(KERNEL_TAINTED)
+
+
 # ------------------------------------------------------------ module view
 def _proc_modules_rows() -> Tuple[List[Dict[str, Any]], Optional[str]]:
     """Parse ``/proc/modules`` into raw rows plus a read error, if any.
@@ -536,6 +603,66 @@ def _module_sysfs_dir(name: str) -> Optional[str]:
         if os.path.isdir(path):
             return path
     return None
+
+
+def _adapt_windows_rows(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Give Windows driver rows the same record shape as the Linux view.
+
+    ``jocky.rt.winapi.modules()`` already supplies the ``/proc/modules`` fields
+    (``name``, ``size``, ``refcount``, ``dependencies``, ``state``, ``address``)
+    plus ``path``, ``base``, ``load_order`` and ``file_exists``.  The
+    sysfs-derived keys are added as ``None``/empty on purpose: Windows has no
+    per-driver taint flag and no module directory, so they must read as "not
+    determined" — the aggregate then reports the platform limitation instead of
+    letting the missing data look like a clean result.
+    """
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        entry = dict(row)
+        entry.update({
+            "sysfs_present": False,
+            "sysfs_path": None,
+            "initstate": None,
+            "coresize": None,
+            "srcversion": None,
+            "holders": [],
+            "has_executable_code": None,
+            "taint": None,
+            "taint_available": False,
+            "taint_flags": [],
+            "proprietary": None,
+            "out_of_tree": None,
+            "unsigned": None,
+            "forced": None,
+            "load_mtime": None,
+            "load_mtime_source": None,
+            "read_errors": [],
+        })
+        out.append(entry)
+    return out
+
+
+def _loaded_module_view() -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """Loaded modules in one record shape, taken from the platform backend.
+
+    Linux reads ``/proc/modules`` and enriches it from ``/sys/module``; Windows
+    asks the kernel through ``jocky.rt.winapi`` (``SystemModuleInformation``,
+    the only driver inventory that answers a non-elevated caller truthfully).
+    Returns ``(records, error)``; a backend that is present but failed yields an
+    error string so :func:`byovd_findings` reports a gap instead of an empty,
+    innocent-looking host.
+    """
+    backend = _win_backend()
+    if backend is not None:
+        rows = backend.modules()
+        if not rows:
+            return [], "winapi.modules(): the kernel reported no loaded drivers"
+        return _adapt_windows_rows(rows), None
+    if sys.platform == "win32":
+        return [], ("winapi unavailable (Windows DLL bindings did not load); the "
+                    "driver list could not be read")
+    rows, error = _proc_modules_rows()
+    return _enrich(rows), error
 
 
 def _module_flags(sysfs_dir: Optional[str]) -> Tuple[Dict[str, Any], List[str]]:
@@ -662,15 +789,15 @@ def _enrich(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def loaded_modules() -> List[Dict[str, Any]]:
-    """Every module the kernel reports loaded, enriched from ``/sys/module``.
+    """Every module the platform reports loaded, in one record shape.
 
-    Each record carries the ``/proc/modules`` fields (``name``, ``size``,
+    Every record carries the module-list fields (``name``, ``size``,
     ``refcount``, ``dependencies``, ``state``, ``address``) plus:
 
     ``sysfs_present`` / ``sysfs_path``
-        Whether a ``/sys/module/<name>`` entry exists.  A module the kernel
-        lists as loaded but that has no sysfs entry is the hidden-module case
-        worth surfacing, so it is recorded rather than raised.
+        Whether a ``/sys/module/<name>`` entry exists (Linux).  A module the
+        kernel lists as loaded but that has no sysfs entry is the hidden-module
+        case worth surfacing, so it is recorded rather than raised.
     ``initstate``, ``coresize``, ``srcversion``, ``holders``,
     ``has_executable_code``
         Raw sysfs attributes; ``has_executable_code`` is ``None`` when
@@ -688,11 +815,18 @@ def loaded_modules() -> List[Dict[str, Any]]:
         ``"<path>: <errno>"`` for every attribute that exists but could not be
         read — a permission denial is visible, not fatal.
 
-    Returns an empty list when ``/proc/modules`` itself cannot be read (the
+    On Windows the rows come from :func:`jocky.rt.winapi.modules` (kernel
+    drivers via ``SystemModuleInformation``) and keep its ``path``, ``base``,
+    ``load_order`` and ``file_exists`` keys; the sysfs-derived keys above are
+    then ``None``/empty, because the platform has no equivalent and inventing
+    one would make "no unsigned drivers" indistinguishable from "no such
+    concept here".
+
+    Returns an empty list when the module view cannot be read at all (the
     reason is then reported by :func:`byovd_findings` as a coverage finding).
     """
-    rows, _error = _proc_modules_rows()
-    return _enrich(rows)
+    records, _error = _loaded_module_view()
+    return records
 
 
 # ------------------------------------------------------------------- taint
@@ -969,8 +1103,23 @@ def _module_disk_index(release: Optional[str] = None
     without the depmod files).  ``complete`` is ``False`` when the tree is
     missing or the walk was truncated — in that state no deletion claim may be
     made, because the absence of an entry would say nothing about the module.
+
+    On a platform without ``/lib/modules`` (Windows) there is no tree at all,
+    so this returns the same "no index available" shape as a missing release —
+    an empty index plus an error note and ``complete=False`` — rather than
+    touching ``os.uname``, which does not exist there.
     """
-    release = release or os.uname().release
+    release = release or _kernel_release()
+    if release is None:
+        label = _disk_index_label()
+        cached = _DISK_INDEX_CACHE.get(label)
+        if cached is None:
+            cached = ({},
+                      [f"no kernel module tree on this platform ({sys.platform}): "
+                       "the on-disk module comparison does not apply"],
+                      False)
+            _DISK_INDEX_CACHE[label] = cached
+        return cached
     cached = _DISK_INDEX_CACHE.get(release)
     if cached is not None:
         return cached
@@ -1062,7 +1211,7 @@ def _deleted_of(modules: Sequence[Dict[str, Any]], index: Dict[str, str],
 
 def deleted_module_files(snapshot: Optional[List[Dict[str, Any]]] = None
                          ) -> List[Dict[str, Any]]:
-    """Loaded modules whose backing file is gone from disk.
+    """Loaded modules whose backing file is gone from disk (Linux).
 
     Deleting the ``.ko`` after loading is a classic anti-forensic step: the
     module keeps running, but nothing on disk can be hashed or attributed.
@@ -1076,15 +1225,18 @@ def deleted_module_files(snapshot: Optional[List[Dict[str, Any]]] = None
     "listed but repackaged away" from "never on disk".
 
     Returns an empty list when the module tree for the running kernel is
-    incomplete or missing: without a trustworthy index, "not found" would be a
-    statement about the index rather than about the module, and reporting it
-    would flood a normal host with false positives.  That reduced coverage is
-    surfaced by :func:`byovd_findings` as a ``partial_visibility`` finding.
+    incomplete or missing, and on platforms that have no module tree at all:
+    without a trustworthy index, "not found" would be a statement about the
+    index rather than about the module, and reporting it would flood a normal
+    host with false positives.  That reduced coverage is surfaced by
+    :func:`byovd_findings` as a ``partial_visibility`` finding.  Windows instead
+    uses the per-driver ``file_exists`` flag from
+    :func:`jocky.rt.winapi.modules`, reported as ``byovd_deleted_driver_file``.
     """
     if snapshot is None:
         snapshot = loaded_modules()
     index, _errors, complete = _module_disk_index()
-    return _deleted_of(snapshot, index, complete, os.uname().release)
+    return _deleted_of(snapshot, index, complete, _disk_index_label())
 
 
 # ------------------------------------------------------- known vulnerable
@@ -1127,23 +1279,44 @@ def _match_known_vulnerable(names: Iterable[str]) -> Dict[str, List[Dict[str, An
 
 
 # --------------------------------------------------------------- aggregate
+#: Driver-name prefix Windows uses for the crash-dump stack. These are loaded
+#: into a reserved region at boot so a bugcheck can write the dump; the image
+#: is resident while absent from the filesystem, on every healthy host.
+_DUMP_STACK_PREFIX = "dump_"
+
+
+def _is_dump_stack_driver(name: str) -> bool:
+    """True for a Windows crash-dump stack driver (``dump_*.sys``).
+
+    Exists so the ghost-driver check can tell "resident by design" from
+    "resident and its image was removed", which is the difference between a
+    finding an analyst acts on and one they learn to scroll past. The test is
+    the documented prefix and nothing else — a driver merely *resembling* one is
+    still reported at full severity.
+    """
+    return bool(name) and name.lower().startswith(_DUMP_STACK_PREFIX)
+
+
 def byovd_findings(boot_time: Optional[float] = None,
                    snapshot: Optional[List[Dict[str, Any]]] = None
                    ) -> List[Dict[str, Any]]:
     """Run every BYOVD check and return ``detect``-shaped findings.
 
-    ``snapshot`` accepts an already-enriched :func:`loaded_modules` result so a
-    caller that needs both the module view and the findings pays for the
-    ``/proc`` and ``/sys`` walk once; ``boot_time`` defaults to
-    :func:`jocky.rt.procfs.boot_time`.
+    The module list comes from the platform backend (:func:`_loaded_module_view`):
+    ``/proc/modules`` enriched from ``/sys/module`` on Linux, the kernel's
+    ``SystemModuleInformation`` driver list through :mod:`jocky.rt.winapi` on
+    Windows.  ``snapshot`` accepts an already-built :func:`loaded_modules`
+    result so a caller that needs both the view and the findings pays for the
+    walk once; ``boot_time`` defaults to :func:`jocky.rt.procfs.boot_time`.
 
     One finding is emitted per hit for: a known-vulnerable module, an
     out-of-tree module, an unsigned module, a force-loaded module, a module
-    loaded well after boot, a module whose file is gone from disk, and the
-    global taint bits 12/13.  Coverage gaps (unreadable ``/proc/modules``,
+    loaded well after boot, a module or driver whose image file is gone from
+    disk, and the global taint bits 12/13.  Checks the platform cannot support
+    are reported as not applicable, and coverage gaps (unreadable module list,
     unrunnable per-module taint attribution, no module tree to compare against)
-    are reported as ``partial_visibility`` findings instead of being swallowed,
-    because a clean result that quietly skipped a check is worse than no result.
+    are reported as ``partial_visibility`` findings instead of being swallowed —
+    a clean result that quietly skipped a check is worse than no result at all.
     """
     if boot_time is None:
         boot_time = procfs.boot_time()
@@ -1151,11 +1324,11 @@ def byovd_findings(boot_time: Optional[float] = None,
     rows_error = None
     modules = snapshot
     if modules is None:
-        rows, rows_error = _proc_modules_rows()
-        modules = _enrich(rows)
+        modules, rows_error = _loaded_module_view()
 
     findings: List[Dict[str, Any]] = []
-
+    sysfs_view = _sysfs_module_view()
+    
     # -- known vulnerable drivers/modules
     #
     # Grading splits on ``scope`` because the two cases ask different things of
@@ -1210,8 +1383,9 @@ def byovd_findings(boot_time: Optional[float] = None,
             recommendation,
         ))
 
-    # -- per-module taint classes
-    for entry in _out_of_tree_of(modules):
+    # -- per-module taint classes (Linux only: Windows has no taint flag, and
+    #    saying "no unsigned drivers" there would be a claim about nothing)
+    for entry in _out_of_tree_of(modules) if sysfs_view else ():
         if entry["out_of_tree"] is None:
             continue                        # reported as a coverage gap below
         findings.append(_finding(
@@ -1221,7 +1395,7 @@ def byovd_findings(boot_time: Optional[float] = None,
              "coresize": entry["coresize"], "source": entry["source"]},
             "identify the vendor or package that installed this module",
         ))
-    for entry in _unsigned_of(modules):
+    for entry in _unsigned_of(modules) if sysfs_view else ():
         if entry["unsigned"] is None:
             continue                        # reported as a coverage gap below
         findings.append(_finding(
@@ -1231,7 +1405,7 @@ def byovd_findings(boot_time: Optional[float] = None,
              "source": entry["source"]},
             "hash the .ko and compare it against the distribution package manifest",
         ))
-    for module in modules:
+    for module in modules if sysfs_view else ():
         if not module.get("forced"):
             continue
         findings.append(_finding(
@@ -1252,7 +1426,7 @@ def byovd_findings(boot_time: Optional[float] = None,
     # line up with suspicious process or package-manager activity — so this is
     # graded the way ``detect.py`` grades ``rwx_memory``: correlation input, not
     # a verdict. Reporting it higher would fire on most long-lived hosts.
-    for entry in _late_of(modules, boot_time):
+    for entry in _late_of(modules, boot_time) if sysfs_view else ():
         findings.append(_finding(
             "byovd_late_loaded_module", "info",
             (f"module {entry['module']} was loaded "
@@ -1268,7 +1442,7 @@ def byovd_findings(boot_time: Optional[float] = None,
 
     # -- backing file removed from disk
     index, index_errors, index_complete = _module_disk_index()
-    for entry in _deleted_of(modules, index, index_complete, os.uname().release):
+    for entry in _deleted_of(modules, index, index_complete, _disk_index_label()):
         findings.append(_finding(
             "byovd_deleted_module_file", "high",
             f"module {entry['module']} is loaded but its .ko is not on disk",
@@ -1277,8 +1451,57 @@ def byovd_findings(boot_time: Optional[float] = None,
             "reboots; hash the file if a copy still exists",
         ))
 
+    # -- resident driver whose image file is gone (the Windows counterpart of
+    #    the .ko check: the record carries a per-driver path and a stat result,
+    #    while Linux answers the same question from the module tree above)
+    #
+    # Windows loads its crash-dump stack drivers (dump_*.sys) into a reserved
+    # area at boot for dump support; they are resident by design and their image
+    # is not on the filesystem. Measured on a healthy Windows 11 host: exactly 3
+    # of 244 drivers — dump_diskdump.sys, dump_iaStorVD.sys, dump_dumpfve.sys —
+    # and the same is true of dump_storahci.sys. Reporting those at ``high`` puts
+    # three permanent, unactionable findings in every triage result on every
+    # Windows machine, which is how an operator is trained to ignore the check
+    # that is supposed to catch a real ghost driver. They stay reported, at
+    # ``info``, with the reason stated — the same split this module applies to
+    # in-tree CVEs, and the same reasoning ``detect.py`` uses for ``rwx_memory``.
+    unresolved_paths: List[str] = []
+    for module in modules:
+        exists = module.get("file_exists")
+        if exists is None and "file_exists" in module:
+            unresolved_paths.append(module["name"])
+            continue
+        if exists is not False:
+            continue
+        expected = _is_dump_stack_driver(module.get("name") or "")
+        findings.append(_finding(
+            "byovd_deleted_driver_file", "info" if expected else "high",
+            (f"driver {module['name']} is resident but its image file is not on "
+             "disk"
+             + (" (crash-dump stack driver: expected)" if expected else "")),
+            {"module": module["name"], "path": module.get("path"),
+             "size": module.get("size"), "address": module.get("address"),
+             "load_order": module.get("load_order"), "file_exists": False,
+             "dump_stack_driver": expected},
+            ("no action: Windows loads dump_*.sys into the crash-dump stack at "
+             "boot, so the image is resident while absent from the filesystem"
+             if expected else
+             "acquire a memory image and recover the driver image before the host "
+             "reboots; hash the file from a known-good package if one exists"),
+        ))
+
     # -- global taint
     taint = taint_state()
+    if sysfs_view and taint["value"] is None:
+        findings.append(_finding(
+            "partial_visibility", "info",
+            "the kernel taint mask could not be read, so the taint-derived checks "
+            "are inconclusive",
+            {"source": taint["source"], "errors": taint["errors"],
+             "platform": sys.platform},
+            "re-run with permission to read /proc/sys/kernel/tainted; treat the "
+            "taint checks as unknown rather than clean",
+        ))
     for label, bit, modules_attr in (
             ("out-of-tree", TAINT_BIT_OUT_OF_TREE, "out_of_tree"),
             ("unsigned", TAINT_BIT_UNSIGNED, "unsigned")):
@@ -1300,23 +1523,58 @@ def byovd_findings(boot_time: Optional[float] = None,
     if rows_error:
         findings.append(_finding(
             "partial_visibility", "info",
-            "the kernel module list could not be read",
-            {"source": rows_error, "modules_seen": len(modules)},
-            "re-run as root or with CAP_SYS_MODULE; treat the module results as "
-            "unknown rather than clean",
+            "the loaded module/driver list could not be read",
+            {"source": rows_error, "modules_seen": len(modules),
+             "platform": sys.platform},
+            "re-run with the rights the platform requires (root/CAP_SYS_MODULE on "
+            "Linux); treat the module results as unknown rather than clean",
         ))
-    if index_errors or not index_complete:
+    if not sysfs_view:
+        windows = sys.platform == "win32"
+        missing = [] if windows else [path for path in (SYS_MODULE_ROOT, KERNEL_TAINTED)
+                                      if not os.path.exists(path)]
+        findings.append(_finding(
+            "partial_visibility", "info",
+            "per-module taint and module load-time checks do not apply on this "
+            "platform",
+            {"platform": sys.platform, "missing": missing,
+             "checks_not_applicable": [
+                 "byovd_out_of_tree_module", "byovd_unsigned_module",
+                 "byovd_forced_module", "byovd_late_loaded_module",
+                 "byovd_kernel_taint"],
+             "note": ("Windows exposes no per-driver taint flag and no module "
+                      "directory, so these checks report nothing because the "
+                      "concept is absent, not because the host is clean")},
+            "do not read the absence of those findings as a clean result; "
+            "correlate driver provenance against the platform's own mechanisms "
+            "(WDAC or the vulnerable-driver blocklist) instead",
+        ))
+    # A platform without a module tree at all is already explained by the finding
+    # above; only report the missing index where one was expected.
+    if (index_errors or not index_complete) and _kernel_release() is not None:
         findings.append(_finding(
             "partial_visibility", "info",
             "the on-disk module tree for this kernel could not be indexed",
-            {"release": os.uname().release, "errors": index_errors[:5],
+            {"release": _disk_index_label(), "errors": index_errors[:5],
              "error_count": len(index_errors),
-             "entries_indexed": len(index)},
+             "entries_indexed": len(index),
+             "platform": sys.platform},
             "install the matching kernel modules package before trusting the "
             "deleted-module check",
         ))
+    if unresolved_paths:
+        findings.append(_finding(
+            "partial_visibility", "info",
+            (f"{len(unresolved_paths)} loaded driver(s) have no stat-able image "
+             "path, so the missing-file check did not cover them"),
+            {"drivers": unresolved_paths[:20], "driver_count": len(unresolved_paths),
+             "note": ("a device path (\\Device\\...) has no user-mode name and a "
+                      "UNC path is not stat'ed; unknown is not the same as missing")},
+            "resolve the paths offline against a memory image or an offline disk",
+        ))
     unattributed = [m["name"] for m in modules
-                    if not m.get("sysfs_present") or not m.get("taint_available")]
+                    if sysfs_view and (not m.get("sysfs_present")
+                                       or not m.get("taint_available"))]
     if unattributed:
         unreadable = {error for m in modules for error in (m.get("read_errors") or [])}
         findings.append(_finding(

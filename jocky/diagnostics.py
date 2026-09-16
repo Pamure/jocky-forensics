@@ -84,8 +84,42 @@ def _check_python(report: Report) -> None:
         )
 
 
+def _is_windows() -> bool:
+    """Whether this host's collection backend is ``jocky.rt.winapi``.
+
+    A function rather than a constant so the platform branch can be exercised by
+    a test without pretending to be Windows for the whole process.
+    """
+    return sys.platform == "win32"
+
+
+def _procfs_present() -> bool:
+    """Whether a Linux procfs is mounted and readable at ``/proc``."""
+    return os.path.isdir("/proc") and os.path.exists("/proc/self/stat")
+
+
+def _memfd_platform_reason() -> str:
+    """Why memfd-based fileless execution cannot work here, or ``""`` if it can."""
+    if sys.platform.startswith("linux"):
+        return ""
+    return (f"memfd_create is a Linux mechanism (sys.platform={sys.platform!r}); "
+            "fileless execution has no equivalent here")
+
+
 def _check_procfs(report: Report) -> None:
-    if os.path.isdir("/proc") and os.path.exists("/proc/self/stat"):
+    """Check the collection backend this platform actually has.
+
+    ``/proc`` proves the Linux collection path works. On Windows that path does
+    not exist at all — collection goes through :mod:`jocky.rt.winapi` — so a
+    missing ``/proc`` there is not a fault, and reporting one would tell an
+    operator to fix something that cannot be fixed. The backend that answered is
+    named in the detail, because which one produced the evidence is itself a
+    fact worth recording.
+    """
+    if _is_windows():
+        _check_windows_backend(report)
+        return
+    if _procfs_present():
         report.checks.append(Check("procfs mounted", OK, "/proc is readable", group="collection"))
     else:
         report.checks.append(
@@ -103,9 +137,77 @@ def _check_procfs(report: Report) -> None:
         )
 
 
+def _check_windows_backend(report: Report) -> None:
+    """Probe ``winapi`` — the Windows stand-in for procfs — without assuming it loaded.
+
+    ``winapi`` is imported here rather than at module scope so that importing
+    ``diagnostics`` on Linux (where every caller of it lives) stays cheap and
+    does not pull in the Windows structure definitions.
+    """
+    try:
+        from jocky.rt import winapi
+    except Exception as exc:  # a missing backend must be reported, not raised
+        report.checks.append(
+            Check("process table (winapi)", FAIL,
+                  f"cannot import jocky.rt.winapi: {type(exc).__name__}: {exc}",
+                  "reinstall the package: python -m pip install -e .", group="collection")
+        )
+        return
+    if not winapi.available():
+        report.checks.append(
+            Check("process table (winapi)", FAIL, "Windows API bindings did not load",
+                  "collection needs kernel32/ntdll/advapi32/iphlpapi/psapi; "
+                  "run doctor from a normal Windows session", group="collection")
+        )
+        return
+    try:
+        rows = winapi.list_processes()
+    except Exception as exc:
+        report.checks.append(
+            Check("process table (winapi)", FAIL,
+                  f"list_processes() failed: {type(exc).__name__}: {exc}",
+                  "collection cannot enumerate processes on this host", group="collection")
+        )
+        return
+    if rows:
+        report.checks.append(
+            Check("process table (winapi)", OK,
+                  f"{len(rows)} process(es) via jocky.rt.winapi "
+                  "(Toolhelp32 + NtQuerySystemInformation)", group="collection")
+        )
+    else:
+        report.checks.append(
+            Check("process table (winapi)", FAIL, "list_processes() returned no rows",
+                  "a Windows host always has processes; the API call is being denied "
+                  "(see winapi.access_errors())", group="collection")
+        )
+    try:
+        sockets = winapi.connections()
+        report.checks.append(
+            Check("network tables", OK,
+                  f"{len(sockets)} socket(s) via jocky.rt.winapi (GetExtendedTcpTable/"
+                  "GetExtendedUdpTable)", group="collection")
+        )
+    except Exception as exc:
+        report.checks.append(
+            Check("network tables", WARN,
+                  f"winapi.connections() failed: {type(exc).__name__}: {exc}",
+                  "socket inventory will be empty", group="collection")
+        )
+
+
 def _check_permissions(report: Report) -> None:
     uid = os.geteuid() if hasattr(os, "geteuid") else None
-    if uid == 0:
+    if uid is None:
+        # Windows has no process-wide uid; visibility is decided per handle, so
+        # there is no single number to report and no procfs to read through.
+        report.checks.append(
+            Check("effective uid", WARN, f"no geteuid on this platform ({sys.platform})",
+                  "Windows visibility is per access, not per uid: run elevated to read "
+                  "every process (denied calls are listed by winapi.access_errors())",
+                  group="collection")
+        )
+    elif uid == 0:
         report.checks.append(Check("effective uid", OK, "0 (root)", group="collection"))
     else:
         report.checks.append(
@@ -116,6 +218,15 @@ def _check_permissions(report: Report) -> None:
 
 
 def _check_memfd(report: Report) -> None:
+    """memfd is how fileless payloads get a readable, executable descriptor."""
+    platform_reason = _memfd_platform_reason()
+    if platform_reason:
+        report.checks.append(
+            Check("memfd_create", FAIL, platform_reason,
+                  "fileless mode is Linux-only; use `jocky run` (source mode) on this host "
+                  "instead", group="fileless")
+        )
+        return
     if not hasattr(os, "memfd_create"):
         report.checks.append(
             Check("memfd_create", FAIL, "not available on this interpreter/kernel",
@@ -133,6 +244,7 @@ def _check_memfd(report: Report) -> None:
 
 
 def _check_raw_syscalls(report: Report) -> None:
+    """Probe the raw trampoline, whose absence here may be the platform itself."""
     try:
         from jocky.rt import raw
 
@@ -143,9 +255,17 @@ def _check_raw_syscalls(report: Report) -> None:
                       f"{probe.get('method')} on {probe.get('arch', platform.machine())}",
                       group="runtime")
             )
+        elif not probe.get("supported", True):
+            # `supported` False means no configuration could help: the mechanism
+            # belongs to a platform this host is not.
+            report.checks.append(
+                Check("direct syscalls", WARN, str(probe.get("error") or "Linux-only mechanism"),
+                      "direct syscalls are a Linux-only mechanism; mem.syscall() is not "
+                      "available here", group="runtime")
+            )
         else:
             report.checks.append(
-                Check("direct syscalls", WARN, probe.get("error", "unavailable"),
+                Check("direct syscalls", WARN, probe.get("error") or "unavailable",
                       "mem.syscall() falls back to libc; JOCKY works, the raw path is unavailable",
                       group="runtime")
             )
@@ -158,6 +278,14 @@ def _check_raw_syscalls(report: Report) -> None:
 
 def _check_fileless_end_to_end(report: Report) -> None:
     """Actually run a tiny payload from memory — the only proof that counts."""
+    platform_reason = _memfd_platform_reason()
+    if platform_reason:
+        report.checks.append(
+            Check("fileless end-to-end", FAIL, platform_reason,
+                  "fileless mode is Linux-only (memfd plus /proc/self/fd); use source mode "
+                  "(`jocky run`) on this host", group="fileless")
+        )
+        return
     try:
         from jocky.exec import fileless
 
@@ -247,6 +375,15 @@ def _check_sandbox(report: Report) -> None:
                 detail += " (filesystem rights only; --sandbox=strict adds seccomp)"
             report.checks.append(Check("sandbox (Landlock)", OK, detail,
                                        group="confinement"))
+        elif not probe.get("supported", True):
+            # Off Linux there is no LSM to reach: this is a platform fact, not a
+            # kernel build option the operator left out.
+            report.checks.append(
+                Check("sandbox (Landlock)", WARN, str(probe.get("reason") or "Linux-only mechanism"),
+                      "Landlock is a Linux-only mechanism; every sandbox level is a no-op "
+                      "here and `jocky run --sandbox` reports it as unenforced",
+                      group="confinement")
+            )
         else:
             report.checks.append(
                 Check("sandbox (Landlock)", WARN, probe.get("reason", "unavailable"),

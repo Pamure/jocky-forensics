@@ -25,16 +25,41 @@ Levels
 The levels are enforced inside the process that runs the script. For ``jocky
 run`` that is the CLI process itself, so the restriction applies for the rest of
 that process's life — which is exactly one run.
+
+Platforms: every mechanism named above is Linux-only (Landlock, seccomp, the
+``syscall(2)`` instructions they are reached through). Off Linux nothing here can
+be enforced, and each entry point says so through
+:func:`unavailable_reason` / :func:`probe` rather than letting a host exception
+escape — see :func:`apply` for what that means for a caller asking anyway.
 """
 from __future__ import annotations
 
 import ctypes
 import os
 import struct
+import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 LEVELS = ("off", "vm", "ro", "strict")
+
+
+def unavailable_reason() -> Optional[str]:
+    """Why confinement cannot exist on this host, or ``None`` on Linux.
+
+    ``None`` means "ask the kernel": Landlock may still be missing from a Linux
+    kernel, which :func:`probe` reports separately. A non-``None`` answer means
+    no configuration can ever make :func:`apply` enforce anything here — Landlock
+    is a Linux LSM reached through Linux syscalls, and the seccomp filter that
+    backs the ``strict`` level is equally Linux-only. Windows gets neither:
+    ``ctypes.CDLL(None)`` there is not "the process's own libc" and raises
+    ``TypeError: LoadLibrary() argument 1 must be str, not None``.
+    """
+    if not sys.platform.startswith("linux"):
+        return (f"Landlock is a Linux-only mechanism (sys.platform={sys.platform!r}); "
+                "this host has no confinement to apply")
+    return None
+
 
 # --- raw syscall numbers (x86_64 Linux) -------------------------------------
 SYS_LANDLOCK_CREATE_RULESET = 444
@@ -157,7 +182,16 @@ class SandboxReport:
 
 
 def _raw_syscall(number: int, *args: int) -> int:
-    """Prefer the direct trampoline; fall back to libc."""
+    """Prefer the direct trampoline; fall back to libc.
+
+    Raises :class:`RuntimeError` where no syscall facility exists at all:
+    ``ctypes.CDLL(None)`` only means "the libc this process is linked against"
+    on a POSIX host, and calling it off Linux raises a ``TypeError`` from deep
+    inside ``ctypes`` that no caller could act on.
+    """
+    reason = unavailable_reason()
+    if reason is not None:
+        raise RuntimeError(reason)
     try:
         from jocky.rt import raw
 
@@ -174,7 +208,15 @@ def _raw_syscall(number: int, *args: int) -> int:
 
 
 def abi_version() -> Optional[int]:
-    """Landlock ABI version, or ``None`` when the kernel lacks Landlock."""
+    """Landlock ABI version, or ``None`` when Landlock is not there to ask.
+
+    ``None`` covers both "this kernel has no Landlock" and "this host cannot have
+    it at all" (:func:`unavailable_reason`); the return contract is unchanged by
+    platform, and :func:`probe` — the one caller that has to tell the two apart —
+    says which case it is.
+    """
+    if unavailable_reason() is not None:
+        return None
     try:
         return _raw_syscall(SYS_LANDLOCK_CREATE_RULESET, 0, 0,
                             LANDLOCK_CREATE_RULESET_VERSION)
@@ -183,10 +225,27 @@ def abi_version() -> Optional[int]:
 
 
 def probe() -> Dict[str, Any]:
-    """Report availability without changing this process."""
+    """Report availability without changing this process.
+
+    ``available`` is the answer to "can confinement be enforced right now";
+    ``supported`` is the answer to "could it ever be, on this platform". Both are
+    present on every platform so a caller never has to infer the platform from
+    the reason text.
+    """
+    reason = unavailable_reason()
+    if reason is not None:
+        return {
+            "available": False,
+            "supported": False,
+            "abi": None,
+            "levels": list(LEVELS),
+            "network_rights": False,
+            "reason": reason,
+        }
     abi = abi_version()
     return {
         "available": abi is not None and abi >= 1,
+        "supported": True,
         "abi": abi,
         "levels": list(LEVELS),
         "network_rights": abi is not None and abi >= 4,
@@ -285,6 +344,18 @@ def apply(level: str, extra_write: Optional[List[str]] = None,
     caller asked for confinement the kernel cannot provide. Silent downgrade is
     the failure mode that matters here: a script that believes it is sandboxed
     and is not would be worse than no sandbox at all.
+
+    The two kinds of "cannot provide" are answered differently, on purpose:
+
+    * a **Linux host whose kernel lacks Landlock** raises ``RuntimeError``. The
+      host is supposed to be able to enforce, so a caller that asked anyway is
+      better served by a hard stop than by a run that silently was not confined.
+    * a **host with no confinement mechanism at all** (``unavailable_reason()``
+      is not ``None``) returns an unenforced report — ``applied`` is ``False``
+      and ``reason`` names the platform — instead of raising. There is nothing
+      that could be fixed, and raising would make ``--sandbox`` unconditionally
+      fatal on a platform the rest of the runtime still works on. The report is
+      how the refusal reaches the caller: check ``applied``, never assume.
     """
     level = (level or "off").lower()
     if level not in LEVELS:
@@ -292,6 +363,11 @@ def apply(level: str, extra_write: Optional[List[str]] = None,
     report = SandboxReport(level=level)
     if level == "off":
         report.reason = "confinement disabled by request"
+        return report
+
+    reason = unavailable_reason()
+    if reason is not None:
+        report.reason = f"not enforced: {reason}"
         return report
 
     abi = abi_version()

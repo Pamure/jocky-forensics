@@ -12,6 +12,7 @@ Severity scale: `info < low < medium < high < critical`.
 
 | Check | Severity | Data source |
 |---|---|---|
+| `byovd_deleted_driver_file` | high | kernel module list vs the driver's image path (Windows) |
 | `byovd_deleted_module_file` | high | /proc/modules vs /lib/modules/<release> |
 | `byovd_forced_module` | high | /sys/module/<name>/taint (F) |
 | `byovd_kernel_taint` | medium | /proc/sys/kernel/tainted |
@@ -39,6 +40,14 @@ Severity scale: `info < low < medium < high < critical`.
 | `unusual_listener` | low | /proc/net/tcp{,6} + /proc/*/fd |
 
 ## What each check means
+
+### `byovd_deleted_driver_file`
+
+A loaded kernel driver's image file is missing on disk — the Windows ghost-driver signal.
+
+- **Source:** kernel module list vs the driver's image path (Windows)
+- **Severity:** high
+- **Analyst action:** dump the driver from memory and identify who loaded it before the host is rebooted
 
 ### `byovd_deleted_module_file`
 

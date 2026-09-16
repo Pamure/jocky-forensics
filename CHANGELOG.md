@@ -1,5 +1,66 @@
 # Changelog
 
+## [1.6.1] — 2026-09-16
+
+Fixes found by running the runtime against a **real Windows 11 host** (Python
+3.13, non-elevated) rather than the Linux stub-DLL simulation, plus platform
+degradation work. Collection and the language were correct; what was broken was
+the driver inventory, one ctypes call, and every path that assumed Linux.
+
+### Fixed
+- **`winapi.modules()` returned no usable drivers on Windows.**
+  `EnumDeviceDrivers` succeeds on Windows 10/11 while filling its buffer with
+  **zero** base addresses for a non-elevated caller, and
+  `GetDeviceDriverBaseNameW(0, …)` then answers `ntoskrnl.exe` for every entry —
+  244 drivers with 0 distinct names on the test host. Every BYOVD check built on
+  it would have been a blind scan that *looked* clean. Now uses
+  `NtQuerySystemInformation(SystemModuleInformation)`: same host, same token,
+  **244 distinct names** with real image sizes and paths.
+- **`winapi.list_processes()` failed outright with no arguments.**
+  `class _TOKEN_USER(ctypes.Structure)` shadowed the `_TOKEN_USER = 1`
+  information-class constant, so `GetTokenInformation` received a struct type
+  where a DWORD belongs (`ctypes.ArgumentError`). Only processes the account
+  could open reached that line, so a small `list_processes(limit=…)` hid it
+  while the default call — what a script actually makes — raised. The dead
+  struct is deleted and two tests pin the name as an `int` and the prototype's
+  argument as a DWORD.
+- **`jocky build -o FILE --repeat N` silently wrote nothing.** The repeat path
+  returned after printing its uniqueness report, so an explicit `-o` produced
+  exit 0, a JSON report, and no artifact. It now writes the last build and
+  reports `path` and `written_bytes`.
+- **Non-Linux platforms raised host exceptions instead of reporting.**
+  `jocky/rt/raw.py` reached `os.uname()` (Unix-only) and `jocky/sandbox.py`
+  called `ctypes.CDLL(None)` (no libc to bind on Windows), surfacing as
+  `AttributeError`/`TypeError` in `jocky doctor`. Both now report the mechanism
+  as platform-unavailable, and `_check_procfs` probes the backend the platform
+  actually has, so a Windows host verifies `winapi` instead of reporting a
+  missing `/proc` as a failure to fix.
+- `tests/test_diagnostics.py` patched only `sys.modules`, but
+  `from jocky.rt import winapi` resolves the package attribute first once the
+  real module has been imported — so the tests exercised the real module and
+  passed alone while failing in the full suite.
+- BYOVD: Windows crash-dump stack drivers (`dump_*.sys`) are resident with no
+  image on disk **by design** — measured: exactly 3 of 244 on a healthy host.
+  Reported at `info` with the reason, not `high`, so the ghost-driver check
+  keeps its signal.
+
+### Added
+- `byovd_deleted_driver_file` (Windows counterpart of the deleted-`.ko` check)
+  and a coverage finding naming the checks that do not apply on a platform, so
+  "no unsigned drivers" cannot be read as "no such notion here".
+- `docs/INSTALL.md` — install guide for Linux and Windows, Docker, a measured
+  platform capability matrix, and troubleshooting.
+- `scripts/solutions/07_byovd_kernel_integrity.jky`.
+
+### Verified on real Windows
+```
+process table (winapi)   231 process(es) via Toolhelp32 + NtQuerySystemInformation
+network tables           135 socket(s) via GetExtendedTcpTable/GetExtendedUdpTable
+kernel drivers           244 (244 distinct names)
+script -> artifact -> executed from artifact, 0 errors
+jocky ci                 64 builds -> 64 unique hashes, 0 mismatches
+```
+
 ## [1.6.0] — 2026-09-16
 
 Closes the remaining SIH26148 deliverables: the automated CI/CD pipeline
@@ -402,7 +463,8 @@ state-of-the-art review, plus the documentation and installation site.
   hash, audit-hook telemetry (0 child processes, 0 write-mode opens), and a
   live fileless-detection proof. Results in `evidence/report.md`.
 
-[Unreleased]: https://github.com/Pamure/jocky-forensics/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/Pamure/jocky-forensics/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/Pamure/jocky-forensics/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/Pamure/jocky-forensics/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.5.0
 [1.4.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.4.0

@@ -24,6 +24,18 @@ writes raw logs plus `evidence/report.md`.
 
 ## Quickstart
 
+**New here? Read [docs/INSTALL.md](docs/INSTALL.md)** — requirements, install on
+Linux and Windows, Docker, the platform capability matrix, and troubleshooting.
+The short version:
+
+```bash
+git clone https://github.com/Pamure/jocky-forensics.git && cd jocky-forensics
+python3 -m venv venv && ./venv/bin/pip install -e .
+./venv/bin/jocky doctor          # verify the host can run every mode
+```
+
+Then:
+
 ```bash
 # 1. run a script with the built-in triage library
 ./venv/bin/python -m jocky run scripts/triage.jky
@@ -43,15 +55,24 @@ writes raw logs plus `evidence/report.md`.
 # 5. built-in host triage (no script needed)
 ./venv/bin/python -m jocky triage --json
 
-# 6. central management
+# 6. central management, with a web console at the printed URL
 ./venv/bin/python -m jocky serve --port 8443 --token SECRET --state /tmp/jky-server
 ./venv/bin/python -m jocky agent --server https://127.0.0.1:8443 --token SECRET --once
 
-# 7. reproduce all evidence (1000+ builds, 1000+ executions, file/audit deltas)
+# 7. the polymorphic CI gate
+./venv/bin/python -m jocky ci --script scripts/hunt.jky --count 256
+
+# 8. reproduce all evidence (1000+ builds, 1000+ executions, file/audit deltas)
 ./venv/bin/python -m jocky evidence --iterations 1000 --out evidence
 ```
 
-No third-party packages are required — Python 3.12 standard library only, Linux.
+No third-party packages are required — Python 3.12 standard library only.
+
+**Platform support:** Linux is the full-capability platform. Windows collects
+through `ctypes` and runs the language, encoder, CI gate and console; the two
+Linux-only mechanisms (memfd fileless execution, Landlock/seccomp confinement)
+are reported as unavailable rather than silently failing. The capability matrix
+is in [docs/INSTALL.md](docs/INSTALL.md#6-platform-capability-matrix).
 
 ## The language in 20 lines
 
@@ -124,8 +145,18 @@ Measured by the evidence harness, not asserted:
 * Domain fronting needs a real CDN; the client implements the *frontable*
   mechanics (separate SNI and Host, TLS over 443) and says so in `--help`
   rather than pretending a front exists.
-* Windows collection is not implemented: the runtime targets Linux procfs. The
-  language/compiler/encoder and the agent protocol are platform-neutral.
+* **Linux-only mechanisms on Windows.** Collection, the language, the encoder,
+  the CI gate and the management console all run on Windows (verified on
+  Windows 11, Python 3.13, non-elevated: 244 kernel drivers, 231 processes, 135
+  sockets, and a script compiled to an artifact there and executed from it).
+  Fileless memfd execution and Landlock/seccomp confinement do not — there is no
+  equivalent mechanism — and `jocky doctor` reports each as platform-unavailable
+  rather than as a missing install. The full matrix is in
+  [docs/INSTALL.md](docs/INSTALL.md#6-platform-capability-matrix).
+* **Kernel load addresses are withheld on Windows** from a non-elevated caller.
+  Driver *names*, *sizes* and *paths* are still authoritative (they come from
+  `NtQuerySystemInformation`), which is what BYOVD matching keys on; only the
+  base address reads zero.
 
 ## Measured results
 
@@ -160,6 +191,7 @@ scripts/*.jky   triage, hunt, inventory, timeline, watch, smoke, evidence
 tests/          language semantics, runtime collectors, live detection, encoder, agent
 evidence/       generated proof: raw logs + report.md
 docs/DESIGN.md  deeper design notes: language spec, artifact format, telemetry matrix
+docs/INSTALL.md install guide: Linux, Windows, Docker, capability matrix, troubleshooting
 research/       background research behind the design (EDR evasion, in-memory
                 execution, BYOVD, CDN fronting, DSL security, network forensics)
 knowledge.md    consolidated problem-statement analysis and citation index
