@@ -350,14 +350,14 @@ duration, finding and error counts, plus `exe` when the run reported one),
 what was not delivered). A journal that cannot be written prints a warning and
 never stops collection.
 
-## Frontable SNI — what it does, and what it cannot do
+## Ingress selection — and why this is not domain fronting
 
 `--sni NAME` makes the agent connect to the address in `--server` while the TLS
-ClientHello presents `NAME` and the HTTP request carries `Host: NAME`. That is
-the client-side mechanic domain fronting needs, and it is a capability, not a
-front. Measured end to end with the agent's own transport against a TLS listener
+ClientHello presents `NAME`; `--host-header NAME` sets the HTTP `Host`
+independently. Together they are what a **shared ingress answering for several
+virtual hosts** needs, and they are measured end to end against a TLS listener
 holding the management server's certificate — both requests went to the same
-socket address, `127.0.0.1:8444`, and the server side saw:
+socket address, `127.0.0.1:8444`:
 
 ```text
 plain    client dialled 127.0.0.1:8444, sni=None -> HTTP 204
@@ -380,14 +380,23 @@ jocky-agent: pinned server certificate a3ebf074317b95bc…
 jocky-agent agt_94324050ccae22cc polling https://127.0.0.1:8443 (journal /tmp/jky-docs/agent-sni/journal.jsonl)
 ```
 
-What it cannot do, stated plainly: **it hides nothing by itself.** The TCP
-connection still goes to the address in `--server`, so anyone on the path sees the
-real destination address; only the name inside the TLS handshake differs. Real
-domain fronting needs a CDN whose edge answers for the fronted name, terminates
-TLS for it and forwards to the origin — a third party that must exist, be
-reachable and be willing. Nothing about `--sni` creates that, no CDN is involved
-in a local run, and none is claimed: treat the flag as a way to test a deployment
-that already has a front, never as a substitute for one. The reasoning is in
+**This is not domain fronting, and this page previously said it was.** The
+measurement above is precisely why: both fields carried the *same* name
+(`SNI=fronted.example`, `Host: fronted.example`), because one parameter set
+both. Fronting is defined by the mismatch — an SNI for a high-reputation domain
+with a `Host` for the real origin, routed by a CDN that reads the inner header.
+A capability that cannot express the mismatch cannot express the technique.
+
+Fronting is also no longer available to anyone: Google closed it in 2018,
+Cloudflare and AWS in 2020, Azure across Front Door and CDN, and Fastly by 2024.
+A current deployment that wants to blend in does something else — terminate
+ordinary HTTPS at a CDN on a domain the operator owns (the Cloudflare Tunnel
+shape), which is a *deployment* choice, not a client flag, and is not claimed
+here.
+
+What the two flags legitimately do: pick a virtual host when the connection was
+dialled by address, and present a name the certificate actually carries. Treat
+them as ingress configuration, never as obfuscation. The reasoning is in
 `research/cdn_fronting.md`, and the module docstring says the same thing where
 the code lives.
 

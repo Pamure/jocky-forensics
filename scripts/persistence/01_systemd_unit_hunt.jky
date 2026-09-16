@@ -1,0 +1,378 @@
+# 01_systemd_unit_hunt.jky — which systemd units are local additions, and what
+# exactly do they execute?
+#
+# The problem this answers
+# ------------------------
+# A unit file is a root-owned recipe for running a program, and installing one
+# needs no compiler, no exploit and no listening socket: write a file in
+# /etc/systemd/system, enable it, and the program runs as root on every boot.
+# Because that directory is *supposed* to contain operator-written units, its
+# contents cannot be judged by location. They have to be judged by content — is
+# the ExecStart in a system directory, does it wrap a shell, does it fetch
+# something, is the file it names even still there.
+#
+# What the output gives you
+# -------------------------
+# ``systemd_unit``                  one row per local unit file: name, type,
+#                                   user it runs as, every Exec* line, and
+#                                   whether a .wants symlink enables it.
+# ``systemd_drop_in``               an override file (<unit>.service.d/*.conf).
+#                                   Drop-ins are how a legitimate unit's
+#                                   ExecStart is replaced without touching the
+#                                   original, and they are the part of a unit
+#                                   nobody reads.
+# ``unit_executes_outside_system_paths``
+#                                   ExecStart points into /home, /root, /tmp,
+#                                   /dev/shm, /mnt or /media instead of
+#                                   /usr, /bin, /sbin, /lib, /opt or /etc.
+# ``unit_shell_wrapper_exec``       ExecStart is `sh -c …` or `bash -c …`, i.e.
+#                                   the real command is inside a string and is
+#                                   invisible to anything that inspects paths.
+# ``unit_risky_command``            a matched fetch-and-execute, decode, reverse
+#                                   shell or drop-zone pattern, with the
+#                                   ExecStart line as evidence.
+# ``unit_exec_missing``             the binary named by ExecStart is not on
+#                                   disk. A unit that references a deleted file
+#                                   is what is left after an implant is cleaned
+#                                   up — or after a package removal that forgot
+#                                   its unit.
+# ``unit_enabled_symlink_dangling`` an enablement symlink whose target no longer
+#                                   exists.
+# ``unit_file_insecure``            a unit file a non-root user can write.
+#
+# Read ``systemd_unit`` rows for the inventory, then the graded kinds. The
+# summary row names how many units are enabled, because "the attacker added a
+# unit" and "the attacker added and enabled a unit" are different claims.
+
+# -----------------------------------------------------------------------------
+# 1. Local unit directories
+# -----------------------------------------------------------------------------
+# /usr/lib/systemd/system is deliberately not scanned: everything in it is
+# distribution-provided, and a check that reports 400 packaged units teaches the
+# operator to ignore the report. Swap the list to widen the hunt.
+let local_dirs = ["/etc/systemd/system", "/run/systemd/system"]
+
+let system_path_prefixes = ["/usr/", "/bin/", "/sbin/", "/lib/", "/lib64/",
+                            "/opt/", "/etc/", "/snap/", "/var/lib/"]
+
+let risky_patterns = [
+  [r"(curl|wget)[^|]{0,160}\|\s*(ba|z|da)?sh\b", "download-and-execute", "critical"],
+  [r"/dev/tcp/", "bash-reverse-shell", "critical"],
+  [r"(base64|xxd)\s+(-d|--decode|-r)", "encoded-payload", "high"],
+  [r"nc[a-z]*\s+[^\n]{0,80}\s-e\b", "netcat-exec", "critical"],
+  [r"(chmod\s+\+x|chattr\s+-i)", "permission-change", "medium"],
+  [r"(/tmp/|/var/tmp/|/dev/shm/|/run/shm/)", "references-drop-zone", "high"],
+  [r"(history\s+-c|rm\s+-rf?\s+/var/log)", "log-tampering", "high"]
+]
+
+fn first_hit(patterns, text) {
+  for row in patterns {
+    if re.test(row[0], text) {
+      return row
+    }
+  }
+  return nil
+}
+
+fn insecure_perms(entry) {
+  if entry.uid != 0 and entry.uid != nil {
+    return true
+  }
+  return entry.world_writable or entry.mode_str.substr(5, 6) == "w"
+}
+
+fn grade_exec(unit_path, key, value) {
+  if value == "" {
+    return 0
+  }
+  # `ExecStart=` with no value resets the list; everything else is a command.
+  let hit = first_hit(risky_patterns, value)
+  if hit != nil {
+    emit {
+      "kind": "unit_risky_command",
+      "severity": hit[2],
+      "unit": unit_path,
+      "directive": key,
+      "pattern": hit[1],
+      "exec": value.substr(0, 400),
+      "recommendation": "read the full command before disabling the unit; the payload it pulls is the evidence, and disabling the unit does not remove it"
+    }
+  }
+  if re.test(r"(ba|z|da|c)?sh\s+-c\b", value) {
+    emit {
+      "kind": "unit_shell_wrapper_exec",
+      "severity": "high",
+      "unit": unit_path,
+      "directive": key,
+      "exec": value.substr(0, 400),
+      "recommendation": "unwrap the shell string: a unit that runs `sh -c` hides its real command from every path-based check, and packaging conventions do not need it"
+    }
+  }
+  return 0
+}
+
+fn grade_exec_path(unit_path, key, value) {
+  if value == "" or not value.starts_with("/") {
+    return 0
+  }
+  # systemd prefixes an exec line with characters that change failure handling
+  # or privileges (-, +, !, !!, @, :); they are not part of the path.
+  let cleaned = value
+  let guard = 0
+  while cleaned != "" and guard < 6 {
+    let first = cleaned.substr(0, 1)
+    if first == "-" or first == "+" or first == "!" or first == "@" or first == ":" {
+      set cleaned = cleaned.substr(1, 400)
+      set guard = guard + 1
+    } else {
+      set guard = 6
+    }
+  }
+  let tokens = cleaned.split()
+  if len(tokens) == 0 {
+    return 0
+  }
+  let binary = tokens[0]
+
+  let inside = false
+  for prefix in system_path_prefixes {
+    if binary.starts_with(prefix) {
+      set inside = true
+    }
+  }
+  if not inside and binary.starts_with("/") {
+    emit {
+      "kind": "unit_executes_outside_system_paths",
+      "severity": "medium",
+      "unit": unit_path,
+      "directive": key,
+      "binary": binary,
+      "exec": value.substr(0, 400),
+      "recommendation": "a service binary outside /usr, /bin, /sbin, /lib, /opt, /etc or /snap is either a local build or a dropped payload; hash it and check its mtime against the unit's install date"
+    }
+  }
+  if not fs.exists(binary) {
+    emit {
+      "kind": "unit_exec_missing",
+      "severity": "low",
+      "unit": unit_path,
+      "directive": key,
+      "binary": binary,
+      "exec": value.substr(0, 400),
+      "recommendation": "the binary this unit names is not on disk: the unit may be stale, or it may be the leftover of a payload whose file was deleted after being run"
+    }
+  }
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# 2. Walk the local unit directories
+# -----------------------------------------------------------------------------
+# Depth 3 reaches <unit>.service.d/override.conf drop-ins and *.wants symlinks.
+let unit_files = []
+let drop_ins = []
+let enable_symlinks = []
+
+for dir in local_dirs {
+  if not fs.exists(dir) {
+    continue
+  }
+  for entry in fs.scan(dir, 600, nil, 3) {
+    if entry.is_dir {
+      continue
+    }
+    if entry.is_link {
+      enable_symlinks.push(entry)
+      continue
+    }
+    if contains(".d/", entry.path) and entry.path.ends_with(".conf") {
+      drop_ins.push(entry)
+      continue
+    }
+    unit_files.push(entry)
+  }
+}
+
+# Enabled state is a symlink under a *.wants or *.requires directory, so the
+# symlink inventory is what answers "will this run at boot".
+let enabled_names = {}
+let dangling = 0
+for link in enable_symlinks {
+  let name = fs.basename(link.path)
+  enabled_names.set(name, true)
+  let target = link.get("target", nil)
+  if target != nil and not fs.exists(link.path) {
+    set dangling = dangling + 1
+    emit {
+      "kind": "unit_enabled_symlink_dangling",
+      "severity": "medium",
+      "symlink": link.path,
+      "target": target,
+      "recommendation": "the unit this symlink enables is gone while the enablement remains: that is a deletion after the fact, and the unit's name is what tells you what was removed"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 3. The units themselves
+# -----------------------------------------------------------------------------
+let unit_count = 0
+let rooted_count = 0
+for entry in unit_files {
+  set unit_count = unit_count + 1
+  let content = ""
+  let readable = true
+  try {
+    set content = fs.read(entry.path, 65536)
+  } catch e {
+    set readable = false
+  }
+
+  let execs = []
+  let exec_lines = []
+  let unit_user = "root"
+  let unit_type = "simple"
+  let wanted_by = []
+  let environment_files = []
+  for raw in content.lines() {
+    let text = raw.strip()
+    if text == "" or text.starts_with("#") or text.starts_with(";") {
+      continue
+    }
+    if text.starts_with("Exec") {
+      execs.push(text)
+      let parts = text.split("=")
+      if len(parts) == 2 {
+        exec_lines.push([parts[0], parts[1]])
+      }
+      continue
+    }
+    if text.starts_with("User=") {
+      set unit_user = text.substr(5, 120)
+      continue
+    }
+    if text.starts_with("Type=") {
+      set unit_type = text.substr(5, 60)
+      continue
+    }
+    if text.starts_with("WantedBy=") {
+      wanted_by.push(text.substr(9, 120))
+      continue
+    }
+    if text.starts_with("EnvironmentFile=") {
+      environment_files.push(text.substr(16, 200))
+    }
+  }
+
+  let name = fs.basename(entry.path)
+  let enabled = enabled_names.has(name)
+  if enabled {
+    set rooted_count = rooted_count + 1
+  }
+
+  emit {
+    "kind": "systemd_unit",
+    "severity": "info",
+    "unit": entry.path,
+    "name": name,
+    "user": unit_user,
+    "type": unit_type,
+    "enabled": enabled,
+    "wanted_by": wanted_by,
+    "environment_files": environment_files,
+    "exec": execs,
+    "mtime": entry.mtime,
+    "modified_iso": time.iso(entry.mtime),
+    "modified_in_last_30_days": entry.mtime > time.now() - 30 * 24 * 3600,
+    "readable": readable,
+    "note": "enabled is derived from a *.wants/*.requires symlink in the scanned directories; a unit enabled from another drop-in directory would not show it"
+  }
+
+  if insecure_perms(entry) {
+    emit {
+      "kind": "unit_file_insecure",
+      "severity": "high",
+      "unit": entry.path,
+      "mode": entry.mode,
+      "uid": entry.uid,
+      "recommendation": "restore root:root 0644; a unit file any user can rewrite starts a program of their choosing as root on the next boot"
+    }
+  }
+
+  # Recency is only reported for units that *execute* something, and never for
+  # /run/systemd/system: that directory is written by systemd's generators on
+  # every boot, so every file in it looks freshly modified on every host. The
+  # same is true of .mount units, which snapd rewrites on each refresh — an
+  # mtime there describes the package manager, not an intruder. The inventory
+  # row above still carries the timestamp for those units, so nothing is hidden;
+  # only the graded finding is withheld, because a finding that fires on a
+  # healthy host is a finding nobody reads.
+  let executes = len(execs) > 0
+  let generated = entry.path.starts_with("/run/systemd/system")
+  if executes and not generated and entry.mtime > time.now() - 30 * 24 * 3600 {
+    emit {
+      "kind": "unit_modified_recently",
+      "severity": "low",
+      "unit": entry.path,
+      "mtime": entry.mtime,
+      "modified_iso": time.iso(entry.mtime),
+      "exec": execs,
+      "recommendation": "confirm this unit against the change record; a unit that executes something and was edited during an incident window is the cheapest persistence there is"
+    }
+  }
+
+  for pair in exec_lines {
+    grade_exec(entry.path, pair[0], pair[1])
+    grade_exec_path(entry.path, pair[0], pair[1])
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 4. Drop-ins: the override nobody reads
+# -----------------------------------------------------------------------------
+# A drop-in can replace ExecStart of a distribution unit without changing the
+# unit file, so a package-managed service can end up running something else
+# while every package hash still verifies.
+let drop_in_count = 0
+for entry in drop_ins {
+  set drop_in_count = drop_in_count + 1
+  let content = ""
+  try {
+    set content = fs.read(entry.path, 32768)
+  } catch e {
+    set content = ""
+  }
+  let overrides = []
+  for raw in content.lines() {
+    let text = raw.strip()
+    if text.starts_with("Exec") or text.starts_with("User=") or text.starts_with("Environment=") {
+      overrides.push(text.substr(0, 300))
+    }
+  }
+  emit {
+    "kind": "systemd_drop_in",
+    "severity": "info",
+    "path": entry.path,
+    "overrides": overrides,
+    "mtime": entry.mtime,
+    "modified_in_last_30_days": entry.mtime > time.now() - 30 * 24 * 3600,
+    "recommendation": "read the drop-in together with the unit it overrides: an override that rewrites ExecStart or Environment changes the service without touching any file the package manager tracks"
+  }
+  for line in overrides {
+    grade_exec(entry.path, "drop-in", line)
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 5. Summary
+# -----------------------------------------------------------------------------
+emit {
+  "kind": "systemd_unit_summary",
+  "severity": "info",
+  "local_units": unit_count,
+  "enabled_units": rooted_count,
+  "drop_ins": drop_in_count,
+  "enablement_symlinks": len(enable_symlinks),
+  "dangling_enablement_symlinks": dangling,
+  "note": "only /etc/systemd/system and /run/systemd/system are scanned, so this is the *local* layer of the unit set — distribution units under /usr/lib/systemd/system are excluded on purpose"
+}

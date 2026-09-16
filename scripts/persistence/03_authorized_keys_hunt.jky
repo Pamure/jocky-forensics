@@ -1,0 +1,418 @@
+# 03_authorized_keys_hunt.jky — which SSH keys log in as which account, and what
+# does each one let the holder do?
+#
+# The problem this answers
+# ------------------------
+# An authorized_keys line is a permanent credential that needs no password, no
+# MFA prompt and no network exposure beyond the SSH daemon the host already runs.
+# It is the most common persistence found in real intrusions, and it is also the
+# one an analyst tends to skim: a file full of base64 looks uniform, but the
+# *options* column decides whether that key gets a shell or a single command, and
+# whether it can inject environment variables into the session.
+#
+# What each finding means
+# -----------------------
+# ``authorized_key``                  one row per key: account, file, line, key
+#                                     type, comment, options, and the SHA-256 of
+#                                     the key blob so two hosts can be compared.
+#                                     The fingerprint is not in OpenSSH's
+#                                     `SHA256:base64` form — it is a hex digest
+#                                     of the same blob, which is enough to match
+#                                     keys across hosts and files.
+# ``authorized_key_environment_injection``
+#                                     the key carries `environment=`. That option
+#                                     sets variables in the login session, so it
+#                                     is a way to reach LD_PRELOAD and PATH
+#                                     without touching any file on disk.
+# ``authorized_key_forced_command``   the key is limited to one command. Legit for
+#                                     backups and rsync — and a way to pin a
+#                                     payload that runs on every connection.
+# ``authorized_key_weak_type``        ssh-dss (broken) or ssh-rsa (SHA-1). Kept at
+#                                     low/high for the specific type rather than
+#                                     lumped together, because one is a finding
+#                                     to fix this week and the other is a
+#                                     cleanup item.
+# ``authorized_key_shared_between_accounts``
+#                                     the same key blob appears in two accounts'
+#                                     files. One key that opens both a service
+#                                     account and root is how lateral movement
+#                                     stays invisible.
+# ``authorized_key_duplicated_in_account``
+#                                     the same key listed twice for one account:
+#                                     not an access change, but a sign the file
+#                                     was hand-edited.
+# ``authorized_keys_insecure_permissions``
+#                                     a key file or its .ssh directory can be
+#                                     written by a group or by everyone.
+# ``authorized_keys_unreadable``      the file exists and could not be read, so a
+#                                     clean sweep is never reported as clean.
+#
+# Accounts come from /etc/passwd, so this walks the same set of homes a login
+# would, and no more.
+
+let key_types = ["ssh-rsa", "ssh-dss", "ssh-ed25519", "ecdsa-sha2-nistp256",
+                 "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+                 "sk-ssh-ed25519@openssh.com", "sk-ecdsa-sha2-nistp256@openssh.com",
+                 "ssh-ed448", "ssh-xmss@openssh.com"]
+
+fn is_key_type(token) {
+  for kind in key_types {
+    if token == kind {
+      return true
+    }
+  }
+  return false
+}
+
+fn is_pseudo_home(home) {
+  # Service accounts in /etc/passwd carry /dev, /proc and /run/... as their home
+  # (sys:/dev, rtkit:/proc, avahi:/run/avahi-daemon). They are not user
+  # directories, walking them is refused by fs.scan by design, and counting them
+  # would inflate every "accounts checked" figure in the summary.
+  for pseudo in ["/dev", "/proc", "/sys", "/run"] {
+    if home == pseudo or home.starts_with(pseudo + "/") {
+      return true
+    }
+  }
+  return false
+}
+
+fn accounts_homes() {
+  # (uid, name, home) from /etc/passwd — the same source sshd uses to decide
+  # which directory belongs to which account.
+  let homes = []
+  let content = ""
+  try {
+    set content = fs.read("/etc/passwd", 262144)
+  } catch e {
+    return homes
+  }
+  for raw in content.lines() {
+    let text = raw.strip()
+    if text == "" or text.starts_with("#") {
+      continue
+    }
+    let fields = text.split(":")
+    if len(fields) < 7 {
+      continue
+    }
+    let home = fields[5]
+    if not home.starts_with("/") {
+      continue
+    }
+    if home == "/" or contains("nonexistent", home) or is_pseudo_home(home) {
+      continue
+    }
+    homes.push({"name": fields[0], "uid": fields[2], "shell": fields[6], "home": home})
+  }
+  return homes
+}
+
+fn option_value(options, prefix) {
+  # `command="…"` and `environment="…"` may contain commas and spaces, so the
+  # option string is searched rather than split. Returns the raw option text.
+  let hits = filter(options, fn(chunk) { return chunk.starts_with(prefix) })
+  if len(hits) > 0 {
+    return hits[0]
+  }
+  return nil
+}
+
+fn split_options(text) {
+  # Options are comma-separated, except inside quotes. This is a deliberately
+  # small parser: it handles the two shapes that matter (a plain flag list and a
+  # `command="…"` value) and treats anything it cannot parse as one option,
+  # which keeps the finding intact instead of dropping the line.
+  let options = []
+  let current = ""
+  let in_quote = false
+  for character in text.chars() {
+    if character == "\"" {
+      set in_quote = not in_quote
+      continue
+    }
+    if character == "," and not in_quote {
+      options.push(current)
+      set current = ""
+      continue
+    }
+    set current = current + character
+  }
+  if current != "" {
+    options.push(current)
+  }
+  return options
+}
+
+let insecure_count = 0
+let unreadable_count = 0
+let key_count = 0
+let files_scanned = 0
+let accounts_with_keys = 0
+let blob_users = {}
+let accounts_seen = {}
+
+fn examine_keys(account, path) {
+  set files_scanned = files_scanned + 1
+  let metadata = fs.stat(path)
+  let content = ""
+  let readable = true
+  try {
+    set content = fs.read(path, 262144)
+  } catch e {
+    set readable = false
+  }
+
+  if metadata != nil {
+    # sshd itself refuses a key file that others can write, so a world-writable
+    # file is both a finding and a reason why the keys in it are not the keys in
+    # use — the operator needs to know which of the two they are looking at.
+    let group_or_world_write = metadata.world_writable or metadata.mode_str.substr(5, 6) == "w"
+    if group_or_world_write {
+      set insecure_count = insecure_count + 1
+      emit {
+        "kind": "authorized_keys_insecure_permissions",
+        "severity": "high",
+        "path": path,
+        "account": account,
+        "mode": metadata.mode,
+        "mode_str": metadata.mode_str,
+        "uid": metadata.uid,
+        "recommendation": "set 0600 and correct the owner: sshd ignores a key file that other users can write, so until this is fixed the host is either refusing a legitimate key or a non-root user can add one"
+      }
+    }
+  }
+
+  if not readable {
+    set unreadable_count = unreadable_count + 1
+    emit {
+      "kind": "authorized_keys_unreadable",
+      "severity": "low",
+      "path": path,
+      "account": account,
+      "reason": "read denied for this run's uid",
+      "note": "this key file was not inspected; an unprivileged sweep of ~/.ssh is partial by construction and must say so"
+    }
+    return 0
+  }
+
+  let index = 0
+  let account_keys = 0
+  for raw in content.lines() {
+    set index = index + 1
+    let text = raw.strip()
+    if text == "" or text.starts_with("#") {
+      continue
+    }
+    let tokens = text.split()
+    let key_index = -1
+    let position = 0
+    for token in tokens {
+      if is_key_type(token) {
+        set key_index = position
+        break
+      }
+      set position = position + 1
+    }
+    if key_index < 0 or key_index + 1 >= len(tokens) {
+      emit {
+        "kind": "authorized_keys_unparsed_line",
+        "severity": "low",
+        "path": path,
+        "account": account,
+        "line": index,
+        "line_text": text.substr(0, 200),
+        "note": "no recognised key type on this line; it is either malformed or written in a format this parser does not know"
+      }
+      continue
+    }
+
+    set key_count = key_count + 1
+    set account_keys = account_keys + 1
+    let key_kind = tokens[key_index]
+    let blob = tokens[key_index + 1]
+    let comment = join(tokens.slice(key_index + 2), " ")
+    let options = []
+    if key_index > 0 {
+      set options = split_options(join(tokens.slice(0, key_index), " "))
+    }
+    let blob_digest = fs.hash_bytes(blob)
+    let holders = blob_users.get(blob_digest, [])
+    holders.push(account + ":" + str(index))
+    blob_users.set(blob_digest, holders)
+
+    emit {
+      "kind": "authorized_key",
+      "severity": "info",
+      "account": account,
+      "path": path,
+      "line": index,
+      "key_type": key_kind,
+      "comment": comment.substr(0, 200),
+      "options": options,
+      "has_options": len(options) > 0,
+      "blob_sha256": blob_digest
+    }
+
+    if key_kind == "ssh-dss" {
+      emit {
+        "kind": "authorized_key_weak_type",
+        "severity": "high",
+        "account": account,
+        "path": path,
+        "line": index,
+        "key_type": key_kind,
+        "recommendation": "remove and replace this key: DSA is broken, and the only reason one still exists is that nothing forced its owner to rotate it"
+      }
+    }
+    if key_kind == "ssh-rsa" {
+      emit {
+        "kind": "authorized_key_weak_type",
+        "severity": "low",
+        "account": account,
+        "path": path,
+        "line": index,
+        "key_type": key_kind,
+        "recommendation": "plan a migration to ed25519: ssh-rsa relies on SHA-1 signatures by default, so it is a cleanup item rather than an incident"
+      }
+    }
+
+    let forced = option_value(options, "command=")
+    if forced != nil {
+      emit {
+        "kind": "authorized_key_forced_command",
+        "severity": "medium",
+        "account": account,
+        "path": path,
+        "line": index,
+        "option": forced.substr(0, 300),
+        "recommendation": "read the forced command: restricting a key to one command is how a backup job is secured, and it is also how a payload is pinned to run on every connection — the command itself is the evidence"
+      }
+    }
+
+    let env = option_value(options, "environment=")
+    if env != nil {
+      emit {
+        "kind": "authorized_key_environment_injection",
+        "severity": "critical",
+        "account": account,
+        "path": path,
+        "line": index,
+        "option": env.substr(0, 300),
+        "recommendation": "treat this key as remote code execution: environment= sets variables in the logged-in session, so LD_PRELOAD or PATH can be pointed at attacker-controlled content without writing any file on disk"
+      }
+    }
+  }
+
+  if account_keys > 0 {
+    accounts_seen.set(account, true)
+    set accounts_with_keys = len(keys(accounts_seen))
+    emit {
+      "kind": "account_ssh_access",
+      "severity": "info",
+      "account": account,
+      "path": path,
+      "keys": account_keys,
+      "note": "every key listed here can open a session as this account without a password prompt; this row is what a credential-inventory report quotes"
+    }
+  }
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# 1. Per-account key files
+# -----------------------------------------------------------------------------
+let homes = accounts_homes()
+for entry in homes {
+  for name in ["/.ssh/authorized_keys", "/.ssh/authorized_keys2", "/.ssh/authorized_keys.d"] {
+    let path = entry.home + name
+    if not fs.exists(path) {
+      continue
+    }
+    let metadata = fs.stat(path)
+    if metadata != nil and metadata.is_dir {
+      for nested in fs.scan(path, 50, nil, 1) {
+        if not nested.is_dir {
+          examine_keys(entry.name, nested.path)
+        }
+      }
+      continue
+    }
+    examine_keys(entry.name, path)
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 2. The system-wide key file Debian-style setups use
+# -----------------------------------------------------------------------------
+# AuthorizedKeysFile may point at a per-user file owned by root, in which case
+# the account's home directory contains no key at all and a home-only sweep
+# reports the host as keyless.
+let system_keys_dir = "/etc/ssh/authorized_keys"
+if fs.exists(system_keys_dir) {
+  for nested in fs.scan(system_keys_dir, 200, nil, 1) {
+    if not nested.is_dir {
+      examine_keys(fs.basename(nested.path), nested.path)
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 3. Keys that open more than one account
+# -----------------------------------------------------------------------------
+# Reported after the sweep so a shared key is named once, with every account it
+# reaches, rather than once per account.
+let shared = 0
+let duplicated = 0
+for digest in keys(blob_users) {
+  let holders = blob_users[digest]
+  if len(holders) < 2 {
+    continue
+  }
+  # The holders are "account:line" pairs, so the account names are what decide
+  # whether this is one key in two accounts or the same key listed twice in one
+  # — two very different findings that a raw line count would merge.
+  let owners = []
+  for holder in holders {
+    owners.push(holder.split(":")[0])
+  }
+  let distinct = owners.unique()
+  if len(distinct) > 1 {
+    set shared = shared + 1
+    emit {
+      "kind": "authorized_key_shared_between_accounts",
+      "severity": "medium",
+      "blob_sha256": digest,
+      "accounts": distinct,
+      "holders": holders,
+      "recommendation": "find out who holds this private key: one key in several accounts is how an operator manages a fleet and how an intruder keeps access after the obvious account is cleaned up"
+    }
+  } else {
+    set duplicated = duplicated + 1
+    emit {
+      "kind": "authorized_key_duplicated_in_account",
+      "severity": "low",
+      "blob_sha256": digest,
+      "account": distinct[0],
+      "holders": holders,
+      "recommendation": "the same key is listed more than once for this account; harmless for access, but it means the file was edited by hand and is worth reading in full"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 4. Summary
+# -----------------------------------------------------------------------------
+emit {
+  "kind": "authorized_keys_summary",
+  "severity": "info",
+  "files_scanned": files_scanned,
+  "keys": key_count,
+  "accounts_with_keys": accounts_with_keys,
+  "accounts_checked": len(homes),
+  "shared_key_blobs": shared,
+  "duplicated_key_blobs": duplicated,
+  "insecure_key_files": insecure_count,
+  "unreadable_key_files": unreadable_count,
+  "note": "files_scanned counts only files that exist; if unreadable_key_files > 0 the inventory is partial and the operator should re-run with privilege before signing off"
+}

@@ -367,3 +367,75 @@ def test_deeply_nested_source_is_reported_not_crashed(source):
         compile_source(source)
     assert "too deeply" in str(excinfo.value)
     assert not isinstance(excinfo.value, RecursionError)
+
+
+def test_break_in_a_nested_for_loop_ends_only_that_loop():
+    """Regression: ``break`` inside a nested ``for`` left the inner iterator on
+    the operand stack.
+
+    ITER_NEXT pops the iterator when a loop ends by exhaustion; leaving by
+    ``break`` jumped to the loop end without popping, so the *enclosing* loop's
+    ITER_NEXT found the inner iterator at the top of the stack and replayed the
+    inner sequence. The outer variable was rebound to the inner values and the
+    outer loop never terminated — it ran until the wall-clock budget stopped it,
+    which is why this is pinned by behaviour and not by a peek at the stack.
+    """
+    result = run("""
+let seen = []
+for a in ["A1", "A2", "A3"] {
+  for b in [1, 2, 3] {
+    if b == 2 { break }
+    seen.push(str(a) + ":" + str(b))
+  }
+  seen.push("after-" + str(a))
+}
+emit seen
+""")
+    assert result.errors == [], result.errors
+    # One inner iteration per outer pass (b==2 breaks), then the outer tail.
+    assert result.findings[0] == [
+        "A1:1", "after-A1", "A2:1", "after-A2", "A3:1", "after-A3"]
+
+
+def test_break_in_a_nested_while_inside_a_for_does_not_unbalance_the_stack():
+    """A ``while`` keeps nothing on the stack, so its ``break`` must not pop.
+
+    The mirror of the test above: the fix has to distinguish the two loop kinds,
+    and a blanket POP would break this one by popping the enclosing ``for``'s
+    iterator instead.
+    """
+    result = run("""
+let seen = []
+for a in [1, 2] {
+  let n = 0
+  while true {
+    set n = n + 1
+    if n == 2 { break }
+  }
+  seen.push(str(a) + "=" + str(n))
+}
+emit seen
+""")
+    assert result.errors == [], result.errors
+    assert result.findings[0] == ["1=2", "2=2"]
+
+
+def test_break_out_of_three_nested_loops_returns_to_the_right_level():
+    """Each ``break`` must pop exactly its own loop's iterator, no more."""
+    result = run("""
+let trace = []
+for a in [1, 2] {
+  for b in [1, 2] {
+    for c in [1, 2] {
+      trace.push(str(a) + str(b) + str(c))
+      break
+    }
+    trace.push("mid" + str(a) + str(b))
+    break
+  }
+  trace.push("outer" + str(a))
+}
+emit trace
+""")
+    assert result.errors == [], result.errors
+    assert result.findings[0] == ["111", "mid11", "outer1", "211", "mid21", "outer2"]

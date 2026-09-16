@@ -1,0 +1,275 @@
+# 05_mount_policy_inventory.jky — what is mounted, and is any of it mounted
+# somewhere that hides the filesystem beneath it?
+#
+# The problem this answers
+# ------------------------
+# A mount is a rename of reality. Mount an ext4 image or a tmpfs over /etc and
+# every tool on the host reads the attacker's copy of /etc — including the
+# `ls`, `cat` and `sha256sum` an analyst runs. This is not exotic: it is how a
+# live response gets quietly defeated, and it is invisible to any check that
+# reads files without asking the mount table first. The second question is the
+# one the distro's hardening checklist asks: is a world-writable directory
+# mounted such that it can be executed from, or a removable one mounted without
+# nosuid/nodev?
+#
+# Output shape
+# ------------
+# ``mount``                              the inventory row: device, mountpoint,
+#                                        fstype, options, and the three flags
+#                                        (noexec/nosuid/nodev) decoded.
+# ``sensitive_path_masked``              a mount on a path that defines the
+#                                        system's identity (/etc, /bin, /lib*,
+#                                        /usr, /boot, /var/lib, /root, ...).
+#                                        High, because the mask makes every
+#                                        later collection step wrong.
+# ``duplicate_mount_on_sensitive_path``  two mounts on the same sensitive path.
+#                                        The upper one wins; the one it hides
+#                                        is unreadable until it is unmounted.
+# ``mount_device_in_drop_zone``           a mount whose *source* is a file path
+#                                        outside /dev — a loop image dropped in
+#                                        /tmp or /home and mounted.
+# ``exec_from_writable_mount``            /tmp, /var/tmp or /dev/shm mounted
+#                                        without `noexec`
+# ``removable_media_without_hardening``   /dev/sd*, /dev/nvme*, /dev/mmcblk*,
+#                                        /dev/sr* mounted without nosuid/nodev.
+# ``network_filesystem_mount``            nfs/cifs/9p/fuse mounted on a local
+#                                        system path. An attacker with control
+#                                        of the server can serve a replaced
+#                                        /home or /usr.
+#
+# ``mount_inventory_summary`` closes the run with the counts and the fstype
+# histogram, which is what a reviewer skims before reading the findings.
+#
+# Collection note: /proc/mounts is read by the kernel, not by `mount`, so this
+# works in a container and while the host is under load. Nothing is mounted,
+# unmounted or remounted by this script.
+
+let mounts = sys.mounts()
+
+# Pseudo filesystems are excluded from the inventory: their presence is
+# kernel-defined, and listing 60 of them buries the four mounts that matter.
+let pseudo_fstypes = ["proc", "sysfs", "devpts", "cgroup", "cgroup2", "tmpfs",
+                      "devtmpfs", "securityfs", "debugfs", "tracefs", "bpf",
+                      "pstore", "mqueue", "hugetlbfs", "configfs", "fusectl",
+                      "binfmt_misc", "autofs", "efivarfs", "ramfs", "rpc_pipefs",
+                      "nsfs", "overlay", "squashfs"]
+
+# Paths whose contents define what the system *is*. A second filesystem
+# appearing on one of these is the finding this script exists for.
+let sensitive_paths = ["/etc", "/bin", "/sbin", "/lib", "/lib64", "/lib32",
+                       "/usr", "/boot", "/root", "/home", "/var/log",
+                       "/var/lib", "/var/spool", "/opt", "/tmp", "/srv"]
+
+let writable_tmp_paths = ["/tmp", "/var/tmp", "/dev/shm", "/run/shm"]
+
+let network_fstypes = ["nfs", "nfs4", "cifs", "smb3", "smbfs", "9p", "fuse.sshfs",
+                       "fuse.smbnetfs", "afpfs", "davfs"]
+
+fn is_sensitive(mountpoint) {
+  for base in sensitive_paths {
+    if mountpoint == base or mountpoint.starts_with(base + "/") {
+      return true
+    }
+  }
+  return false
+}
+
+fn is_removable_device(device) {
+  # Deliberately narrow: /dev/sd* and /dev/nvme* are the *system* disks on most
+  # hosts (including WSL's root disk), so flagging them would fire on every
+  # machine and teach the operator to skip this check. Optical, card and floppy
+  # devices are the ones handed to a person.
+  return device.starts_with("/dev/sr") or device.starts_with("/dev/mmcblk")
+         or device.starts_with("/dev/fd") or device.starts_with("/dev/mapper/sr")
+}
+
+# WSL publishes its Windows filesystem bridge as 9p mounts under /mnt and
+# /usr/lib/wsl. They are real, they are platform-defined, and calling them
+# "masking" or "remote" on every WSL host would be wrong; they are reported with
+# a platform note instead. On a Linux host the same two checks stay at full
+# severity, because there the same shape means what it says.
+let wsl_host = sys.kernel().wsl
+
+fn platform_bridge(mountpoint) {
+  return wsl_host and (mountpoint.starts_with("/mnt/") or mountpoint == "/mnt"
+                       or mountpoint.starts_with("/usr/lib/wsl"))
+}
+
+fn contains_type(types, fstype) {
+  for item in types {
+    if item == fstype {
+      return true
+    }
+  }
+  return false
+}
+
+# -----------------------------------------------------------------------------
+# 1. The inventory
+# -----------------------------------------------------------------------------
+# Emitted for every real filesystem, including the ones nothing is wrong with:
+# a mount policy report that only lists problems cannot be diffed against the
+# next run, and a mount that appears between two runs is the interesting case.
+let real_mounts = []
+for m in mounts {
+  if contains_type(pseudo_fstypes, m.fstype) {
+    continue
+  }
+  real_mounts.push(m)
+  emit {
+    "kind": "mount",
+    "severity": "info",
+    "device": m.device,
+    "mountpoint": m.mountpoint,
+    "fstype": m.fstype,
+    "options": m.options,
+    "noexec": m.noexec,
+    "nosuid": m.nosuid,
+    "nodev": m.nodev,
+    "readonly": m.readonly,
+    "sensitive_path": is_sensitive(m.mountpoint)
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 2. Masks: a filesystem mounted over a path that defines the system
+# -----------------------------------------------------------------------------
+for m in real_mounts {
+  if is_sensitive(m.mountpoint) {
+    let bridge = platform_bridge(m.mountpoint)
+    let grade = "high"
+    let why = "a filesystem is mounted over a path that defines the system's contents"
+    if bridge {
+      set grade = "info"
+      set why = "WSL platform bridge: this path is mounted by the platform itself, not by an attacker"
+    }
+    emit {
+      "kind": "sensitive_path_masked",
+      "severity": grade,
+      "device": m.device,
+      "mountpoint": m.mountpoint,
+      "fstype": m.fstype,
+      "options": m.options,
+      "note": why,
+      "recommendation": "identify what is underneath before reading anything from this path: while the mount is present, every hash, listing and comparison you take from it describes the mounted filesystem, not the installed one. Compare `device` against the expected source and unmount it (or collect it separately) before continuing"
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 3. A mount whose source is a file, not a device
+  # ---------------------------------------------------------------------------
+  # /dev/sda1, /dev/mapper/root, tmpfs, overlay and none are all legitimate
+  # sources. An absolute path outside /dev is a file the analyst has to
+  # identify, and it is how a loopback image gets mounted.
+  if m.device.starts_with("/") and not m.device.starts_with("/dev/") {
+    emit {
+      "kind": "mount_device_in_drop_zone",
+      "severity": "high",
+      "device": m.device,
+      "mountpoint": m.mountpoint,
+      "fstype": m.fstype,
+      "options": m.options,
+      "recommendation": "hash and copy the image file before unmounting: a filesystem image mounted from a file is a self-contained environment the attacker controls, and unmounting it does not preserve its contents"
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 4. World-writable directories that can be executed from and filesystems
+  #    that should not carry setuid binaries
+  # ---------------------------------------------------------------------------
+  for path in writable_tmp_paths {
+    if m.mountpoint == path and not m.noexec {
+      emit {
+        "kind": "exec_from_writable_mount",
+        "severity": "low",
+        "device": m.device,
+        "mountpoint": m.mountpoint,
+        "fstype": m.fstype,
+        "options": m.options,
+        "recommendation": "add noexec to this mount: every user can write here, so removing execute permission is the cheap half of the control and it costs nothing legitimate"
+      }
+    }
+  }
+
+  if is_removable_device(m.device) and (not m.nosuid or not m.nodev) {
+    emit {
+      "kind": "removable_media_without_hardening",
+      "severity": "medium",
+      "device": m.device,
+      "mountpoint": m.mountpoint,
+      "fstype": m.fstype,
+      "nosuid": m.nosuid,
+      "nodev": m.nodev,
+      "recommendation": "mount removable media with nosuid,nodev,noexec unless there is a specific reason not to: setuid binaries and device nodes from a device an attacker can hand you are a privilege transition with no log line"
+    }
+  }
+
+  if contains_type(network_fstypes, m.fstype) {
+    let grade = "medium"
+    let why = "a remote server decides what this path contains"
+    if platform_bridge(m.mountpoint) {
+      set grade = "info"
+      set why = "WSL platform bridge (/mnt/*, /usr/lib/wsl/*): the Windows filesystem is presented through 9p by the platform; on a plain Linux host this same fstype would be a remote filesystem"
+    }
+    emit {
+      "kind": "network_filesystem_mount",
+      "severity": grade,
+      "note": why,
+      "device": m.device,
+      "mountpoint": m.mountpoint,
+      "fstype": m.fstype,
+      "options": m.options,
+      "recommendation": "a remote server now decides what this path contains; check who operates the server and whether the mount is credential-bearing (kerberos, uid=0), because a replaced /home or /usr reads as a local compromise in every other view"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 5. Two filesystems on one sensitive path
+# -----------------------------------------------------------------------------
+# /proc/mounts lists mounts in mount order, so a duplicate mountpoint on a
+# sensitive path means the later entry is hiding the earlier one. (The /run/user
+# duplicates systemd creates are not sensitive paths and are not reported.)
+let by_mountpoint = group_by(mounts, fn(m) { return m.mountpoint })
+let duplicate_count = 0
+for mountpoint in keys(by_mountpoint) {
+  let group = by_mountpoint[mountpoint]
+  if len(group) > 1 and is_sensitive(mountpoint) {
+    set duplicate_count = duplicate_count + 1
+    emit {
+      "kind": "duplicate_mount_on_sensitive_path",
+      "severity": "high",
+      "mountpoint": mountpoint,
+      "layers": len(group),
+      "stack": transform(group, fn(m) { return m.device + " (" + m.fstype + ")" }),
+      "recommendation": "capture the lower layer before unmounting the upper one: the hidden filesystem is the real one, and it is unreachable by path while the mount is present"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 6. Summary
+# -----------------------------------------------------------------------------
+let fstype_counts = {}
+for m in mounts {
+  fstype_counts.set(m.fstype, fstype_counts.get(m.fstype, 0) + 1)
+}
+
+let unmasked = 0
+for m in real_mounts {
+  if not m.noexec and not m.nosuid and not m.nodev {
+    set unmasked = unmasked + 1
+  }
+}
+
+emit {
+  "kind": "mount_inventory_summary",
+  "severity": "info",
+  "total_mounts": len(mounts),
+  "real_filesystems": len(real_mounts),
+  "sensitive_path_mounts": count(real_mounts, fn(m) { return is_sensitive(m.mountpoint) }),
+  "duplicate_sensitive_mounts": duplicate_count,
+  "mounts_without_any_hardening_flag": unmasked,
+  "fstype_histogram": fstype_counts,
+  "note": "real_filesystems excludes pseudo filesystems (proc, sysfs, cgroup, tmpfs and friends), which is why it is much smaller than total_mounts"
+}

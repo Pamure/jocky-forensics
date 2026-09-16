@@ -26,17 +26,21 @@ Severity scale: `info < low < medium < high < critical`.
 | `fileless_process` | high | /proc/<pid>/exe |
 | `hidden_module` | critical | /proc/modules vs loadable /sys/module subset |
 | `hijackable_path` | low | $PATH resolved through symlinks + /proc/mounts |
+| `hollowed_process` | high | on-disk image vs the image mapped in the process (Windows) |
 | `injection_primitive` | low | /proc/<pid>/fd (anon_inode) |
 | `ioc_connection` | critical | /proc/net/* cross-referenced with an IOC set |
 | `ld_env_injection` | medium | /proc/<pid>/environ |
 | `ld_preload` | high | /etc/ld.so.preload |
 | `memfd_fd_holder` | high | /proc/<pid>/cmdline + /proc/<pid>/fd |
 | `memfd_mapping` | high | /proc/<pid>/maps |
+| `module_from_temp_path` | medium | loaded module paths (Windows) |
 | `partial_visibility` | info | /proc/<pid>/exe reachability across the process table |
 | `persistence` | high | cron, systemd, rc.local, profile.d, authorized_keys |
+| `private_executable_memory` | medium | VirtualQueryEx region walk (Windows) |
 | `rwx_memory` | low | /proc/<pid>/maps |
 | `suspicious_cmdline` | varies | /proc/<pid>/cmdline vs pattern table |
 | `temp_executable` | high | /proc/<pid>/exe |
+| `unbacked_thread_start` | high | thread start addresses vs loaded modules (Windows) |
 | `unusual_listener` | low | /proc/net/tcp{,6} + /proc/*/fd |
 
 ## What each check means
@@ -153,6 +157,14 @@ PATH directory is writable (permission-opaque filesystems excluded).
 - **Severity:** low
 - **Analyst action:** remove it from PATH or fix permissions
 
+### `hollowed_process`
+
+A process's main image differs from its file on disk — the process-hollowing signature.
+
+- **Source:** on-disk image vs the image mapped in the process (Windows)
+- **Severity:** high
+- **Analyst action:** dump the memory image and compare entry-point bytes against a known-good copy
+
 ### `injection_primitive`
 
 Anonymous descriptors used for injection (userfaultfd, io_uring) are held open.
@@ -201,6 +213,14 @@ Executable mapping backed by a memfd object.
 - **Severity:** high
 - **Analyst action:** capture the mapping and correlate with the parent process
 
+### `module_from_temp_path`
+
+A module was loaded from a temporary or world-writable directory.
+
+- **Source:** loaded module paths (Windows)
+- **Severity:** medium
+- **Analyst action:** hash the module and identify what loaded it
+
 ### `partial_visibility`
 
 Part of the process table could not be inspected, so a clean result is not conclusive.
@@ -216,6 +236,14 @@ Persistence artefact modified recently or world-writable.
 - **Source:** cron, systemd, rc.local, profile.d, authorized_keys
 - **Severity:** high
 - **Analyst action:** review the file against the package manifest
+
+### `private_executable_memory`
+
+Committed private memory that is executable — where a manually-mapped payload lives. Also where a JIT lives.
+
+- **Source:** VirtualQueryEx region walk (Windows)
+- **Severity:** medium
+- **Analyst action:** correlate with the process's provenance; a JIT runtime looks identical
 
 ### `rwx_memory`
 
@@ -240,6 +268,14 @@ Execution from a world-writable drop zone (/tmp, /dev/shm, /var/tmp).
 - **Source:** /proc/<pid>/exe
 - **Severity:** high
 - **Analyst action:** hash the binary and reconstruct the parent chain
+
+### `unbacked_thread_start`
+
+A thread's start address lies outside every loaded module — the thread-execution-hijacking signal.
+
+- **Source:** thread start addresses vs loaded modules (Windows)
+- **Severity:** high
+- **Analyst action:** capture the thread context and the memory at its start address
 
 ### `unusual_listener`
 

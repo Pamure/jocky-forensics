@@ -1,5 +1,87 @@
 # Changelog
 
+## [1.7.0] — 2026-09-16
+
+Closes the remaining gaps against the SIH26148 deliverables: a **comparative
+evasion evaluation** (deliverable 5), **network forensics** (the "network" half
+of the problem title), **control-flow obfuscation** (pillar 2's "alter basic
+control-flow graphs"), and **Windows injection detection** (pillar 3 on the
+platform where those techniques dominate). Also fixes a language bug that turned
+a nested `break` into an infinite loop.
+
+### Added
+- **`docs/EVASION.md` — the comparative evasion evaluation.** Microsoft
+  Defender, signature `1.459.226.0`, real-time protection on: 29 polymorphic
+  artifacts scanned clean, zero detections across artifact execution and a full
+  collection run that opened 254 processes. Both harnesses carry an **EICAR
+  positive control that was detected**, so "clean" is a result rather than a
+  broken test. The report also records what was *not* tested (other vendors,
+  kernel telemetry, network inspection) and a measurement that was discarded as
+  unreliable — see the AMSI section, where a direct `AmsiScanBuffer` probe
+  returned NOT_DETECTED for known-malicious strings and was therefore not used
+  as evidence.
+- **`jocky/rt/pcap.py` — offline network forensics.** libpcap (both endiannesses,
+  microsecond and nanosecond) and pcapng readers, packet decoding across
+  Ethernet/IPv4/IPv6/TCP/UDP/ICMP, bidirectional flow reconstruction, DNS query
+  extraction (with bounded compression-pointer following), TLS ClientHello SNI +
+  JA3 fingerprints, and cleartext HTTP request parsing. Exposed as the `pcap`
+  namespace; playbook at `scripts/solutions/08_network_capture_analysis.jky`.
+  Fuzzed with **304,000 entry-point calls over random and mutated input, zero
+  exceptions** — malformed content is reported in-band, never raised.
+- **Control-flow obfuscation** in `jocky/poly/encoder.py`: branch inversion,
+  opaque predicates, unreachable dead-code injection and iterator-based jump
+  indirection, all spliced through the existing index-remapping machinery.
+  Measured: **64 builds → 64 distinct control-flow signatures** (was 1), at +34%
+  artifact size, with the CI gate still passing 128/128 unique and 0 mismatches.
+  A true indirect jump is not implemented — the instruction set has no opcode for
+  it, and adding one means changing the VM.
+- **`jocky/rt/winject.py` — Windows process-injection detection.** Process
+  hollowing (mapped image vs file on disk), private executable memory,
+  unbacked thread start addresses, and modules loaded from temporary paths. This
+  is the **detection** half of pillar 3; the execution half remains out of scope
+  by design (`docs/DESIGN.md` §10).
+- `docs/VERIFY.md` — five manual tests, one per claim, with the numbers measured
+  on Windows 11 and Linux.
+- `docs/INSTALL.md` — install guide for Linux, Windows and Docker, with a
+  measured platform capability matrix.
+
+### Fixed
+- **`break` inside a nested `for` was miscompiled into an infinite loop.** `for`
+  leaves its iterator on the operand stack and `ITER_NEXT` pops it on exhaustion;
+  `break` emitted a bare `JMP` and never popped, so the enclosing loop's
+  `ITER_NEXT` found the *inner* iterator, rebound the outer variable to inner
+  values, and never terminated. Found by writing real scripts, not by a test.
+  Three regression tests added, including the mirror case (`while` inside `for`,
+  which must *not* pop).
+- **`winject` flagged normal processes.** Measured on a healthy Windows 11 host,
+  the hollowing check produced **107 high-severity findings** — `brave.exe`,
+  `RuntimeBroker.exe`, `taskhostw.exe` — because `ImageBase` is rewritten by the
+  loader under ASLR, so every relocated process "differed". With that field
+  excluded, the remaining differences were section bytes the loader writes
+  (`.fptable`, `fothk`, `.rdata`, `.idata`) at a median of 1% per process, so
+  content-only mismatches now grade `info` and only the structural classes keep a
+  severity. Private-executable-memory findings grade `medium` only when the
+  region carries a PE header — all 41 on that host were V8's JIT heap.
+- **`jocky doctor` called a working Windows install "NOT ready".** Two
+  Linux-only mechanisms were reported as failures. Added a not-applicable status:
+  `ready: 7 ok, 2 warning(s), 0 failure(s), 4 not applicable on this platform`.
+- `sys.uptime()` returned **0 seconds** on Windows (`/proc/uptime` does not
+  exist); it now reads `GetTickCount64` through the platform backend.
+- `07_byovd_kernel_integrity.jky` reported a clean Windows host as
+  kernel-tainted: `sys.taint()` returns `nil` there and `nil != 0` is true.
+
+### Changed
+- **Domain fronting is no longer claimed.** The agent's `--sni`/`--host-header`
+  are documented as vhost selection at an ingress you control. Fronting requires
+  an SNI that differs from `Host` *and* a CDN that routes on the inner header;
+  Google closed it in 2018, Cloudflare and AWS in 2020, Azure and Fastly by 2024,
+  and the previous single-parameter implementation could not express the mismatch
+  even before that. Corrected in the CLI help, module docstring, README,
+  DESIGN.md and four site pages.
+- `jocky build -o FILE --repeat N` now writes the artifact instead of silently
+  producing nothing while exiting 0.
+
+
 ## [1.6.1] — 2026-09-16
 
 Fixes found by running the runtime against a **real Windows 11 host** (Python
@@ -463,7 +545,8 @@ state-of-the-art review, plus the documentation and installation site.
   hash, audit-hook telemetry (0 child processes, 0 write-mode opens), and a
   live fileless-detection proof. Results in `evidence/report.md`.
 
-[Unreleased]: https://github.com/Pamure/jocky-forensics/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/Pamure/jocky-forensics/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/Pamure/jocky-forensics/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/Pamure/jocky-forensics/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/Pamure/jocky-forensics/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/Pamure/jocky-forensics/releases/tag/v1.5.0

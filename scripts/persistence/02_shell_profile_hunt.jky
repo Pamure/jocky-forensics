@@ -1,0 +1,361 @@
+# 02_shell_profile_hunt.jky — which files run code when a user opens a shell,
+# and what does that code do that a package would never do?
+#
+# The problem this answers
+# ------------------------
+# Profile scripts are the persistence mechanism that needs the least of the host:
+# no root, no service manager, no scheduled job. A line in ~/.bashrc runs every
+# time that account opens a shell, and a line in /etc/profile.d/*.sh runs for
+# every account on the host. Both are the attacker's *and* the administrator's
+# tool — which is exactly why the finding has to be about content: an LD_PRELOAD
+# assignment, a shadowed `sudo` alias, a PATH that puts a world-writable
+# directory first, or a fetch-and-execute pipeline.
+#
+# Output shape
+# ------------
+# ``shell_profile``                 the inventory: path, owner, mode, size,
+#                                   mtime, and whether it runs for every user
+#                                   (a file under /etc) or just one.
+# ``profile_library_injection``     LD_PRELOAD / LD_AUDIT / LD_LIBRARY_PATH
+#                                   assigned in a profile. Every process started
+#                                   from that shell loads the named library —
+#                                   userland rootkit on the login path.
+# ``profile_history_suppression``   HISTFILE=/dev/null, `unset HISTFILE`,
+#                                   `set +o history`, HISTCONTROL=ignorespace.
+#                                   Recorded because it is deliberate, and
+#                                   because it changes how much of an
+#                                   investigation's history evidence exists.
+#                                   A plain `HISTCONTROL=` assignment is *not*
+#                                   reported: Ubuntu's default .bashrc sets
+#                                   HISTCONTROL=ignoreboth, so that pattern
+#                                   fires on a stock host.
+# ``profile_command_alias_shadow``  an alias of sudo, su, ssh, curl, apt,
+#                                   systemctl and friends. A profile that
+#                                   redefines the tools an analyst types is a
+#                                   credential-capture or audit-evasion shape.
+# ``profile_risky_command``         a matched fetch-and-execute, decode,
+#                                   reverse-shell or drop-zone pattern.
+# ``profile_writable_by_non_root``  a system profile file a non-root user can
+#                                   write. That is privilege escalation with no
+#                                   exploit: wait for an administrator's shell.
+# ``profile_unreadable``            a profile that exists and could not be read,
+#                                   so "nothing found" is never mistaken for
+#                                   "nothing there".
+#
+# Read ``shell_profile_summary`` first; then the graded kinds, in the order above
+# (injection and aliases are the two that change what the host *is*).
+
+# -----------------------------------------------------------------------------
+# 1. The two sets of profile files: system-wide and per-account
+# -----------------------------------------------------------------------------
+let system_files = [
+  "/etc/profile",
+  "/etc/bash.bashrc",
+  "/etc/bashrc",
+  "/etc/csh.cshrc",
+  "/etc/csh.login",
+  "/etc/ksh.kshrc",
+  "/etc/zsh/zshenv",
+  "/etc/zsh/zprofile",
+  "/etc/zsh/zshrc",
+  "/etc/zsh/zlogin",
+  "/etc/zsh/zlogout"
+]
+
+let system_dirs = ["/etc/profile.d", "/etc/zsh"]
+
+let user_files = [".bashrc", ".bash_profile", ".bash_login", ".profile",
+                  ".bash_logout", ".zshrc", ".zprofile", ".zshenv",
+                  ".zlogin", ".zlogout", ".cshrc", ".tcshrc", ".kshrc"]
+
+# A conservative list: aliasing any of these changes an audit trail or captures
+# a credential. Aliasing `ls` or `grep` is not reported — it is untidy, it is
+# everywhere, and reporting it would bury this check.
+let sensitive_aliases = ["sudo", "su", "ssh", "scp", "sftp", "systemctl",
+                         "apt", "apt-get", "yum", "dnf", "pacman", "curl",
+                         "wget", "git", "passwd", "chsh", "mount", "chmod",
+                         "chown", "crontab", "iptables", "nft", "insmod",
+                         "modprobe", "sysctl", "journalctl", "auditctl"]
+
+let risky_patterns = [
+  [r"(curl|wget)[^|]{0,160}\|\s*(ba|z|da)?sh\b", "download-and-execute", "critical"],
+  [r"/dev/tcp/", "bash-reverse-shell", "critical"],
+  [r"(base64|xxd)\s+(-d|--decode|-r)", "encoded-payload", "high"],
+  [r"nc[a-z]*\s+[^\n]{0,80}\s-e\b", "netcat-exec", "critical"],
+  [r"(/tmp/|/var/tmp/|/dev/shm/|/run/shm/)", "references-drop-zone", "high"],
+  [r"(iptables\s+-F|nft\s+flush|setenforce\s+0|chattr\s+-i\s+/|> */var/log/)", "defence-disabling", "high"]
+]
+
+# Note on what is *not* in the table: `eval` and `exec` are deliberately absent.
+# Distribution profiles use `eval $(...)` as ordinary plumbing (the locale fix in
+# /etc/profile.d/01-locale-fix.sh is one), so a pattern on the keyword reports
+# healthy hosts and hides the two patterns that do matter here — fetching code
+# and decoding a blob.
+
+fn first_hit(patterns, text) {
+  for row in patterns {
+    if re.test(row[0], text) {
+      return row
+    }
+  }
+  return nil
+}
+
+fn is_pseudo_home(home) {
+  # Service accounts in /etc/passwd carry /dev, /proc and /run/... as their home
+  # (sys:/dev, rtkit:/proc, avahi:/run/avahi-daemon). They are not user
+  # directories, walking them is refused by fs.scan by design, and counting them
+  # would inflate every "accounts checked" figure in the summary.
+  for pseudo in ["/dev", "/proc", "/sys", "/run"] {
+    if home == pseudo or home.starts_with(pseudo + "/") {
+      return true
+    }
+  }
+  return false
+}
+
+fn accounts_homes() {
+  # Home directories come from /etc/passwd rather than from the filesystem:
+  # that is what decides where a login shell looks, and an account whose home
+  # does not exist yet cannot be scanned anyway.
+  let homes = []
+  let content = ""
+  try {
+    set content = fs.read("/etc/passwd", 262144)
+  } catch e {
+    return homes
+  }
+  for raw in content.lines() {
+    let text = raw.strip()
+    if text == "" or text.starts_with("#") {
+      continue
+    }
+    let fields = text.split(":")
+    if len(fields) < 7 {
+      continue
+    }
+    let home = fields[5]
+    if home.starts_with("/") and home != "/" and not contains("nonexistent", home) and not is_pseudo_home(home) and fs.exists(home) {
+      homes.push(home)
+    }
+  }
+  return homes
+}
+
+fn grade_line(path, line_no, text, unscoped) {
+  let hit = first_hit(risky_patterns, text)
+  if hit != nil {
+    emit {
+      "kind": "profile_risky_command",
+      "severity": hit[2],
+      "path": path,
+      "line": line_no,
+      "pattern": hit[1],
+      "scope": unscoped,
+      "line_text": text.substr(0, 400),
+      "recommendation": "read the line in context and diff the file against the package copy: a shell profile is executed by every login that reads it, and the payload it fetches is the evidence"
+    }
+  }
+  if re.test(r"^(export\s+)?LD_(PRELOAD|AUDIT|LIBRARY_PATH)=", text) {
+    emit {
+      "kind": "profile_library_injection",
+      "severity": "critical",
+      "path": path,
+      "line": line_no,
+      "scope": unscoped,
+      "line_text": text.substr(0, 300),
+      "recommendation": "hash the named library and locate it: a profile that points the dynamic loader at an attacker library makes every process from that shell part of the implant, and the library survives the removal of this line"
+    }
+  }
+  if re.test(r"^set\s+\+o\s+history", text)
+     or re.test(r"^unset\s+HISTFILE", text)
+     or re.test(r"^(export\s+)?HIST(FILE|SIZE)?=[^\n]*/dev/null", text)
+     or re.test(r"^(export\s+)?HISTCONTROL=ignorespace$", text) {
+    emit {
+      "kind": "profile_history_suppression",
+      "severity": "medium",
+      "path": path,
+      "line": line_no,
+      "scope": unscoped,
+      "line_text": text.substr(0, 300),
+      "recommendation": "decide whether the operator set this on purpose: it is a legitimate convenience and the standard first step of covering a shell's tracks, and the answer changes what other evidence you can expect to exist"
+    }
+  }
+  if re.test(r"^alias\s+[a-z]", text) {
+    let fields = text.substr(6, 200).split("=")
+    let target = fields[0].strip()
+    if contains(target, sensitive_aliases) {
+      emit {
+        "kind": "profile_command_alias_shadow",
+        "severity": "medium",
+        "path": path,
+        "line": line_no,
+        "alias": target,
+        "scope": unscoped,
+        "line_text": text.substr(0, 300),
+        "recommendation": "expand the alias body: redefining a privileged command in a profile turns every later use of it into whatever the profile chose — credential capture, silent failure, or a different binary entirely"
+      }
+    }
+  }
+  if re.test(r"^(export\s+)?PATH=(\.|:)", text) or re.test(r"^(export\s+)?PATH=[^:]*::", text) {
+    emit {
+      "kind": "profile_relative_path",
+      "severity": "medium",
+      "path": path,
+      "line": line_no,
+      "scope": unscoped,
+      "line_text": text.substr(0, 300),
+      "recommendation": "a PATH whose first element is `.`, or which contains an empty element, resolves binaries out of the current working directory: that is the setup for a trojan planted in a directory the target later cd's into. A first element of $HOME/bin is NOT reported — the distribution skeleton ships it"
+    }
+  }
+  return 0
+}
+
+fn examine(path, unscoped) {
+  let metadata = fs.stat(path)
+  if metadata == nil or metadata.is_dir {
+    return 0
+  }
+  let content = ""
+  let readable = true
+  try {
+    set content = fs.read(path, 65536)
+  } catch e {
+    set readable = false
+  }
+
+  emit {
+    "kind": "shell_profile",
+    "severity": "info",
+    "path": path,
+    "scope": unscoped,
+    "owner_uid": metadata.uid,
+    "mode": metadata.mode,
+    "mode_str": metadata.mode_str,
+    "size": metadata.size,
+    "mtime": metadata.mtime,
+    "modified_iso": time.iso(metadata.mtime),
+    "modified_in_last_30_days": metadata.mtime > time.now() - 30 * 24 * 3600,
+    "readable": readable
+  }
+
+  if not readable {
+    emit {
+      "kind": "profile_unreadable",
+      "severity": "low",
+      "path": path,
+      "reason": "read denied for this run's uid (" + str(proc.info(sys.pid()).uid) + ")",
+      "note": "the content of this profile was not inspected; re-run with privilege before treating it as clean"
+    }
+    return 0
+  }
+
+  # Writable-by-non-root is only graded for files under /etc: a per-user rc file
+  # belongs to that user by design, and its permissions say nothing about a third
+  # party. A system profile another user can write is a privilege escalation
+  # path, and it is the one shape a package would never produce.
+  #
+  # Symlinks are resolved first: /etc/profile.d/*.sh are frequently symlinks
+  # into /usr/share, and a symlink's own mode is always lrwxrwxrwx, so checking
+  # the link would call every one of them world-writable.
+  if unscoped == "system" {
+    let subject = metadata
+    let link_target = nil
+    if metadata.is_link {
+      let target = metadata.get("target", nil)
+      if target != nil and target.starts_with("/") {
+        set link_target = target
+        let resolved = fs.stat(target)
+        if resolved != nil {
+          set subject = resolved
+        }
+      }
+    }
+    let group_or_world_write = subject.world_writable or subject.mode_str.substr(5, 6) == "w"
+    if group_or_world_write or (subject.uid != 0 and subject.uid != nil) {
+      emit {
+        "kind": "profile_writable_by_non_root",
+        "severity": "high",
+        "path": path,
+        "subject": subject.path,
+        "symlink_target": link_target,
+        "mode": subject.mode,
+        "mode_str": subject.mode_str,
+        "uid": subject.uid,
+        "gid": subject.gid,
+        "recommendation": "restore root ownership and 0644: a system profile another user can rewrite is arbitrary code execution as every account that logs in, obtained by waiting rather than by exploiting"
+      }
+    }
+  }
+
+  let index = 0
+  for raw in content.lines() {
+    set index = index + 1
+    let text = raw.strip()
+    if text == "" or text.starts_with("#") {
+      continue
+    }
+    grade_line(path, index, text, unscoped)
+  }
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# 2. System-wide profiles
+# -----------------------------------------------------------------------------
+let examined = 0
+let unreadable = 0
+
+for path in system_files {
+  if fs.exists(path) {
+    set examined = examined + 1
+    examine(path, "system")
+  }
+}
+
+for dir in system_dirs {
+  if not fs.exists(dir) {
+    continue
+  }
+  for entry in fs.scan(dir, 300, nil, 2) {
+    if entry.is_dir {
+      continue
+    }
+    let base = fs.basename(entry.path)
+    if base.starts_with(".") or base.ends_with("~") or base.ends_with(".rpmsave") or base.ends_with(".dpkg-old") {
+      continue
+    }
+    set examined = examined + 1
+    examine(entry.path, "system")
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 3. Per-account profiles
+# -----------------------------------------------------------------------------
+# Only files that exist are reported, and the walk is bounded by the accounts in
+# /etc/passwd, so the cost scales with the host's real user base rather than with
+# the size of the filesystem.
+let homes = accounts_homes()
+for home in homes {
+  for name in user_files {
+    let candidate = home + "/" + name
+    if fs.exists(candidate) {
+      set examined = examined + 1
+      examine(candidate, "user")
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 4. Summary
+# -----------------------------------------------------------------------------
+emit {
+  "kind": "shell_profile_summary",
+  "severity": "info",
+  "profiles_examined": examined,
+  "system_profiles": len(system_files) + len(system_dirs),
+  "home_directories": len(homes),
+  "candidate_per_account_files": len(homes) * len(user_files),
+  "note": "profiles_examined counts files that exist and were read; candidate_per_account_files is the search space, and the gap between them is how much of it this host actually uses"
+}

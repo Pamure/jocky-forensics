@@ -1,0 +1,275 @@
+# 01_timestamp_anomaly_scan.jky — which files carry a timestamp that cannot be
+# true, and what does that say about who put them there?
+#
+# The problem this answers
+# ------------------------
+# Timestomping is the cheapest anti-forensic technique there is: `touch -d` costs
+# nothing and it defeats every check that reasons about "recently modified". It
+# is also the one that leaves traces, because the three timestamps come from
+# different places. `mtime` and `atime` can be set by any owner. `ctime` cannot
+# be set at all — the kernel stamps it whenever metadata changes. So a file whose
+# `mtime` is in the future, or whose `ctime` is *earlier* than its `mtime`, has
+# been edited by something that did not use a normal write path, and the pair is
+# worth an analyst's time even though the file itself looks ordinary.
+#
+# What each finding means
+# -----------------------
+# ``timestamp_in_future``          mtime or atime ahead of now by more than the
+#                                  clock-skew allowance. Almost always an
+#                                  explicit `touch -d`, occasionally a host whose
+#                                  clock stepped backwards after the file was
+#                                  written. High, because the two are
+#                                  distinguishable from the evidence (compare
+#                                  boot time and the newest legitimate log line).
+# ``timestamp_epoch_zero``         mtime at or before the epoch, i.e. 1970. No
+#                                  filesystem produces it by accident.
+# ``ctime_before_mtime``           the kernel's own metadata stamp is older than
+#                                  the modification time. Two explanations, both
+#                                  worth writing down: the mtime was set into the
+#                                  future, or the system clock stepped backwards
+#                                  after the last write.
+# ``timestamp_predates_memory_filesystem``
+#                                  a file whose mtime is older than the host's
+#                                  boot time *inside a tmpfs mount*. tmpfs is
+#                                  memory, it is empty when the machine starts,
+#                                  so a pre-boot timestamp in it has an
+#                                  explanation or it is a forgery — and the two
+#                                  are separable: if the kernel's own ctime
+#                                  agrees with the mtime, nothing modified the
+#                                  file after it was written, which is what a
+#                                  clock step (VM resume, suspend, NTP) looks
+#                                  like (medium); if ctime is newer, the mtime
+#                                  was set by hand (high). The mount type comes
+#                                  from the kernel's own table, so the check
+#                                  only runs where the argument holds.
+#
+# A note on the check that is *not* here. An earlier version reported files in a
+# drop zone whose mtime predated their containing directory's ctime. That check
+# is unsound: a directory's ctime is bumped by every entry added to or removed
+# from it, not only by its creation, so /tmp's own ctime is "now" on any host and
+# every file in it looked like a forgery — 277 findings on a clean machine. It
+# was removed rather than graded down, because a check that cannot separate the
+# two cases is not a weak check, it is a wrong one.
+# ``hardlinked_file_in_drop_zone`` a file in /tmp, /var/tmp or /dev/shm with more
+#                                  than one link. A hard link is how content is
+#                                  kept readable after the original name is
+#                                  deleted — and how a payload is given a second
+#                                  life under a name that never appears in a
+#                                  directory listing of its own directory.
+#
+# Read ``timestamp_anomaly_summary`` first for the number of files examined per
+# root: the counts are what make "no anomalies" believable, and a root that
+# returned almost nothing is a root the scan could not read rather than a clean
+# one.
+#
+# Cost: bounded scans (files and depth capped per root), one stat per file, and
+# one extra stat of the parent directory for drop-zone candidates only.
+
+# -----------------------------------------------------------------------------
+# 1. Roots and the allowance
+# -----------------------------------------------------------------------------
+# /etc and /usr/local are where a timestamp edit is an act of concealment;
+# the drop zones are where files appear without an installer.
+let roots = [
+  ["/etc", 1200, 3],
+  ["/usr/local", 600, 4],
+  ["/tmp", 600, 3],
+  ["/var/tmp", 400, 3],
+  ["/dev/shm", 200, 2],
+  ["/run/shm", 200, 2]
+]
+
+let drop_zones = ["/tmp/", "/var/tmp/", "/dev/shm/", "/run/shm/"]
+
+# Two minutes of slack: a host that stepped its clock backwards by a second
+# mid-write is not timestomping, and a scan that reports it as such is a scan
+# nobody trusts twice.
+let now = time.now()
+let future_slack = 120
+
+fn in_drop_zone(path) {
+  for zone in drop_zones {
+    if path.starts_with(zone) {
+      return true
+    }
+  }
+  return false
+}
+
+let scanned = 0
+let inventory = {}
+let boot_time = sys.uptime().boot_time
+let memory_mounts = {}
+
+# Which mount holds this path, and is it memory? ``sys.mounts()`` is the kernel's
+# table, so this is the host's own answer rather than an assumption about /tmp.
+fn filesystem_for(path) {
+  let best = nil
+  let best_len = -1
+  for mount in sys.mounts() {
+    let point = mount.mountpoint
+    if path == point or path.starts_with(point + "/") {
+      if len(point) > best_len {
+        set best = mount.fstype
+        set best_len = len(point)
+      }
+    }
+  }
+  return best
+}
+
+fn in_memory_filesystem(path) {
+  let cached = memory_mounts.get(path, nil)
+  if cached != nil {
+    return cached
+  }
+  let answer = filesystem_for(path) == "tmpfs"
+  memory_mounts.set(path, answer)
+  return answer
+}
+
+fn inspect(entry) {
+  set scanned = scanned + 1
+  let path = entry.path
+
+  # ---------------------------------------------------------------------------
+  # 2. A timestamp the file could not have earned
+  # ---------------------------------------------------------------------------
+  if entry.mtime > now + future_slack {
+    emit {
+      "kind": "timestamp_in_future",
+      "severity": "high",
+      "path": path,
+      "mtime": entry.mtime,
+      "mtime_iso": time.iso(entry.mtime),
+      "seconds_ahead": entry.mtime - now,
+      "ctime": entry.ctime,
+      "ctime_iso": time.iso(entry.ctime),
+      "uid": entry.uid,
+      "mode": entry.mode,
+      "recommendation": "compare boot time and the newest legitimate log line for this host: a clock step makes the whole host look like this, while a single file with a future mtime was edited with `touch -d`, and the difference decides whether the file is evidence or a nuisance"
+    }
+  }
+
+  if entry.mtime <= 1 {
+    emit {
+      "kind": "timestamp_epoch_zero",
+      "severity": "high",
+      "path": path,
+      "mtime": entry.mtime,
+      "mtime_iso": time.iso(entry.mtime),
+      "size": entry.size,
+      "magic": entry.magic,
+      "recommendation": "no filesystem leaves a modification time at 1970 by accident; read the file's content and compare its hash against the package manifest before anything else"
+    }
+  }
+
+  if entry.ctime + 1 < entry.mtime {
+    emit {
+      "kind": "ctime_before_mtime",
+      "severity": "medium",
+      "path": path,
+      "mtime": entry.mtime,
+      "ctime": entry.ctime,
+      "delta_seconds": entry.mtime - entry.ctime,
+      "size": entry.size,
+      "recommendation": "the kernel's metadata stamp predates the file's own modification time: either the mtime was set forward deliberately, or the system clock stepped backwards after the write. Check when the clock last changed (the boot log or the time daemon's log) before concluding which"
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 3. Drop-zone only: a file older than the directory that contains it
+  # ---------------------------------------------------------------------------
+  # `tar -p` and `rsync -a` legitimately preserve mtimes into freshly created
+  # directories, so this is reported only where a preserved timestamp is
+  # interesting, and only at low severity.
+  if in_drop_zone(path) {
+    if in_memory_filesystem(path) and entry.mtime + 5 < boot_time {
+      # ctime and mtime are equal when nothing touched the file after it was
+      # written, which is what a clock step produces: the file is genuinely old
+      # in wall-clock terms because the host's clock moved forward after it was
+      # created (a VM resume, a suspended laptop, an NTP correction). When the
+      # kernel's stamp is *newer* than the modification time, the mtime was set
+      # by something else — `touch -d` — and that is the forgery this reports at
+      # high. Both readings are surfaced; the discrimination is stated in the
+      # finding rather than hidden in the grade.
+      let untouched = entry.ctime - entry.mtime < 2
+      let grade = "high"
+      let why = "mtime is older than the machine's start while the kernel's own stamp is newer: the modification time was written by something other than a normal write"
+      if untouched {
+        set grade = "medium"
+        set why = "mtime and ctime agree, so nothing modified the file after it was written: the likely explanation is that this host's clock moved forward after the file was created (VM resume, suspend, or an NTP step), not a forged timestamp"
+      }
+      emit {
+        "kind": "timestamp_predates_memory_filesystem",
+        "severity": grade,
+        "path": path,
+        "mtime": entry.mtime,
+        "mtime_iso": time.iso(entry.mtime),
+        "ctime": entry.ctime,
+        "ctime_iso": time.iso(entry.ctime),
+        "boot_time_iso": time.iso(boot_time),
+        "filesystem": filesystem_for(path),
+        "clock_step_suspected": untouched,
+        "size": entry.size,
+        "magic": entry.magic,
+        "reason": why,
+        "recommendation": "a file in a memory filesystem cannot exist before the machine started. If ctime and mtime agree, check the host's clock history (the boot log, the time daemon, or whether the machine was suspended) before treating it as evidence; if they disagree, hash the file and treat every other timestamp in the directory as suspect too, because timestomping is usually done in a loop"
+      }
+    }
+
+    if entry.nlink != nil and entry.nlink > 1 and entry.is_file {
+      emit {
+        "kind": "hardlinked_file_in_drop_zone",
+        "severity": "medium",
+        "path": path,
+        "links": entry.nlink,
+        "inode": entry.inode,
+        "size": entry.size,
+        "magic": entry.magic,
+        "recommendation": "find the file's other names (`fs.stat` on the inode's siblings, or scan for the inode number) before deleting this path: a hard link keeps the payload readable after the name you found is removed"
+      }
+    }
+  }
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# 4. The sweep
+# -----------------------------------------------------------------------------
+for spec in roots {
+  let root = spec[0]
+  if not fs.exists(root) {
+    continue
+  }
+  let entries = fs.scan(root, spec[1], nil, spec[2])
+  inventory.set(root, len(entries))
+  for entry in entries {
+    if entry.is_dir or entry.is_link {
+      # A symlink's own timestamps describe the link, not the content, and a
+      # directory mtime changes for reasons that have nothing to do with the
+      # analyst's question. Both are excluded, deliberately.
+      continue
+    }
+    inspect(entry)
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 5. Summary
+# -----------------------------------------------------------------------------
+# The per-root counts are the point: "0 anomalies" next to "0 files examined"
+# means the scan could not read the root, which is a different report.
+let uptime_seconds = sys.uptime().seconds
+
+emit {
+  "kind": "timestamp_anomaly_summary",
+  "severity": "info",
+  "files_examined": scanned,
+  "per_root": inventory,
+  "boot_time_iso": time.iso(boot_time),
+  "uptime_seconds": uptime_seconds,
+  "collected_at_iso": time.iso(now),
+  "future_slack_seconds": future_slack,
+  "note": "boot_time and collected_at are printed so a future-mtime finding can be checked against the host's own clock history: a clock step affects every file, a timestomp affects one"
+}

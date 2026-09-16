@@ -1,0 +1,400 @@
+# 03_ssh_key_exposure_scan.jky — which private keys are on this host, and who can
+# read them?
+#
+# The problem this answers
+# ------------------------
+# A private key is a credential that no password policy, no MFA prompt and no
+# password rotation touches, and it is usually the *most* portable one on a host:
+# the same file logs in somewhere else entirely. So the two questions worth asking
+# are "whose keys are lying around" and "can anyone else read them" — followed by
+# the third that only reading the config answers: does this host's SSH client run
+# a program when it connects (ProxyCommand, LocalCommand), because that is
+# command execution triggered by a routine action.
+#
+# What each finding means
+# -----------------------
+# ``private_key``                     the inventory: path, owner, mode, mtime and
+#                                     the key format read from its header.
+# ``private_key_readable_by_others``  high — a group or another account can read a
+#                                     private key. Copying it is enough to become
+#                                     the key's owner on every host that trusts
+#                                     it; the key itself does not need to be
+#                                     forged.
+# ``private_key_unencrypted_pem``     high — a legacy PEM key with no passphrase.
+#                                     OpenSSH-format keys are *not* judged here
+#                                     and the reason is stated in the finding:
+#                                     their encryption metadata is inside the
+#                                     base64 body, so a text reader cannot see
+#                                     it, and guessing would be worse than
+#                                     saying nothing.
+# ``ssh_directory_insecure``          a `.ssh` directory another account can write.
+#                                     That account can add ``authorized_keys``,
+#                                     replace the ``config``, or swap the private
+#                                     key.
+# ``ssh_config_dangerous_directive``  ProxyCommand / LocalCommand (runs a program
+#                                     on connect, high), UserKnownHostsFile
+#                                     /dev/null or StrictHostKeyChecking no
+#                                     (host verification disabled, high/medium),
+#                                     ForwardAgent yes (the agent socket is
+#                                     exposed to the remote host, medium).
+# ``host_key_regenerated``            /etc/ssh/ssh_host_*_key written after boot:
+#                                     a re-image or a deliberate regeneration.
+#                                     Both are worth knowing before an analyst
+#                                     explains a host key mismatch as an attack
+#                                     (or explains an attack as a mismatch).
+# ``agent_socket_in_shared_path``     a running process whose SSH_AUTH_SOCK lives
+#                                     in /tmp or /dev/shm, where any account can
+#                                     reach the agent.
+# ``known_hosts``                     the inventory of what this account's shell
+#                                     has connected to, with its mtime: useful
+#                                     precisely because it is not the audit log.
+# ``ssh_files_unreadable``            a key or config this run could not read, so
+#                                     "no exposed key" stays distinct from "did
+#                                     not look".
+#
+# Read-only: no key is used, no connection is attempted, and no host is contacted.
+
+let now = time.now()
+let boot_time = sys.uptime().boot_time
+let drop_zones = ["/tmp/", "/dev/shm/", "/var/tmp/", "/run/shm/"]
+
+# Names in a .ssh directory that are never private keys. Everything else in the
+# directory is read far enough to see whether it contains a key.
+let not_key_names = ["known_hosts", "known_hosts.old", "config", "authorized_keys",
+                     "authorized_keys2", "environment", "rc", "known_hosts2"]
+
+fn head_of(path, limit) {
+  let outcome = {"ok": true, "content": ""}
+  try {
+    set outcome.content = fs.read(path, limit)
+  } catch e {
+    set outcome.ok = false
+  }
+  return outcome
+}
+
+fn key_format(head) {
+  if contains("BEGIN OPENSSH PRIVATE KEY", head) {
+    return "openssh"
+  }
+  if contains("BEGIN RSA PRIVATE KEY", head) {
+    return "pem-rsa"
+  }
+  if contains("BEGIN DSA PRIVATE KEY", head) {
+    return "pem-dsa"
+  }
+  if contains("BEGIN EC PRIVATE KEY", head) {
+    return "pem-ec"
+  }
+  if contains("BEGIN PRIVATE KEY", head) {
+    return "pkcs8"
+  }
+  return nil
+}
+
+let keys_found = 0
+let exposed = 0
+let unreadable = 0
+let configs_with_commands = 0
+
+fn examine_key(path, owner_label) {
+  let metadata = fs.stat(path)
+  if metadata == nil or metadata.is_dir {
+    return 0
+  }
+  let head = head_of(path, 4096)
+  if not head.ok {
+    set unreadable = unreadable + 1
+    emit {
+      "kind": "ssh_files_unreadable",
+      "severity": "low",
+      "path": path,
+      "owner": owner_label,
+      "note": "this file could not be read, so whether it holds a key is unknown for this run; ~/.ssh is mode 700 for a reason and an unprivileged sweep is partial by construction"
+    }
+    return 0
+  }
+  let format = key_format(head.content)
+  if format == nil {
+    return 0
+  }
+
+  set keys_found = keys_found + 1
+  let group_read = metadata.mode_str.substr(4, 5) == "r"
+  let group_write = metadata.mode_str.substr(5, 6) == "w"
+  let other_read = metadata.mode_str.substr(7, 8) == "r"
+  let exposed_to_others = group_write or other_read or metadata.world_writable
+
+  emit {
+    "kind": "private_key",
+    "severity": "info",
+    "path": path,
+    "owner": owner_label,
+    "format": format,
+    "mode": metadata.mode,
+    "mode_str": metadata.mode_str,
+    "uid": metadata.uid,
+    "size": metadata.size,
+    "mtime": metadata.mtime,
+    "mtime_iso": time.iso(metadata.mtime),
+    "encrypted_marker": contains("ENCRYPTED", head.content),
+    "note": "the file is identified as a key by its header, not by its name: a renamed key, a key in a project directory and a key under a backup name are all reported here, which a name-based sweep would miss"
+  }
+
+  if exposed_to_others {
+    set exposed = exposed + 1
+    emit {
+      "kind": "private_key_readable_by_others",
+      "severity": "high",
+      "path": path,
+      "owner": owner_label,
+      "mode": metadata.mode,
+      "mode_str": metadata.mode_str,
+      "uid": metadata.uid,
+      "group_readable": group_read,
+      "group_writable": group_write,
+      "world_readable": other_read,
+      "recommendation": "set 0600 and treat the key as disclosed: anyone who copied it authenticates as its owner wherever it is trusted, and every authorized_keys entry that matches it is now unauthenticated access. Rotate the key rather than only fixing the mode"
+    }
+  }
+
+  if (format == "pem-rsa" or format == "pem-dsa" or format == "pem-ec") and not contains("ENCRYPTED", head.content) {
+    emit {
+      "kind": "private_key_unencrypted_pem",
+      "severity": "high",
+      "path": path,
+      "owner": owner_label,
+      "format": format,
+      "recommendation": "this key is stored in the legacy PEM format with no passphrase, and it is readable by its owner alone, which means its only protection is the file mode. Move it to the OpenSSH format with a passphrase, or move it into an agent or a hardware token: a plaintext key file is copied by anything that reads files, including backups and pasted tarballs"
+    }
+  }
+  return 0
+}
+
+fn examine_ssh_directory(account, dir) {
+  let metadata = fs.stat(dir)
+  if metadata != nil {
+    let group_write = metadata.mode_str.substr(5, 6) == "w"
+    if metadata.world_writable or group_write {
+      emit {
+        "kind": "ssh_directory_insecure",
+        "severity": "high",
+        "path": dir,
+        "account": account,
+        "mode": metadata.mode,
+        "mode_str": metadata.mode_str,
+        "uid": metadata.uid,
+        "recommendation": "set 0700 and correct the owner: a writable .ssh directory is a way to add an authorized_keys entry, replace a private key, or rewrite the client config that decides what runs when this account connects"
+      }
+    }
+  }
+
+  for entry in fs.scan(dir, 60, nil, 1) {
+    if entry.is_dir {
+      continue
+    }
+    let base = fs.basename(entry.path)
+    if base.ends_with(".pub") or contains(base, not_key_names) {
+      continue
+    }
+    examine_key(entry.path, account)
+  }
+
+  # The client configuration is not a key, but it decides what the client does.
+  let config_path = dir + "/config"
+  if fs.exists(config_path) {
+    let config = head_of(config_path, 262144)
+    if not config.ok {
+      return 0
+    }
+    let index = 0
+    for raw in config.content.lines() {
+      set index = index + 1
+      let text = raw.strip().lower()
+      if text == "" or text.starts_with("#") {
+        continue
+      }
+      let is_command = contains("proxycommand", text) or contains("localcommand", text)
+      let disables_verification = contains("userknownhostsfile", text) and contains("/dev/null", text)
+      let weak_verification = contains("stricthostkeychecking", text) and contains("no", text)
+      let forwards_agent = contains("forwardagent", text) and contains("yes", text)
+      if is_command {
+        set configs_with_commands = configs_with_commands + 1
+      }
+      if is_command or disables_verification or weak_verification or forwards_agent {
+        let grade = "medium"
+        let why = "this directive changes how the SSH client behaves for this account"
+        if is_command or disables_verification {
+          set grade = "high"
+        }
+        if is_command {
+          set why = "the client runs a program as part of an ordinary connection to this host"
+        }
+        if disables_verification {
+          set why = "host key verification is redirected away from the real known_hosts file, so a machine in the middle is not detected"
+        }
+        emit {
+          "kind": "ssh_config_dangerous_directive",
+          "severity": grade,
+          "path": config_path,
+          "account": account,
+          "line": index,
+          "line_text": raw.strip().substr(0, 300),
+          "reason": why,
+          "recommendation": "read the directive in context: ProxyCommand and LocalCommand execute a program (the command is in the line above), and a disabled host-key check makes every later connection to a spoofed host indistinguishable from a real one"
+        }
+      }
+    }
+  }
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# 1. Per-account keys and client configuration
+# -----------------------------------------------------------------------------
+let accounts = []
+let passwd_outcome = head_of("/etc/passwd", 262144)
+if passwd_outcome.ok {
+  for raw in passwd_outcome.content.lines() {
+    let fields = raw.strip().split(":")
+    if len(fields) < 7 {
+      continue
+    }
+    let home = fields[5]
+    if not home.starts_with("/") or home == "/" {
+      continue
+    }
+    let pseudo = false
+    for candidate in ["/dev", "/proc", "/sys", "/run"] {
+      if home == candidate or home.starts_with(candidate + "/") {
+        set pseudo = true
+      }
+    }
+    if pseudo or contains("nonexistent", home) {
+      continue
+    }
+    if fs.exists(home) {
+      accounts.push({"name": fields[0], "home": home})
+    }
+  }
+}
+
+for account in accounts {
+  let ssh_dir = account.home + "/.ssh"
+  if fs.exists(ssh_dir) {
+    examine_ssh_directory(account.name, ssh_dir)
+  }
+  let known_hosts = ssh_dir + "/known_hosts"
+  if fs.exists(known_hosts) {
+    let metadata = fs.stat(known_hosts)
+    if metadata != nil {
+      let entries = 0
+      let content = head_of(known_hosts, 262144)
+      if content.ok {
+        set entries = len(content.content.lines())
+      }
+      emit {
+        "kind": "known_hosts",
+        "severity": "info",
+        "path": known_hosts,
+        "account": account.name,
+        "entries": entries,
+        "mtime": metadata.mtime,
+        "mtime_iso": time.iso(metadata.mtime),
+        "modified_in_last_7_days": metadata.mtime > now - 7 * 24 * 3600,
+        "note": "this file records which hosts the account's shell has connected to, and it is written by the client rather than by the server, so it is evidence that survives a wiped server-side log"
+      }
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 2. The host's own keys
+# -----------------------------------------------------------------------------
+# These are the keys the *server* presents. Two questions: is the private half
+# protected, and was it written after the host booted (a re-image, or a
+# regeneration).
+let ssh_etc = "/etc/ssh"
+if fs.exists(ssh_etc) {
+  for entry in fs.scan(ssh_etc, 100, nil, 1) {
+    if entry.is_dir {
+      continue
+    }
+    let base = fs.basename(entry.path)
+    if base.ends_with(".pub") or contains(base, ["ssh_config", "sshd_config", "moduli"]) {
+      continue
+    }
+    if contains(base, ["_key", "id_"]) {
+      examine_key(entry.path, "host")
+      if contains("ssh_host_", base) {
+        let metadata = fs.stat(entry.path)
+        if metadata != nil and metadata.mtime > boot_time + 3600 {
+          emit {
+            "kind": "host_key_regenerated",
+            "severity": "low",
+            "path": entry.path,
+            "mtime_iso": time.iso(metadata.mtime),
+            "boot_time_iso": time.iso(boot_time),
+            "recommendation": "the host's own key was written after the machine started: that is what re-imaging and explicit regeneration look like, and it is also what replacing the key to impersonate the host looks like. Compare the key's fingerprint with the fleet's inventory before deciding which"
+          }
+        }
+      }
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 3. Agent sockets in shared directories
+# -----------------------------------------------------------------------------
+# An SSH agent socket is a credential with a filesystem path. In /tmp or /dev/shm
+# it is reachable by any account that can find it, and reaching it means using
+# the loaded keys without holding them.
+let agent_sockets = 0
+for process in proc.list(600) {
+  let vars = []
+  try {
+    set vars = proc.environ(process.pid)
+  } catch e {
+    set vars = []
+  }
+  for variable in vars {
+    if not variable.starts_with("SSH_AUTH_SOCK=") {
+      continue
+    }
+    let socket = variable.substr(14, 300)
+    let shared = false
+    for zone in drop_zones {
+      if socket.starts_with(zone) {
+        set shared = true
+      }
+    }
+    if shared {
+      set agent_sockets = agent_sockets + 1
+      emit {
+        "kind": "agent_socket_in_shared_path",
+        "severity": "medium",
+        "pid": process.pid,
+        "process": process.name,
+        "uid": process.uid,
+        "cmdline": process.cmdline,
+        "socket": socket,
+        "recommendation": "the agent socket sits in a world-writable directory: any account that finds the path can ask the agent to sign with the keys it holds, and the private key never has to be copied. Confirm who owns the directory and whether the agent is supposed to be reachable there"
+      }
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 4. Summary
+# -----------------------------------------------------------------------------
+emit {
+  "kind": "ssh_key_summary",
+  "severity": "info",
+  "accounts_checked": len(accounts),
+  "private_keys_found": keys_found,
+  "keys_readable_by_others": exposed,
+  "unreadable_ssh_files": unreadable,
+  "configs_with_command_directives": configs_with_commands,
+  "agent_sockets_in_shared_paths": agent_sockets,
+  "note": "private_keys_found counts files identified by their PEM/OpenSSH header, so a renamed or relocated key is included; a run that could not read another account's ~/.ssh will under-count and says so through unreadable_ssh_files"
+}

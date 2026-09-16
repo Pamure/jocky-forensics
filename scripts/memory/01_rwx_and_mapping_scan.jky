@@ -1,0 +1,242 @@
+# 01_rwx_and_deleted_mapping_scan.jky — what is mapped into the processes that
+# are running, and which of those mappings has no file behind it any more?
+#
+# The problem this answers
+# ------------------------
+# Two techniques leave the same two traces, and both live in `/proc/<pid>/maps`
+# rather than in the process list:
+#
+#   1. **Injection through the loader.** A library mapped from a path the
+#      distribution never wrote into — a drop zone, or an unlinked file — gets its
+#      code run inside a process that looks completely ordinary. The process's
+#      `exe` is still the packaged binary; the implant is one of its shared
+#      objects, and no file on disk has to exist for it.
+#   2. **Executable anonymous memory.** A region that is both writable and
+#      executable holds code that was placed there after the process started.
+#      Legitimate runtimes do this briefly (JIT compilers, some glibc startup),
+#      which is why the region is graded as a *lead* and its persistence and size
+#      are what make it interesting.
+#
+# What the output gives you
+# -------------------------
+# ``rwx_memory_region``               from the shared ``det.rwx`` detector in the
+#                                     runtime: anonymous writable+executable
+#                                     regions, already graded and deduplicated
+#                                     there. Reused rather than reimplemented, so
+#                                     this script and ``det.triage`` cannot
+#                                     disagree about the same process.
+# ``rwx_region_summary``              per-process counts of anonymous RWX regions
+#                                     and their total size. A JIT has one or two
+#                                     small ones; a shellcode stager has more, or
+#                                     a large one.
+# ``mapped_library_deleted``          high — a shared object mapped from a path
+#                                     the kernel has marked `(deleted)`: the code
+#                                     is running and its file is gone.
+# ``mapped_library_from_drop_zone``   high — a shared object mapped from /tmp,
+#                                     /var/tmp or /dev/shm.
+# ``executable_mapping_from_writable_path``
+#                                     high — any executable mapping from a
+#                                     world-writable directory, not just a `.so`.
+# ``mapped_memfd_executable``         high — an executable mapping backed by
+#                                     `memfd:`, i.e. code that exists only in
+#                                     memory.
+# ``mapped_file_missing``             medium — a mapping whose path exists in the
+#                                     map but not on disk, without the kernel's
+#                                     deleted marker. That combination is worth
+#                                     explaining: the usual causes are a mount
+#                                     that has gone away or a path through a
+#                                     namespace this run cannot see.
+# ``memory_map_summary``              processes examined, mappings examined, and
+#                                     how many mappings were in the three
+#                                     categories above.
+#
+# Cost control: at most 250 processes get their maps read, cheapest fields first,
+# and the per-process cost is one file read of `/proc/<pid>/maps`. Read-only: this
+# never attaches to a process, never reads its memory, and never writes to it.
+
+let maps_limit = 250
+let drop_zones = ["/tmp/", "/dev/shm/", "/var/tmp/", "/run/shm/"]
+
+fn in_drop_zone(path) {
+  for zone in drop_zones {
+    if path.starts_with(zone) {
+      return true
+    }
+  }
+  return false
+}
+
+fn is_library(path) {
+  let base = fs.basename(path)
+  return contains(".so", base) or base.ends_with(".node") or base.ends_with(".dylib")
+}
+
+# -----------------------------------------------------------------------------
+# 1. The shared detector's view of anonymous RWX memory
+# -----------------------------------------------------------------------------
+# `det.rwx()` is the runtime's own check: it walks the same maps, applies the
+# runtime's thresholds and severities, and is what `det.triage()` reports. A
+# second implementation here would drift from it, so its findings are emitted
+# unchanged and this script adds the *file-backed* half it does not cover.
+let rwx_findings = det.rwx()
+let rwx_pids = {}
+for finding in rwx_findings {
+  emit finding
+  let pid = finding.evidence.get("pid", nil)
+  if pid != nil {
+    rwx_pids.set(str(pid), true)
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 2. Walk the maps of the processes we can read
+# -----------------------------------------------------------------------------
+let processes = proc.list(maps_limit)
+let processes_scanned = 0
+let mappings_examined = 0
+let deleted_libraries = 0
+let drop_zone_mappings = 0
+let memfd_mappings = 0
+let missing_files = 0
+let rwx_totals = {}
+
+for process in processes {
+  let maps = []
+  try {
+    set maps = proc.maps(process.pid)
+  } catch e {
+    set maps = []
+  }
+  if len(maps) == 0 {
+    # A process that exited, or one whose maps this run may not read. Counted as
+    # not scanned rather than as clean.
+    continue
+  }
+  set processes_scanned = processes_scanned + 1
+
+  let rwx_count = 0
+  let rwx_bytes = 0
+  for mapping in maps {
+    set mappings_examined = mappings_examined + 1
+    let path = mapping.get("path", "")
+    let perms = mapping.get("perms", "")
+    let executable = contains("x", perms)
+
+    if mapping.rwx and mapping.anonymous {
+      set rwx_count = rwx_count + 1
+      set rwx_bytes = rwx_bytes + mapping.get("size_kb", 0)
+    }
+
+    if path == "" {
+      continue
+    }
+
+    # -------------------------------------------------------------------------
+    # 3. A library whose file is gone
+    # -------------------------------------------------------------------------
+    # The kernel appends " (deleted)" to a mapping the inode no longer has a name
+    # for. A running executable that deleted its own payload keeps working, and
+    # the only evidence is here.
+    if mapping.deleted and is_library(path) {
+      set deleted_libraries = deleted_libraries + 1
+      emit {
+        "kind": "mapped_library_deleted",
+        "severity": "high",
+        "pid": process.pid,
+        "process": process.name,
+        "exe": process.exe,
+        "cmdline": process.cmdline,
+        "mapping": path,
+        "perms": perms,
+        "size_kb": mapping.get("size_kb", nil),
+        "recommendation": "preserve this process's memory before anything else: its code is running from a file that no longer exists, so a filesystem sweep will find nothing and terminating it destroys the only copy. Recover the region from /proc/<pid>/map_files or a memory image"
+      }
+    }
+
+    if mapping.memfd and executable {
+      set memfd_mappings = memfd_mappings + 1
+      emit {
+        "kind": "mapped_memfd_executable",
+        "severity": "high",
+        "pid": process.pid,
+        "process": process.name,
+        "cmdline": process.cmdline,
+        "mapping": path,
+        "perms": perms,
+        "size_kb": mapping.get("size_kb", nil),
+        "recommendation": "executable code backed by an anonymous memory file: there is no path on disk to preserve, so the process's memory is the evidence. Note that memfd is also how some sandboxes and runtimes load code, and the cmdline is what separates the two"
+      }
+    }
+
+    # -------------------------------------------------------------------------
+    # 4. Code mapped out of a writable directory
+    # -------------------------------------------------------------------------
+    if executable and in_drop_zone(path) {
+      set drop_zone_mappings = drop_zone_mappings + 1
+      emit {
+        "kind": "executable_mapping_from_writable_path",
+        "severity": "high",
+        "pid": process.pid,
+        "process": process.name,
+        "exe": process.exe,
+        "cmdline": process.cmdline,
+        "mapping": path,
+        "perms": perms,
+        "recommendation": "a running process has executable memory mapped from a directory any user can write to: hash the file now (it may be replaced under you), and check who created it and which process opened it first"
+      }
+    }
+
+    # -------------------------------------------------------------------------
+    # 5. A path the map names but the filesystem does not
+    # -------------------------------------------------------------------------
+    # Excluded when the kernel already marked it deleted (that case is above), and
+    # for pseudo-paths that are never files.
+    if not mapping.deleted and not mapping.memfd and path.starts_with("/") and not fs.exists(path) {
+      set missing_files = missing_files + 1
+      emit {
+        "kind": "mapped_file_missing",
+        "severity": "medium",
+        "pid": process.pid,
+        "process": process.name,
+        "mapping": path,
+        "perms": perms,
+        "recommendation": "the map names a path with no file behind it and without the kernel's deleted marker: a mount that went away, a path visible only inside another namespace, or a file removed by a mechanism that also cleared the marker. Read /proc/<pid>/root and /proc/<pid>/mountinfo for this process to tell those apart"
+      }
+    }
+  }
+
+  if rwx_count > 0 {
+    rwx_totals.set(str(process.pid), rwx_bytes)
+    emit {
+      "kind": "rwx_region_summary",
+      "severity": "info",
+      "pid": process.pid,
+      "process": process.name,
+      "exe": process.exe,
+      "cmdline": process.cmdline,
+      "started_iso": time.iso(process.start_epoch),
+      "anonymous_rwx_regions": rwx_count,
+      "anonymous_rwx_kb": rwx_bytes,
+      "reported_by_det_rwx": rwx_pids.has(str(process.pid)),
+      "note": "one or two small anonymous RWX regions is the normal state of every JIT and of some libc allocators; a large count, a large size, or one that persists in a process that should not have any is the interesting case"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 6. Summary
+# -----------------------------------------------------------------------------
+emit {
+  "kind": "memory_map_summary",
+  "severity": "info",
+  "processes_listed": len(processes),
+  "processes_scanned": processes_scanned,
+  "mappings_examined": mappings_examined,
+  "deleted_library_mappings": deleted_libraries,
+  "drop_zone_executable_mappings": drop_zone_mappings,
+  "memfd_executable_mappings": memfd_mappings,
+  "mappings_without_a_file": missing_files,
+  "processes_with_rwx_regions": len(keys(rwx_totals)),
+  "maps_read_limit": maps_limit,
+  "note": "processes_scanned is bounded by maps_read_limit and by what this run may read; a process that could not be read is absent from every count here rather than counted as clean"
+}

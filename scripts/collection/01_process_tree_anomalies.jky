@@ -1,0 +1,225 @@
+# 01_process_tree_anomalies.jky — does the process tree have the *shape* a
+# healthy host's tree has?
+#
+# The problem this answers
+# ------------------------
+# "What is running" is answered by a process list. "Is what is running arranged
+# the way real programs arrange themselves" is a different question, and it is
+# the one that finds implants. A process cannot invent its own parent: the
+# kernel writes ``ppid``, ``session`` and the start time, and a process that
+# hides itself from the visible table leaves a hole where its children point.
+# The shapes below are *structurally* impossible on a host nobody has tampered
+# with, so they are worth an analyst's time even when every individual process
+# looks ordinary.
+#
+# What each finding means
+# -----------------------
+# ``self_parented_process``       ppid == pid with ppid > 0. The kernel never
+#                                 creates this. Either /proc is being filtered,
+#                                 or a rootkit is editing the tree view.
+# ``process_parent_invisible``    the parent PID is neither visible nor the
+#                                 expected reparenting targets (0 = swapper,
+#                                 1 = init, 2 = kthreadd). A dead parent makes
+#                                 a child reparent to 1 (or to the nearest
+#                                 subreaper), so a hole here means something is
+#                                 hiding PIDs — most often the host is mounted
+#                                 with ``hidepid``, which is why this is graded
+#                                 low until corroborated.
+# ``child_predates_parent``       the child's start time is earlier than its
+#                                 parent's. Impossible for a live pair, so the
+#                                 visible "parent" is a *different* process that
+#                                 inherited the PID after the real one exited:
+#                                 PID reuse, and the tree cannot be trusted
+#                                 around those two PIDs.
+# ``detached_interpreter``        an interpreter or a shell whose parent is
+#                                 init. That is what a double-forked implant
+#                                 looks like; it is also what a hand-started
+#                                 ``nohup``/``setsid`` job looks like, hence
+#                                 medium rather than high.
+# ``unexpected_root_child``       a uid 0 process whose parent runs as a
+#                                 different, unprivileged uid and is not one of
+#                                 the setuid helpers that legitimately cross
+#                                 that boundary. Something elevated without a
+#                                 login, ``su``/``sudo`` or a service manager
+#                                 in the chain is the privilege transition an
+#                                 analyst wants to reconstruct.
+#
+# Read the summary row first (``process_tree_shape``): it carries the tree-wide
+# counts and the busiest parents, which is what tells you whether an anomaly
+# below is one odd process or a systematic hole in the table.
+#
+# Cheap by design: one ``proc.list`` pass, one index, no descriptors and no
+# memory maps — the anomaly is in the metadata, not in the process contents.
+
+# -----------------------------------------------------------------------------
+# 1. One pass over /proc, indexed by pid so each parent lookup is O(1)
+# -----------------------------------------------------------------------------
+let procs = proc.list(600)
+let by_pid = index_by(procs, fn(p) { return p.pid })
+
+# Sessions (ttys) and interpreter names are the two vocabularies this script
+# compares against. Both are deliberately short: a long allow-list turns the
+# check into a rubber stamp.
+let interpreters = ["sh", "bash", "dash", "ash", "zsh", "ksh", "csh", "tcsh",
+                    "fish", "python", "python2", "python3", "perl", "ruby",
+                    "php", "node", "lua", "busybox", "nc", "ncat", "socat"]
+
+# help(fn) — setuid helpers and service managers that legitimately turn an
+# unprivileged parent into a root child. Crossing uid 0 without one of these is
+# the finding; knowing which binary did it is the pivot.
+let privilege_bridges = ["sudo", "su", "login", "sshd", "sshd-session", "systemd",
+                         "systemd-user", "systemd-logind", "pkexec", "polkitd",
+                         "runuser", "cron", "crond", "atd", "dbus-daemon",
+                         "passwd", "chsh", "chfn", "newgrp", "sulogin",
+                         "agetty", "unix_chkpwd", "gdm", "gdm3", "lightdm",
+                         "sddm", "xdm", "startx", "container-init"]
+
+let anomaly_count = 0
+let child_counts = {}
+
+fn note(kind, severity, evidence) {
+  # A single place that turns a raw anomaly into a finding, so every emit below
+  # carries the same shape: kind, severity, evidence, recommendation.
+  set anomaly_count = anomaly_count + 1
+  emit {
+    "kind": kind,
+    "severity": severity,
+    "evidence": evidence,
+    "recommendation": "corroborate against a second view of the process table (/proc/<pid>/stat, the audit log, or a memory image) before acting; a tree anomaly is a direction to look, not a verdict"
+  }
+}
+
+for p in procs {
+  # Count children per parent here; the summary row below reports the shape.
+  let key = str(p.ppid)
+  set child_counts[key] = child_counts.get(key, 0) + 1
+
+  # ---------------------------------------------------------------------------
+  # 2. Structurally impossible: a process that is its own parent
+  # ---------------------------------------------------------------------------
+  if p.ppid == p.pid and p.ppid > 0 {
+    note("self_parented_process", "critical", {
+      "pid": p.pid,
+      "name": p.name,
+      "exe": p.exe,
+      "cmdline": p.cmdline,
+      "note": "ppid == pid is never produced by the kernel; a tampered or filtered /proc table is the usual explanation"
+    })
+    continue
+  }
+
+  let parent = by_pid.get(str(p.ppid), nil)
+
+  if parent == nil {
+    # ppid 0 (swapper), 1 (init) and 2 (kthreadd) are the three legal
+    # parentless-looking values, and a child whose parent exited is reparented
+    # to one of them. Anything else is a hole in the visible table.
+    if p.ppid != 0 and p.ppid != 1 and p.ppid != 2 {
+      note("process_parent_invisible", "low", {
+        "pid": p.pid,
+        "name": p.name,
+        "exe": p.exe,
+        "ppid": p.ppid,
+        "uid": p.uid,
+        "cmdline": p.cmdline,
+        "note": "parent PID is not in the visible process table; check whether /proc is mounted with hidepid=<n> (gid option) and whether the missing PID is a plausible ancestor"
+      })
+    }
+    continue
+  }
+
+  # ---------------------------------------------------------------------------
+  # 3. A child that started before the parent it is attached to
+  # ---------------------------------------------------------------------------
+  # start_epoch comes from /proc/<pid>/stat field 22 plus btime, so both values
+  # are kernel-authored. The one-second slack absorbs clock-tick rounding.
+  if p.start_epoch + 1.0 < parent.start_epoch {
+    note("child_predates_parent", "low", {
+      "pid": p.pid,
+      "name": p.name,
+      "started": p.start_epoch,
+      "ppid": parent.pid,
+      "parent_name": parent.name,
+      "parent_started": parent.start_epoch,
+      "delta_seconds": parent.start_epoch - p.start_epoch,
+      "note": "the visible parent started after its child, so the PID was reused: this pair's ancestry is unusable and both PIDs should be checked against the audit log"
+    })
+  }
+
+  # ---------------------------------------------------------------------------
+  # 4. Interpreter detached straight onto init
+  # -----------------------------------------------------------------------------
+  # Only reported when the parent really is init (a normal shell's parent is a
+  # terminal, sshd, tmux or another shell). uid 0 interpreters are left to the
+  # privileged-session checks — a root shell on a tty is an operator, not this.
+  let exe = p.exe
+  if p.ppid == 1 and exe != nil and p.uid != nil and p.uid != 0 {
+    let base = fs.basename(exe)
+    if contains(base, interpreters) {
+      note("detached_interpreter", "medium", {
+        "pid": p.pid,
+        "name": p.name,
+        "exe": exe,
+        "uid": p.uid,
+        "cmdline": p.cmdline,
+        "started": p.start_epoch,
+        "cwd": p.cwd,
+        "note": "interpreter reparented to init: a double-forked daemon or an implant that detached from its launcher; a setsid/nohup job looks identical"
+      })
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 5. A root child of an unprivileged process, with no helper in between
+  # ---------------------------------------------------------------------------
+  let parent_exe = parent.exe
+  if p.uid != nil and p.uid == 0 and parent.uid != nil and parent.uid != 0 and parent_exe != nil {
+    let parent_base = fs.basename(parent_exe)
+    if not contains(parent_base, privilege_bridges) {
+      note("unexpected_root_child", "medium", {
+        "pid": p.pid,
+        "exe": exe,
+        "cmdline": p.cmdline,
+        "ppid": parent.pid,
+        "parent_exe": parent_exe,
+        "parent_uid": parent.uid,
+        "note": "an unprivileged parent produced a uid 0 process without su, sudo, login, pkexec or a service manager; explain the elevation or treat the child as suspect"
+      })
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 6. The tree's shape, for context
+# -----------------------------------------------------------------------------
+# A finding above is only interesting relative to the whole tree: 4 000
+# processes with three anomalies is a healthy host with a quirk, and 40
+# processes with three anomalies is not.
+let busiest = []
+for key in keys(child_counts) {
+  if child_counts[key] >= 12 {
+    let owner = by_pid.get(key, nil)
+    let owner_name = "not visible"
+    let owner_exe = nil
+    if owner != nil {
+      set owner_name = owner.name
+      set owner_exe = owner.exe
+    }
+    busiest.push({
+      "ppid": key,
+      "children": child_counts[key],
+      "name": owner_name,
+      "exe": owner_exe
+    })
+  }
+}
+
+emit {
+  "kind": "process_tree_shape",
+  "severity": "info",
+  "processes": len(procs),
+  "distinct_parents": len(child_counts),
+  "anomalies": anomaly_count,
+  "parents_with_12_or_more_children": sort_by(busiest, fn(r) { return -r.children }),
+  "note": "a parent PID in this list that you cannot name is the most useful thing in this script"
+}

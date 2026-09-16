@@ -144,20 +144,34 @@ Per-build transforms and what each one buys:
 | Constant encryption (per-constant cipher + key) | no literal strings/numbers appear | plaintext markers (paths, patterns) in the artifact |
 | Constant splitting (`1000` → `512+488`, `"long-string"` → 3 concats) | instruction stream grows/shifts | signatures keyed to literal representation |
 | Junk insertion at statement boundaries | code length varies by build | length fingerprints |
+| Branch inversion, opaque predicates, unreachable-block injection | per build: the branching skeleton — where blocks split, which conditional opcode is used, where dead blocks sit | control-flow-shape matching, basic-block fingerprints |
 | Keystream-encrypted payload + random padding + random seed | whole-file entropy and size vary | file hashes, chunk hashing, similarity/fuzzy hashing |
 
 Measured ceiling (see `research/findings/lim-polymorph.md` and
-`res-obfuscation.md`): **the statement-level control-flow graph is identical
+`res-obfuscation.md`, which measured the encoder *before* the control-flow
+transforms): **the statement-level control-flow graph used to be identical
 across builds.** The assembly-level permutation, slot remapping and junk
-insertion change bytes and counts, not shape. A ~120-line standalone unpacker
-recovers constants, names and a full listing in about a millisecond, and the
-artifact ships its own opcode bijection in the header because the VM has to be
-able to read it.
+insertion change bytes and counts, not shape. That no longer holds: the encoder
+inverts conditional branches (`JMPF t` becomes `JMPT next; JMP t` and the
+converse), prefixes a random subset of instructions with an opaque predicate
+whose outcome is fixed at build time but not readable from the artifact,
+dispatches unconditional jumps through an empty iterator (`CONST nil;
+ITER_INIT; ITER_NEXT t; POP; POP`), and fills behind every jump with
+unreachable but well-formed code, so the branching skeleton is drawn fresh per
+build. Measured over 64 builds of `scripts/hunt.jky`: the branch-skeleton
+signature is 64 distinct values (128 distinct over 128 builds), where before
+the change it was always 1, at +31-33% artifact size, +67-69% instructions and
++27-28% executed steps (two runs; the densities are themselves random per
+build, so the figures are ranges) — the cost of the extra blocks and of the
+pool entries they reference. A ~120-line standalone unpacker
+still recovers constants, names and a full listing in about a millisecond, and
+the artifact ships its own opcode bijection in the header because the VM has to
+be able to read it.
 
-What it does **not** defeat: control-flow-shape matching, kernel/EDR telemetry
-of the decryption step, and memory scanning of the decoded program once it runs.
-The honest claim is "unique bytes and no plaintext program on disk", not
-"signature- or analysis-resistant".
+What it does **not** defeat: kernel/EDR telemetry of the decryption step, and
+memory scanning of the decoded program once it runs. The honest claim is
+"unique bytes, a per-build control-flow shape, and no plaintext program on
+disk", not "analysis-resistant".
 
 ---
 
@@ -244,9 +258,17 @@ findings).
 * **Flow** — operator `POST /v1/jobs/submit` → agent polls `POST /v1/jobs/poll`
   → executes in-process (`run` or `fileless`) → `POST /v1/jobs/result` stores
   findings → operator reads `GET /v1/status` / `GET /v1/findings`.
-* **Frontable mode** — the client can send a different SNI/Host than the
-  address it dials, which is the client-side mechanic domain fronting needs.
-  No CDN is involved locally; the code says so instead of implying otherwise.
+* **Ingress selection, not fronting.** The client can dial one address while
+  presenting a different TLS server name (`--sni`) and HTTP `Host`
+  (`--host-header`), which is what a shared ingress answering for several
+  virtual hosts needs. It is **not** domain fronting and the earlier claim that
+  it was has been withdrawn: fronting requires an SNI that differs from the
+  `Host` *and* a CDN that routes on the inner header, and every tier-1 provider
+  closed that — Google in 2018, Cloudflare and AWS in 2020, Azure across Front
+  Door and CDN, Fastly by 2024. A single parameter that set both fields could
+  not have expressed the mismatch even before that. The distinction is stated in
+  `--help`, in the module docstring, and in `docs/EVASION.md`, because a
+  capability described as a dead technique is a capability nobody can evaluate.
 * **Console** — `GET /` serves a single-page operator interface
   (`jocky/agent/dashboard.py`): fleet status, job queue, findings table with
   severity filters, and a job submission form. It is one Python string with

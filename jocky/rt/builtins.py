@@ -459,6 +459,47 @@ def _yara_namespace() -> Dict[str, Any]:
     }
 
 
+def _pcap_namespace() -> Dict[str, Any]:
+    """Offline network-capture analysis — the other half of "network forensics".
+
+    Reading a live socket table answers "what is connected now". Reading a
+    capture answers "what was connected then", which is what most network
+    investigations actually have: a pcap taken before the analyst arrived. The
+    parsers are stdlib-only and bounded, and every one of them reports malformed
+    input in-band rather than raising — a capture is evidence, and a parser that
+    aborts on the one corrupt record it met is a parser that discards the rest.
+    """
+    from jocky.rt import pcap as pcap_mod
+
+    def _read(vm: Any, a: List[Any]) -> Dict[str, Any]:
+        path = _str(a[0])
+        limit = _int(a[1]) if len(a) > 1 and a[1] is not None else None
+        result = pcap_mod.read_pcap(path, limit=limit)
+        if result.get("stop_reason") == "not-pcap":
+            # The magic did not match, so this may be the block-based format.
+            # Which it is, is a property of the bytes rather than of the file
+            # name — a capture called capture.txt is still a capture.
+            result = pcap_mod.read_pcapng(path, limit=limit)
+        return result
+
+    def _decoder(fn: Any) -> Any:
+        def call(vm: Any, a: List[Any]) -> Any:
+            limit = _int(a[1]) if len(a) > 1 and a[1] is not None else None
+            return fn(a[0], limit=limit)
+        return call
+
+    return {
+        "read": _fn("pcap.read", _read, 1, 2),
+        "decode": _fn("pcap.decode", lambda vm, a: pcap_mod.decode_packet(
+            _str(a[0]).encode("latin-1"),
+            _int(a[1]) if len(a) > 1 else 1), 1, 2),
+        "flows": _fn("pcap.flows", _decoder(pcap_mod.flows), 1, 2),
+        "dns": _fn("pcap.dns", _decoder(pcap_mod.dns_queries), 1, 2),
+        "tls": _fn("pcap.tls", _decoder(pcap_mod.tls_client_hellos), 1, 2),
+        "http": _fn("pcap.http", _decoder(pcap_mod.http_requests), 1, 2),
+    }
+
+
 def namespaces() -> Dict[str, Any]:
     """The host-facing namespaces."""
 
@@ -594,6 +635,7 @@ def namespaces() -> Dict[str, Any]:
         "ld_preload": _fn("det.ld_preload", lambda vm, a: detect.ld_preload_check(), 0, 0),
         "hidden_modules": _fn("det.hidden_modules", lambda vm, a: detect.hidden_modules(), 0, 0),
         "byovd": _fn("det.byovd", lambda vm, a: detect.byovd(), 0, 0),
+        "winject": _fn("det.winject", lambda vm, a: detect.winject(), 0, 0),
         "world_writable_path": _fn("det.world_writable_path", lambda vm, a: detect.world_writable_path(), 0, 0),
         "persistence": _fn("det.persistence", lambda vm, a: detect.persistence(), 0, 0),
     }
@@ -609,6 +651,7 @@ def namespaces() -> Dict[str, Any]:
     re_ns = _re_namespace()
     ns = {"proc": proc_ns, "net": net_ns, "fs": fs_ns, "sys": sys_ns,
           "det": det_ns, "ioc": ioc_ns, "mem": mem_ns, "re": re_ns,
+          "pcap": _pcap_namespace(),
           "sigma": _sigma_namespace(), "yara": _yara_namespace()}
     # `time`/`tl` come from the runtime module that owns them; keeping them
     # here means the documentation generator, which enumerates this mapping,

@@ -49,7 +49,7 @@ KEYWORDS = (
 
 #: Host namespaces a script can call into (``jocky/rt/builtins.py:namespaces``).
 NAMESPACES = ("proc", "net", "fs", "sys", "det", "ioc", "mem", "time", "tl", "re",
-              "sigma", "yara")
+              "sigma", "yara", "pcap")
 
 #: Value/collection natives from ``jocky/rt/builtins.py:core_builtins``.
 BUILTINS = (

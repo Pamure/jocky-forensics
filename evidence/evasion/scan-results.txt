@@ -1,0 +1,85 @@
+defender-platform=4.18.26080.4-0
+signature-version=1.459.226.0
+realtime-protection=True
+
+detections-before=5
+eicar-on-disk-after-3s=True
+detections-after-eicar=6
+POSITIVE-CONTROL=PASS  (the harness detects a known-bad file)
+
+--- scanning JOCKY artifacts ---
+art01.build bytes=3051 scan-exit=0
+art02.build bytes=2854 scan-exit=0
+art03.build bytes=2706 scan-exit=0
+art04.build bytes=2698 scan-exit=0
+art05.build bytes=2857 scan-exit=0
+art06.build bytes=2952 scan-exit=0
+art07.build bytes=2848 scan-exit=0
+art08.build bytes=2784 scan-exit=0
+art09.build bytes=2843 scan-exit=0
+art1.build bytes=2830 scan-exit=0
+art10.build bytes=2677 scan-exit=0
+art11.build bytes=2836 scan-exit=0
+art12.build bytes=2654 scan-exit=0
+art13.build bytes=2831 scan-exit=0
+art14.build bytes=2861 scan-exit=0
+art15.build bytes=2824 scan-exit=0
+art16.build bytes=2909 scan-exit=0
+art17.build bytes=2943 scan-exit=0
+art18.build bytes=2769 scan-exit=0
+art19.build bytes=2740 scan-exit=0
+art2.build bytes=2826 scan-exit=0
+art20.build bytes=2875 scan-exit=0
+art3.build bytes=2876 scan-exit=0
+art4.build bytes=2747 scan-exit=0
+art5.build bytes=2808 scan-exit=0
+art6.build bytes=2884 scan-exit=0
+art7.build bytes=2723 scan-exit=0
+art8.build bytes=2775 scan-exit=0
+art9.build bytes=2829 scan-exit=0
+
+--- scanning JOCKY source and package ---
+evidence.jky scan-exit=0
+hunt.jky scan-exit=0
+inventory.jky scan-exit=0
+quickstart.jky scan-exit=0
+smoke.jky scan-exit=0
+canon.py scan-exit=0
+case.py scan-exit=0
+ci.py scan-exit=0
+cli.py scan-exit=0
+diagnostics.py scan-exit=0
+
+detections-final=6
+net-new-detections=0
+
+--- recent detection history ---
+
+
+ThreatID             : 2147843494
+InitialDetectionTime : 11-09-2026 22:44:22
+Resources            : {file:_C:\Users\murta\Downloads\architecture (1).html, 
+                       webfile:_C:\Users\murta\Downloads\architecture 
+                       (1).html|https://web.whatsapp.com/|pid:1764,ProcessStart:134336204614857725}
+
+ThreatID             : 2147843494
+InitialDetectionTime : 12-09-2026 18:57:48
+Resources            : {file:_C:\Users\murta\OneDrive\Documents\college\edge computing\sessional\architecture.html, 
+                       webfile:_C:\Users\murta\OneDrive\Documents\college\edge computing\sessional\architecture.html|ht
+                       tps://discord.com/|pid:28508,ProcessStart:134336932670939115}
+
+ThreatID             : 2147843494
+InitialDetectionTime : 11-09-2026 22:39:12
+Resources            : {file:_C:\Users\murta\Downloads\architecture.html, webfile:_C:\Users\murta\Downloads\architectur
+                       e.html|https://discord.com/|pid:6012,ProcessStart:134336201508460814}
+
+ThreatID             : 2147519003
+InitialDetectionTime : 16-09-2026 12:13:16
+Resources            : {file:_C:\Users\murta\AppData\Local\Temp\jky-ev\eicar.com}
+
+ThreatID             : 2147519003
+InitialDetectionTime : 16-09-2026 12:12:55
+Resources            : {file:_C:\Users\murta\AppData\Local\Temp\jky-ev\eicar.com}
+
+
+

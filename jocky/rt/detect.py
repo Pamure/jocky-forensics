@@ -194,6 +194,37 @@ CHECK_CATALOG = (
         "action": "enumerate the offending modules before drawing conclusions from any check",
     },
     {
+        "check": "hollowed_process",
+        "severity": "high",
+        "source": "on-disk image vs the image mapped in the process (Windows)",
+        "summary": ("A process's main image differs from its file on disk — the "
+                    "process-hollowing signature."),
+        "action": "dump the memory image and compare entry-point bytes against a known-good copy",
+    },
+    {
+        "check": "private_executable_memory",
+        "severity": "medium",
+        "source": "VirtualQueryEx region walk (Windows)",
+        "summary": ("Committed private memory that is executable — where a "
+                    "manually-mapped payload lives. Also where a JIT lives."),
+        "action": "correlate with the process's provenance; a JIT runtime looks identical",
+    },
+    {
+        "check": "unbacked_thread_start",
+        "severity": "high",
+        "source": "thread start addresses vs loaded modules (Windows)",
+        "summary": ("A thread's start address lies outside every loaded module — the "
+                    "thread-execution-hijacking signal."),
+        "action": "capture the thread context and the memory at its start address",
+    },
+    {
+        "check": "module_from_temp_path",
+        "severity": "medium",
+        "source": "loaded module paths (Windows)",
+        "summary": "A module was loaded from a temporary or world-writable directory.",
+        "action": "hash the module and identify what loaded it",
+    },
+    {
         "check": "hijackable_path",
         "severity": "low",
         "source": "$PATH resolved through symlinks + /proc/mounts",
@@ -626,6 +657,36 @@ def byovd(snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     return _byovd.byovd_findings()
 
 
+def winject(snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
+    """Windows process-injection detection, as one callable.
+
+    The mirror of the techniques pillar 3 names — process hollowing, reflective
+    injection, thread hijacking — implemented as *detection* only. The execution
+    side is deliberately absent (see ``docs/DESIGN.md`` §10); what an analyst
+    needs on Windows is to find these, and until now the runtime could only do
+    that on Linux.
+
+    Exposed separately from ``triage`` because it reads other processes' memory:
+    bounded, but heavier than the default checks, so triage runs it in ``deep``
+    mode the same way it gates ``persistence`` and the memfd mapping walk.
+    """
+    from jocky.rt import winject as _winject
+    if not _winject.available():
+        return []
+    findings: List[Dict[str, Any]] = []
+    for detector in (_winject.hollowed_processes,
+                     _winject.executable_private_memory,
+                     _winject.unbacked_executable_threads,
+                     _winject.modules_from_temp_paths):
+        try:
+            findings.extend(detector())
+        except Exception as exc:  # a failed detector must not stop the sweep
+            findings.append(_finding("check_error", "info",
+                                     f"{detector.__name__} failed",
+                                     {"error": repr(exc)}))
+    return findings
+
+
 def world_writable_path(snapshot: Optional[Snapshot] = None) -> List[Dict[str, Any]]:
     """PATH directories the current user could plant a binary in."""
     out: List[Dict[str, Any]] = []
@@ -716,6 +777,10 @@ def triage(deep: bool = False, max_pids: int = 400) -> Dict[str, Any]:
     if deep:
         findings.extend(memfd_mappings(max_pids=max_pids, snapshot=snapshot))
         findings.extend(persistence())
+        # Windows-only, and the heaviest check here: each of these reads another
+        # process's image or address space. Deep mode is where the Linux side
+        # puts its expensive walks too, so it sits with them.
+        findings.extend(winject())
     findings = _dedup_findings(findings)
     counts: Dict[str, int] = {level: 0 for level in SEVERITY_ORDER}
     processes = procfs.list_processes()

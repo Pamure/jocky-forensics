@@ -248,7 +248,8 @@ route table (`/v1/health`, `/v1/enroll`, `/v1/jobs/submit`, `/v1/jobs/poll`,
 agent provenance across restarts. `agent/client.py` polls for jobs, executes
 them in-process through `runner` and posts results back; it can send a
 different SNI/Host than the address it dials, which is the client-side half of
-domain fronting (no CDN is bundled). See
+ingress/vhost selection, which is NOT domain fronting (no CDN is bundled,
+and every tier-1 provider closed fronting between 2018 and 2024). See
 [Server & agents](/docs/operations/management).
 
 ## Case integrity

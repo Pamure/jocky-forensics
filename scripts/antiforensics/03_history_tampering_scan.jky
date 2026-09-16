@@ -1,0 +1,343 @@
+# 03_history_tampering_scan.jky — is the shell history consistent with the
+# sessions that produced it?
+#
+# The problem this answers
+# ------------------------
+# `~/.bash_history` is the first thing an operator reads and the first thing an
+# intruder edits, and the two failure modes are different in kind. Deleting the
+# file leaves an account that has clearly been used with no history at all.
+# Editing it leaves a history that is *possible* but incomplete — which is why
+# this script compares history against something the attacker does not control:
+# the running processes. A shell that is alive right now with an empty history
+# file has had its history removed during the session, not before it.
+#
+# What each finding means
+# -----------------------
+# ``history_file``                    the inventory: one row per history file with
+#                                     size, mode, owner, mtime.
+# ``history_file_symlinked``          the history is a symlink — at /dev/null it
+#                                     is silent, at any other path the record is
+#                                     somewhere else.
+# ``history_writable_by_others``      a history file another account can write:
+#                                     forgeable, and the usual companion of a
+#                                     world-writable home directory.
+# ``history_readable_by_others``      a history file others can read. Low on its
+#                                     own, high-value during a case: histories
+#                                     contain credentials typed on the wrong line
+#                                     and the names of the files an incident
+#                                     touches.
+# ``history_owned_by_other_account``  the file's owner is not the account whose
+#                                     home it sits in.
+# ``history_emptied_during_session``  the file is empty while a shell belonging
+#                                     to that account is running right now. This
+#                                     is the finding that survives a plausible
+#                                     story about "never used that account".
+# ``history_metadata_touched_recently``
+#                                     old content, metadata changed in the last
+#                                     day: an edit or a copy into place.
+# ``history_missing_for_interactive_account``
+#                                     an account with a real login shell and a
+#                                     home directory that contains no history
+#                                     file at all.
+# ``shell_history_disabled_in_environment``
+#                                     a *running* shell whose environment carries
+#                                     HISTFILE=/dev/null or an empty HISTFILE, or
+#                                     HISTCONTROL=ignorespace. Read from the
+#                                     process, so it is true of right now.
+#
+# Read ``history_inventory_summary`` for the counts, then the two findings that
+# describe the present rather than the past: ``history_emptied_during_session``
+# and ``shell_history_disabled_in_environment``.
+
+# -----------------------------------------------------------------------------
+# 1. Accounts, shells, and who is running right now
+# -----------------------------------------------------------------------------
+let shells = []
+let shells_outcome = {"ok": true, "content": ""}
+try {
+  set shells_outcome.content = fs.read("/etc/shells", 65536)
+} catch e {
+  set shells_outcome.ok = false
+}
+if shells_outcome.ok {
+  for raw in shells_outcome.content.lines() {
+    let text = raw.strip()
+    if text != "" and not text.starts_with("#") {
+      shells.push(text)
+    }
+  }
+}
+# The fallback list is used only when /etc/shells is unreadable, so the check
+# still runs on a host that keeps its shells somewhere unusual.
+let interactive_shell_names = ["bash", "zsh", "fish", "ksh", "dash", "sh", "csh",
+                               "tcsh", "ash"]
+
+fn is_interactive_account(entry) {
+  if len(shells) > 0 {
+    return contains(entry.shell, shells)
+  }
+  return contains(fs.basename(entry.shell), interactive_shell_names)
+}
+
+let accounts = []
+let passwd_outcome = {"ok": true, "content": ""}
+try {
+  set passwd_outcome.content = fs.read("/etc/passwd", 262144)
+} catch e {
+  set passwd_outcome.ok = false
+}
+if passwd_outcome.ok {
+  for raw in passwd_outcome.content.lines() {
+    let fields = raw.strip().split(":")
+    if len(fields) < 7 {
+      continue
+    }
+    let home = fields[5]
+    if not home.starts_with("/") or home == "/" {
+      continue
+    }
+    # Service accounts carry /dev, /proc and /run/... as their home.
+    let pseudo = false
+    for candidate in ["/dev", "/proc", "/sys", "/run"] {
+      if home == candidate or home.starts_with(candidate + "/") {
+        set pseudo = true
+      }
+    }
+    if pseudo or contains("nonexistent", home) {
+      continue
+    }
+    accounts.push({
+      "name": fields[0],
+      "uid": fields[2],
+      "home": home,
+      "shell": fields[6],
+      "exists": fs.exists(home)
+    })
+  }
+}
+
+# uids that have a process attached to a terminal: the live-session set. Read
+# once, so "emptied during a session" is a comparison between what is on disk and
+# what is running at this instant.
+let session_pids = {}
+for process in proc.list(600) {
+  if process.tty != nil and process.tty != 0 and process.uid != nil {
+    session_pids.set(str(process.uid), process)
+  }
+}
+
+let history_names = [".bash_history", ".zsh_history", ".sh_history", ".history",
+                     ".local/share/fish/fish_history", ".python_history",
+                     ".mysql_history", ".psql_history", ".node_repl_history"]
+
+let examined = 0
+let accounts_with_history = 0
+let missing = 0
+let now = time.now()
+
+# -----------------------------------------------------------------------------
+# 2. Per-account history files
+# -----------------------------------------------------------------------------
+fn examine_history(account, path) {
+  set examined = examined + 1
+  let metadata = fs.stat(path)
+  if metadata == nil or metadata.is_dir {
+    return 0
+  }
+
+  if metadata.is_link {
+    let target = metadata.get("target", nil)
+    emit {
+      "kind": "history_file_symlinked",
+      "severity": "high",
+      "account": account.name,
+      "path": path,
+      "target": target,
+      "recommendation": "follow the link before reading the history: pointed at /dev/null the shell writes the record nowhere, and pointed anywhere else it writes it somewhere the account can hide"
+    }
+  }
+
+  emit {
+    "kind": "history_file",
+    "severity": "info",
+    "account": account.name,
+    "uid": account.uid,
+    "path": path,
+    "size": metadata.size,
+    "mode": metadata.mode,
+    "mode_str": metadata.mode_str,
+    "owner_uid": metadata.uid,
+    "mtime": metadata.mtime,
+    "mtime_iso": time.iso(metadata.mtime),
+    "ctime": metadata.ctime,
+    "ctime_iso": time.iso(metadata.ctime),
+    "empty": metadata.size == 0
+  }
+
+  if metadata.uid != nil and str(metadata.uid) != account.uid {
+    emit {
+      "kind": "history_owned_by_other_account",
+      "severity": "medium",
+      "account": account.name,
+      "path": path,
+      "file_uid": metadata.uid,
+      "account_uid": account.uid,
+      "recommendation": "a history file owned by someone else is either a misconfiguration or an attempt to attribute one account's commands to another; check the home directory's ownership too"
+    }
+  }
+
+  let group_write = metadata.mode_str.substr(5, 6) == "w"
+  let other_read = metadata.mode_str.substr(7, 8) == "r"
+  if metadata.world_writable or group_write {
+    emit {
+      "kind": "history_writable_by_others",
+      "severity": "high",
+      "account": account.name,
+      "path": path,
+      "mode": metadata.mode,
+      "mode_str": metadata.mode_str,
+      "recommendation": "set 0600: a history another account can write is a history another account can forge, and it is also how a payload is planted to run when the operator pastes a line from it"
+    }
+  }
+  if other_read {
+    emit {
+      "kind": "history_readable_by_others",
+      "severity": "low",
+      "account": account.name,
+      "path": path,
+      "mode": metadata.mode,
+      "mode_str": metadata.mode_str,
+      "recommendation": "treat this history as disclosed: shell histories routinely contain credentials typed on the wrong line, internal hostnames, and the paths of the files this investigation cares about"
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 3. Empty while the account is logged in
+  # ---------------------------------------------------------------------------
+  let live = session_pids.get(account.uid, nil)
+  if metadata.size == 0 and live != nil {
+    emit {
+      "kind": "history_emptied_during_session",
+      "severity": "high",
+      "account": account.name,
+      "path": path,
+      "live_pid": live.pid,
+      "live_process": live.name,
+      "live_cmdline": live.cmdline,
+      "recommendation": "this account has a shell running now and no history on disk: interpret the account's commands from the process table and the audit log, not from its history, and ask what removed the file while the session was live"
+    }
+  }
+
+  if metadata.ctime - metadata.mtime > 24 * 3600 and now - metadata.ctime < 24 * 3600 and metadata.size > 0 {
+    emit {
+      "kind": "history_metadata_touched_recently",
+      "severity": "medium",
+      "account": account.name,
+      "path": path,
+      "mtime_iso": time.iso(metadata.mtime),
+      "ctime_iso": time.iso(metadata.ctime),
+      "size": metadata.size,
+      "recommendation": "the content is old but the metadata is new: a rewrite, a copy into place or a chmod all look like this, and the shell's own append pattern does not"
+    }
+  }
+  return 0
+}
+
+for account in accounts {
+  if not account.exists {
+    continue
+  }
+  let found = 0
+  for name in history_names {
+    let path = account.home + "/" + name
+    if fs.exists(path) {
+      set found = found + 1
+      examine_history(account, path)
+    }
+  }
+  if found > 0 {
+    set accounts_with_history = accounts_with_history + 1
+    continue
+  }
+  if is_interactive_account(account) {
+    set missing = missing + 1
+    emit {
+      "kind": "history_missing_for_interactive_account",
+      "severity": "low",
+      "account": account.name,
+      "home": account.home,
+      "shell": account.shell,
+      "recommendation": "an account with a login shell and a home directory but no history file: a new account looks like this, and so does one whose history was removed. Check the account's creation time and whether it appears in the session records before deciding which"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 4. The live environment of running shells
+# -----------------------------------------------------------------------------
+# Reading the *process* rather than a profile file makes this a statement about
+# now: a shell started with HISTFILE=/dev/null writes nothing for as long as it
+# lives, whatever the profile on disk says.
+let suppressed = 0
+for process in proc.list(600) {
+  let exe = process.exe
+  let name = process.name
+  if exe != nil {
+    set name = fs.basename(exe)
+  }
+  if not contains(name, interactive_shell_names) {
+    continue
+  }
+  let vars = []
+  try {
+    set vars = proc.environ(process.pid)
+  } catch e {
+    set vars = []
+  }
+  for entry in vars {
+    if entry.starts_with("HISTFILE=") {
+      let value = entry.substr(9, 400)
+      if value == "" or value == "/dev/null" {
+        set suppressed = suppressed + 1
+        emit {
+          "kind": "shell_history_disabled_in_environment",
+          "severity": "high",
+          "pid": process.pid,
+          "name": name,
+          "cmdline": process.cmdline,
+          "uid": process.uid,
+          "variable": entry.substr(0, 200),
+          "recommendation": "this shell cannot be writing a history file at all: reconstruct its activity from the audit log, the process's open descriptors and the files it has touched, and do not expect its ~/.bash_history to describe this session"
+        }
+      }
+    }
+    if entry == "HISTCONTROL=ignorespace" {
+      set suppressed = suppressed + 1
+      emit {
+        "kind": "shell_history_disabled_in_environment",
+        "severity": "medium",
+        "pid": process.pid,
+        "name": name,
+        "cmdline": process.cmdline,
+        "uid": process.uid,
+        "variable": entry,
+        "recommendation": "commands prefixed with a space are not recorded in this shell: it is a routine preference and the standard way to keep one command out of the history, and both readings need the audit log to separate"
+      }
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 5. Summary
+# -----------------------------------------------------------------------------
+emit {
+  "kind": "history_inventory_summary",
+  "severity": "info",
+  "accounts_considered": len(accounts),
+  "history_files_examined": examined,
+  "accounts_with_history": accounts_with_history,
+  "accounts_without_history": missing,
+  "live_suppressed_shells": suppressed,
+  "accounts_with_live_sessions": len(keys(session_pids)),
+  "note": "accounts_without_history counts only interactive accounts whose home exists; a large gap between accounts_considered and history_files_examined is the normal shape of a server image, where most accounts are service accounts"
+}

@@ -9,7 +9,11 @@ meaning identical, so the contract is:
 2. **equivalent** — decoding any build reproduces the *same findings* as the
    source run (checked through the real VM, not by comparing bytecode);
 3. **integrity** — truncation and single-byte tampering raise
-   ``JockyArtifactError`` instead of executing something half-decoded.
+   ``JockyArtifactError`` instead of executing something half-decoded;
+4. **reshaped** — the *control-flow* shape of a build, not just its bytes,
+   differs from other builds of the same source, which
+   :func:`control_flow_signature` measures and the try/catch-path test keeps
+   honest.
 """
 from __future__ import annotations
 
@@ -25,7 +29,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from jocky.errors import JockyArtifactError  # noqa: E402
-from jocky.poly.encoder import PolyEncoder  # noqa: E402
+from jocky.poly.encoder import PolyEncoder, control_flow_signature  # noqa: E402
 from jocky.runner import build_artifact, compile_source, run_artifact, run_source  # noqa: E402
 
 PROGRAMS = {
@@ -58,6 +62,27 @@ PROGRAMS = {
         emit {"kind": "host", "uptime": sys.uptime().seconds > 0,
               "listeners": len(net.listeners())}
     """,
+    # Errors raised in one frame and caught in another: the handler the VM
+    # jumps to is reached by an unwind, never by a branch, so a transform that
+    # remaps the code without remapping ``handlers``/``TRY_ENTER`` corrupts it.
+    "unwind": """
+        fn thrower(n) {
+          let x = 10 / n
+          return x
+        }
+        let crossed = 0
+        try {
+          let direct = 3 / 0
+        } catch e {
+          set crossed = crossed + 1
+        }
+        try {
+          let t = thrower(0)
+        } catch e {
+          set crossed = crossed + 10
+        }
+        emit {"kind": "unwind", "crossed": crossed, "ok": thrower(4)}
+    """,
 }
 
 
@@ -87,6 +112,56 @@ def test_builds_are_unique_across_repetitions(name):
         sizes.add(len(artifact))
     assert len(hashes) == 120, "artifact bytes repeat across builds"
     assert len(sizes) > 1, "artifact length is constant, padding is not random"
+
+
+def test_obfuscated_builds_keep_the_try_catch_path():
+    """One draw proves little: builds vary per call, so check many.
+
+    The handler a ``catch`` runs from is reached by an unwind rather than by a
+    branch, so an instruction-count-changing transform that forgets to remap
+    ``handlers``/``TRY_ENTER`` still produces a well-formed artifact and only
+    misbehaves at the moment an error is raised.
+    """
+    source = PROGRAMS["unwind"]
+    reference = run_source(source)
+    assert not reference.errors, reference.errors
+    expected = _findings_hash(reference)
+    for _ in range(16):
+        artifact, _meta = build_artifact(source)
+        decoded = run_artifact(artifact)
+        assert not decoded.errors, decoded.errors
+        assert _findings_hash(decoded) == expected
+
+
+def test_control_flow_signature_moves_with_the_shape_only():
+    """The metric the byte-level transforms cannot move.
+
+    ``control_flow_signature`` has to fingerprint branching shape and nothing
+    else: a rebuilt artifact (same seed, same bytes) must score the same, while
+    fresh builds of one program must not share a score — before control-flow
+    obfuscation every build of a program had exactly one branching skeleton.
+    """
+    program = compile_source(PROGRAMS["unwind"])
+    seed = b"\x11" * 32
+    rebuilt = PolyEncoder(seed=seed, deterministic=True).encode(program)
+    again = PolyEncoder(seed=seed, deterministic=True).encode(program)
+    assert (control_flow_signature(PolyEncoder.decode(rebuilt))
+            == control_flow_signature(PolyEncoder.decode(again)))
+
+    source_branches = sum(
+        1 for op, _arg in program.main.code if op in ("JMP", "JMPF", "JMPT", "ITER_NEXT"))
+    artifacts = [PolyEncoder().encode(program) for _ in range(32)]
+    decoded = [PolyEncoder.decode(artifact) for artifact in artifacts]
+    full = {control_flow_signature(item) for item in decoded}
+    skeletons = {control_flow_signature(item, skeleton=True) for item in decoded}
+    # A wide margin under the measured 32/32: the assertion is that the shape
+    # moves per build, not that the draw is lucky.
+    assert len(full) >= 8, f"only {len(full)} distinct signatures in 32 builds"
+    assert len(skeletons) >= 8, f"only {len(skeletons)} distinct skeletons in 32 builds"
+    assert max(
+        sum(1 for op, _arg in item.main.code
+            if op in ("JMP", "JMPF", "JMPT", "ITER_NEXT"))
+        for item in decoded) > source_branches, "no build gained any control flow"
 
 
 def test_seed_controls_the_build_shape():

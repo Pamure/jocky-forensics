@@ -41,7 +41,7 @@ jocky --help
 usage: jocky agent [-h] --server SERVER [--token TOKEN]
                    [--token-file TOKEN_FILE] [--interval INTERVAL] [--once]
                    [--name NAME] [--state STATE] [--pin PIN] [--insecure]
-                   [--sni SNI] [--verify-ca]
+                   [--sni SNI] [--host-header HOST_HEADER] [--verify-ca]
 ```
 
 | Option | Description |
@@ -55,7 +55,8 @@ usage: jocky agent [-h] --server SERVER [--token TOKEN]
 | `--state` |  (default: `.jocky-agent`) |
 | `--pin` | expected SHA-256 of the server certificate (learned automatically at first enrolment) |
 | `--insecure` | do NOT verify or pin the server certificate — lab use only |
-| `--sni` | TLS SNI / Host header to present when the address in --server differs (frontable deployments) |
+| `--sni` | TLS server name to present when the address in --server differs (shared ingress, or dialling by IP) |
+| `--host-header` | HTTP Host to send, when it should differ from --sni; defaults to --sni. Note: this is vhost selection at an ingress you control, NOT domain fronting — every tier-1 CDN closed fronting between 2018 and 2024 |
 | `--verify-ca` | require a certificate valid against the system trust store (default: self-signed server authenticated by --pin) |
 
 

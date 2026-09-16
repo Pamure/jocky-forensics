@@ -1,0 +1,537 @@
+# 04_package_hook_persistence.jky — which package-manager and git hooks run code
+# on this host, and which package sources have been pointed somewhere else?
+#
+# The problem this answers
+# ------------------------
+# Package tooling is a root-execution path that everybody trusts. Installing a
+# package runs hooks; so does *checking* for updates on some configurations
+# (APT::Update::Pre-Invoke fires with no package involved). Git runs hooks on
+# `git commit`, `git merge` and `git checkout`, and the case-directory integrity
+# work in this project names `.git/hooks` as a place a payload waits for the
+# analyst's next command. None of this is exotic and none of it is visible in a
+# process list, because the code has not run yet.
+#
+# Two independent questions, both answered here:
+#
+#   1. What will run as root the next time an operator updates this host —
+#      and was any of it written recently or does any of it fetch something?
+#   2. Which package sources does this host trust? A changed index URL is a
+#      supply-chain attack that keeps every signature valid because the
+#      operator's packages still come from a signed repository — the attacker's.
+#
+# Output shape
+# ------------
+# ``package_manager_config``        inventory row for every config file read:
+#                                   path, owner, mode, mtime, size.
+# ``package_hook_command``          a hook that executes a command as root.
+#                                   Graded low by default (distribution
+#                                   packages install several) and raised to
+#                                   high when the file was modified in the last
+#                                   30 days or the command matches a risky
+#                                   pattern. The command text is always
+#                                   included: a hook is not a finding, the
+#                                   command inside it is.
+# ``package_source_risk``           an apt source over plain http, on a raw IP,
+#                                   or carrying inline credentials.
+# ``package_index_override``        pip/npm pointed at something that is not
+#                                   their canonical index. This is the
+#                                   dependency-confusion shape.
+# ``package_manager_credential_on_disk``
+#                                   a token or password stored in a config file
+#                                   readable by more than its owner.
+# ``git_config_command_execution``  core.hooksPath, core.fsmonitor, sshCommand or
+#                                   core.pager set to something other than a
+#                                   stock value: git runs those on ordinary
+#                                   commands.
+# ``git_hook_executable``           an executable, non-`.sample` hook in a
+#                                   repository under a home directory.
+# ``config_unreadable``             a config file that exists and could not be
+#                                   read, so a clean result stays honest.
+#
+# Scope note: this is the *configuration* view. It does not run a package
+# operation, does not execute a hook, and does not fetch a repository index —
+# it reads files. For a repository that is currently dirty, pair it with
+# `01_systemd_unit_hunt.jky` and the case-directory attestation in `jocky attest`.
+
+# -----------------------------------------------------------------------------
+# 1. Shared helpers
+# -----------------------------------------------------------------------------
+let risky_patterns = [
+  [r"(curl|wget)[^|]{0,160}\|\s*(ba|z|da)?sh\b", "download-and-execute", "high"],
+  [r"/dev/tcp/", "bash-reverse-shell", "high"],
+  [r"(base64|xxd)\s+(-d|--decode|-r)", "encoded-payload", "medium"],
+  [r"(/tmp/|/var/tmp/|/dev/shm/|/run/shm/)", "references-drop-zone", "high"],
+  [r"(nc[a-z]*\s+[^\n]{0,80}\s-e\b|chmod\s+\+x\s+/)", "reverse-shell-or-chmod", "high"]
+]
+
+# The distribution's own archive hosts. Plain http to *these* is the documented
+# default on a stock Debian/Ubuntu host and is verified by signature, so
+# reporting it would be reporting the distribution's packaging choice.
+let distro_hosts = ["archive.ubuntu.com", "security.ubuntu.com", "ports.ubuntu.com",
+                    "deb.debian.org", "security.debian.org", "ftp.debian.org"]
+
+fn first_hit(patterns, text) {
+  for row in patterns {
+    if re.test(row[0], text) {
+      return row
+    }
+  }
+  return nil
+}
+
+fn is_pseudo_home(home) {
+  # Service accounts in /etc/passwd carry /dev, /proc and /run/... as their home
+  # (sys:/dev, rtkit:/proc, avahi:/run/avahi-daemon). They are not user
+  # directories, walking them is refused by fs.scan by design, and counting them
+  # would inflate every "accounts checked" figure in the summary.
+  for pseudo in ["/dev", "/proc", "/sys", "/run"] {
+    if home == pseudo or home.starts_with(pseudo + "/") {
+      return true
+    }
+  }
+  return false
+}
+
+fn read_text(path) {
+  # A result map rather than an exception, so every caller is forced to decide
+  # what "could not read" means for its own check.
+  let outcome = {"ok": true, "content": ""}
+  try {
+    set outcome.content = fs.read(path, 262144)
+  } catch e {
+    set outcome.ok = false
+  }
+  return outcome
+}
+
+fn inventory(path, kind_label) {
+  let metadata = fs.stat(path)
+  if metadata == nil {
+    return nil
+  }
+  emit {
+    "kind": "package_manager_config",
+    "severity": "info",
+    "path": path,
+    "config_class": kind_label,
+    "mode": metadata.mode,
+    "uid": metadata.uid,
+    "size": metadata.size,
+    "mtime": metadata.mtime,
+    "modified_iso": time.iso(metadata.mtime),
+    "modified_in_last_30_days": metadata.mtime > time.now() - 30 * 24 * 3600
+  }
+  return metadata
+}
+
+fn report_unreadable(path, kind_label) {
+  emit {
+    "kind": "config_unreadable",
+    "severity": "low",
+    "path": path,
+    "config_class": kind_label,
+    "note": "this file exists and was not read: 'no hook found' and 'could not look' must never read the same in a report"
+  }
+  return 0
+}
+
+fn grade_root_hook(path, line_no, text, fresh) {
+  # A hook is a command that runs as root without anyone typing it. The default
+  # grade is low because a stock Ubuntu host has six of them; what raises it is
+  # recency (someone edited a root-execution path during the incident window) or
+  # content (it fetches, decodes or lives in a drop zone).
+  let hit = first_hit(risky_patterns, text)
+  let grade = "low"
+  let why = "distribution and package hooks legitimately execute here"
+  if hit != nil {
+    set grade = hit[2]
+    set why = "matches " + hit[1]
+  }
+  if fresh and grade != "high" {
+    set grade = "high"
+    set why = why + "; the file was modified within the last 30 days"
+  }
+  emit {
+    "kind": "package_hook_command",
+    "severity": grade,
+    "path": path,
+    "line": line_no,
+    "hook": text.substr(0, 400),
+    "reason": why,
+    "recommendation": "read the command and identify who installed it: this runs as root during an ordinary package operation, so it is both the administrator's tool and the intruder's, and only the command text separates them"
+  }
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# 2. apt and dpkg: the hooks that run as root during package operations
+# -----------------------------------------------------------------------------
+let apt_files = ["/etc/apt/apt.conf"]
+let apt_dirs = ["/etc/apt/apt.conf.d"]
+let dpkg_files = ["/etc/dpkg/dpkg.cfg"]
+let dpkg_dirs = ["/etc/dpkg/dpkg.cfg.d"]
+
+fn examine_hook_file(path, kind_label) {
+  let metadata = inventory(path, kind_label)
+  let outcome = read_text(path)
+  if not outcome.ok {
+    report_unreadable(path, kind_label)
+    return 0
+  }
+  let fresh = false
+  if metadata != nil {
+    set fresh = metadata.mtime > time.now() - 30 * 24 * 3600
+  }
+  let index = 0
+  for raw in outcome.content.lines() {
+    set index = index + 1
+    let text = raw.strip()
+    if text == "" or text.starts_with("//") or text.starts_with("#") {
+      continue
+    }
+    # APT hook syntax: `DPkg::Pre-Invoke { "cmd"; };` or `dpkg::pre-invoke=cmd`.
+    if re.test(r"(Pre-Invoke|Post-Invoke|Pre-Install-Pkgs|pre-invoke|post-invoke)", text) {
+      grade_root_hook(path, index, text, fresh)
+    }
+  }
+  return 0
+}
+
+for path in apt_files {
+  if fs.exists(path) {
+    examine_hook_file(path, "apt")
+  }
+}
+for dir in apt_dirs {
+  if not fs.exists(dir) {
+    continue
+  }
+  for entry in fs.scan(dir, 300, nil, 1) {
+    if not entry.is_dir {
+      examine_hook_file(entry.path, "apt")
+    }
+  }
+}
+for path in dpkg_files {
+  if fs.exists(path) {
+    examine_hook_file(path, "dpkg")
+  }
+}
+for dir in dpkg_dirs {
+  if not fs.exists(dir) {
+    continue
+  }
+  for entry in fs.scan(dir, 100, nil, 1) {
+    if not entry.is_dir {
+      examine_hook_file(entry.path, "dpkg")
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 3. apt sources: who does this host take packages from?
+# -----------------------------------------------------------------------------
+# Both syntaxes are in use: the one-line `deb [opts] URL suite component` form
+# and the deb822 `.sources` form with `URIs:` lines. A source that carries
+# `signed-by=` is no safer than one that does not if the URL itself was changed:
+# the attacker's repository has its own valid signature.
+let source_files = ["/etc/apt/sources.list"]
+let source_dirs = ["/etc/apt/sources.list.d"]
+
+fn examine_sources(path) {
+  let metadata = inventory(path, "apt-source")
+  let outcome = read_text(path)
+  if not outcome.ok {
+    report_unreadable(path, "apt-source")
+    return 0
+  }
+  let index = 0
+  for raw in outcome.content.lines() {
+    set index = index + 1
+    let text = raw.strip()
+    if text == "" or text.starts_with("#") {
+      continue
+    }
+    if not (text.starts_with("deb ") or text.starts_with("deb-src ") or text.starts_with("URIs:")) {
+      continue
+    }
+    let urls = re.find(r"(https?://[^\s\]]+|ftp://[^\s\]]+)", text)
+    if len(urls) == 0 {
+      continue
+    }
+    let url = urls[0].text
+    let host = "unknown"
+    let without_scheme = url.replace("https://", "").replace("http://", "").replace("ftp://", "")
+    set host = without_scheme.split("/")[0].split(":")[0]
+
+    let grade = "info"
+    let why = "package source"
+    let distro_owned = false
+    for known in distro_hosts {
+      if host == known {
+        set distro_owned = true
+      }
+    }
+    if url.starts_with("http://") and not distro_owned {
+      set grade = "low"
+      set why = "plain http transport to a third-party repository"
+    }
+    if re.test(r"^\d+\.\d+\.\d+\.\d+$", host) {
+      set grade = "medium"
+      set why = "repository addressed by raw IP: there is no certificate or domain to check, and DNS-based review cannot see it"
+    }
+    if re.test(r"://[^/@\s]+:[^/@\s]+@", url) {
+      set grade = "high"
+      set why = "credentials embedded in a repository URL"
+    }
+    emit {
+      "kind": "package_source_risk",
+      "severity": grade,
+      "file": path,
+      "line": index,
+      "url": url.substr(0, 300),
+      "host": host,
+      "distro_repository": distro_owned,
+      "reason": why,
+      "line_text": text.substr(0, 300),
+      "note": "a package source is a root-execution trust decision; compare it against the fleet's documented repository list rather than against this host alone"
+    }
+  }
+  return 0
+}
+
+for path in source_files {
+  if fs.exists(path) {
+    examine_sources(path)
+  }
+}
+for dir in source_dirs {
+  if not fs.exists(dir) {
+    continue
+  }
+  for entry in fs.scan(dir, 200, nil, 1) {
+    if not entry.is_dir {
+      examine_sources(entry.path)
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 4. pip and npm: index overrides and stored credentials
+# -----------------------------------------------------------------------------
+let homes = []
+let passwd_outcome = read_text("/etc/passwd")
+if passwd_outcome.ok {
+  for raw in passwd_outcome.content.lines() {
+    let fields = raw.strip().split(":")
+    if len(fields) < 7 {
+      continue
+    }
+    if fields[5].starts_with("/") and fields[5] != "/" and not is_pseudo_home(fields[5]) and fs.exists(fields[5]) {
+      homes.push({"name": fields[0], "home": fields[5]})
+    }
+  }
+}
+
+fn examine_index_config(path, tool, canonical_hosts) {
+  let metadata = inventory(path, tool)
+  let outcome = read_text(path)
+  if not outcome.ok {
+    report_unreadable(path, tool)
+    return 0
+  }
+  let index = 0
+  for raw in outcome.content.lines() {
+    set index = index + 1
+    let text = raw.strip()
+    if text == "" or text.starts_with("#") or text.starts_with(";") {
+      continue
+    }
+    if re.test(r"(index-url|extra-index-url|registry|index_url)", text) {
+      let urls = re.find(r"https?://[^\s]+", text)
+      if len(urls) == 0 {
+        continue
+      }
+      let url = urls[0].text
+      let bare = url.replace("https://", "").replace("http://", "")
+      let host = bare.split("/")[0].split(":")[0]
+      let canonical = false
+      for known in canonical_hosts {
+        if host == known {
+          set canonical = true
+        }
+      }
+      # One row per index, graded: pointing pip at an internal mirror is an
+      # ordinary corporate policy decision and is reported as info, while the
+      # same line pointing at a host nobody recognises is the finding. Two rows
+      # for one line would make the operator reconcile them by hand.
+      let grade = "info"
+      let why = "the canonical index for this tool, or an override recorded for the record"
+      if not canonical {
+        set grade = "high"
+        set why = "not the canonical index for this tool"
+      }
+      emit {
+        "kind": "package_index_override",
+        "severity": grade,
+        "path": path,
+        "tool": tool,
+        "line": index,
+        "url": url,
+        "host": host,
+        "canonical_index": canonical,
+        "reason": why,
+        "recommendation": "confirm who set this and why: a package installer pointed at a non-canonical index resolves packages by name from a source that is not the one the operator's signatures and mirrors describe, which is the dependency-confusion shape"
+      }
+    }
+    if re.test(r"(_authToken|_password|password\s*=|auth\s*=)", text) {
+      let writable_by_others = false
+      let mode_text = nil
+      let owner_uid = nil
+      if metadata != nil {
+        set mode_text = metadata.mode
+        set owner_uid = metadata.uid
+        set writable_by_others = metadata.world_writable or metadata.mode_str.substr(5, 6) == "w"
+      }
+      let credential_grade = "medium"
+      if writable_by_others {
+        set credential_grade = "high"
+      }
+      emit {
+        "kind": "package_manager_credential_on_disk",
+        "severity": credential_grade,
+        "path": path,
+        "tool": tool,
+        "line": index,
+        "mode": mode_text,
+        "owner_uid": owner_uid,
+        "readable_by_others": writable_by_others,
+        "line_text": text.substr(0, 200),
+        "note": "a registry credential in a config file is a reusable identity: rotate it if this host is in scope, and check who can read the file before deciding how urgent that is"
+      }
+    }
+  }
+  return 0
+}
+
+let pip_paths = ["/etc/pip.conf", "/etc/xdg/pip/pip.conf"]
+let npm_paths = ["/etc/npmrc"]
+for entry in homes {
+  pip_paths.push(entry.home + "/.pip/pip.conf")
+  pip_paths.push(entry.home + "/.config/pip/pip.conf")
+  npm_paths.push(entry.home + "/.npmrc")
+}
+
+for path in pip_paths {
+  if fs.exists(path) {
+    examine_index_config(path, "pip", ["pypi.org", "files.pythonhosted.org"])
+  }
+}
+for path in npm_paths {
+  if fs.exists(path) {
+    examine_index_config(path, "npm", ["registry.npmjs.org"])
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 5. git: config directives that execute, and hooks that are already on disk
+# -----------------------------------------------------------------------------
+# git runs these without being asked: hooksPath redirects every hook, fsmonitor
+# runs a program on `git status`, sshCommand replaces the transport, and pager
+# runs a program on any command that produces output. All four are legitimate
+# and all four are a command-execution primitive.
+let git_exec_directives = ["hookspath", "fsmonitor", "sshcommand", "pager",
+                           "editor", "credential.helper", "core.editor"]
+
+fn examine_git_config(path) {
+  let metadata = inventory(path, "git")
+  let outcome = read_text(path)
+  if not outcome.ok {
+    report_unreadable(path, "git")
+    return 0
+  }
+  let index = 0
+  for raw in outcome.content.lines() {
+    set index = index + 1
+    let text = raw.strip()
+    if text == "" or text.starts_with("#") or text.starts_with(";") or text.starts_with("[") {
+      continue
+    }
+    let lowered = text.lower()
+    for directive in git_exec_directives {
+      if contains(directive, lowered) {
+        emit {
+          "kind": "git_config_command_execution",
+          "severity": "high",
+          "path": path,
+          "line": index,
+          "directive": directive,
+          "line_text": text.substr(0, 300),
+          "recommendation": "read the program this directive names: git executes it as part of ordinary commands (`git status`, `git log`), so a repository handed to an analyst can run code before any tool has been chosen"
+        }
+        break
+      }
+    }
+  }
+  return 0
+}
+
+let git_files = ["/etc/gitconfig"]
+for entry in homes {
+  git_files.push(entry.home + "/.gitconfig")
+  git_files.push(entry.home + "/.config/git/config")
+}
+for path in git_files {
+  if fs.exists(path) {
+    examine_git_config(path)
+  }
+}
+
+# Repositories under a home directory: the config that decides what runs, and
+# the hooks that are already sitting there. Bounded to four levels so a deep
+# source tree cannot dominate the run.
+let hooks_seen = 0
+for entry in homes {
+  let found = fs.scan(entry.home, 150, nil, 4)
+  for item in found {
+    if item.is_dir {
+      continue
+    }
+    if contains("/.git/hooks/", item.path) {
+      let base = fs.basename(item.path)
+      if base.ends_with(".sample") {
+        continue
+      }
+      if not item.executable {
+        continue
+      }
+      set hooks_seen = hooks_seen + 1
+      emit {
+        "kind": "git_hook_executable",
+        "severity": "high",
+        "path": item.path,
+        "account": entry.name,
+        "size": item.size,
+        "mode": item.mode,
+        "mtime": item.mtime,
+        "modified_iso": time.iso(item.mtime),
+        "magic": item.magic,
+        "recommendation": "read the hook before running any git command in that repository: it executes on commit, merge, checkout or push, which is to say the next time a human uses the tree, and it is the one artefact in a repository that the analyst's own tooling will happily run"
+      }
+    }
+    if contains("/.git/config", item.path) {
+      examine_git_config(item.path)
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 6. Summary
+# -----------------------------------------------------------------------------
+emit {
+  "kind": "package_hook_summary",
+  "severity": "info",
+  "home_directories_scanned": len(homes),
+  "git_hooks_executable": hooks_seen,
+  "note": "package_hook_command findings are graded low by default because distribution packages install several; the high ones are the recently written or the fetch-and-execute ones, and those are where to start"
+}

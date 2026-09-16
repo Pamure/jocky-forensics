@@ -1,0 +1,401 @@
+# 03_scheduled_task_inventory.jky — every way this host runs a command on a
+# schedule, and the ones that were not installed by the distribution.
+#
+# The problem this answers
+# ------------------------
+# Scheduled execution is the cheapest persistence there is: it needs no listening
+# socket, no logged-in user, and it survives reboot by design. It is also spread
+# across three unrelated subsystems — crontab files, run-parts directories and
+# systemd timers — so an analyst who checks one of them has checked a third of
+# the host.
+#
+# Output shape
+# ------------
+# ``scheduled_task``               one crontab entry: source file, line,
+#                                  schedule, the user it runs as, the command.
+# ``run_parts_script``             one executable in /etc/cron.{hourly,daily,
+#                                  weekly,monthly,yearly}. These are scripts,
+#                                  not crontab lines, so they are inventoried
+#                                  rather than parsed as schedule fields.
+# ``systemd_timer``                a .timer unit with its OnCalendar, the
+#                                  ExecStart of the paired .service, and
+#                                  whether that service file still exists.
+# ``cron_unreadable``              a source this run could not read. Kept
+#                                  separate from "found nothing" so a blind
+#                                  sweep never reads as a clean one: the spool
+#                                  directories are mode 700 root on most
+#                                  distributions, and an unprivileged run must
+#                                  say so instead of reporting zero entries.
+# ``cron_file_insecure``           a cron file a non-root group or user can
+#                                  write. The daemon runs those as root, so this
+#                                  is a privilege-escalation path and the
+#                                  classic shape of a post-compromise edit.
+# ``scheduled_task_risky_command`` a command (or, for a run-parts script, the
+#                                  single line of it) that fetches-and-executes,
+#                                  decodes a blob, opens a reverse shell,
+#                                  references a drop zone or disables logging.
+#                                  The matched pattern is included so the
+#                                  operator judges the evidence, not the label —
+#                                  `base64 -d` in a root-run script is a real
+#                                  hit even when a package put it there.
+#
+# Read the summary row (``scheduled_task_summary``) first: it distinguishes
+# "nothing scheduled" from "I could not look".
+#
+# Two notes on what this script deliberately does not do. It never executes a
+# cron command, and it never spawns a shell to do the parsing — the entries are
+# read as text. And it does not read journald timer schedules: those require the
+# running journal and belong to a different collection path.
+
+# -----------------------------------------------------------------------------
+# 1. Where scheduled work lives
+# -----------------------------------------------------------------------------
+# Three different shapes, because they fail differently: a crontab file is
+# parsed line by line, a run-parts directory is a list of executables the cron
+# daemon calls in sequence, and a systemd timer is a unit pair.
+let crontab_files = ["/etc/crontab", "/etc/anacrontab"]
+
+let crontab_dirs = ["/etc/cron.d", "/var/spool/cron", "/var/spool/cron/crontabs"]
+
+let run_parts_dirs = ["/etc/cron.hourly", "/etc/cron.daily", "/etc/cron.weekly",
+                      "/etc/cron.monthly", "/etc/cron.yearly"]
+
+let unit_dirs = ["/etc/systemd/system", "/run/systemd/system", "/usr/lib/systemd/system"]
+
+# The risky-command vocabulary. Patterns are matched by JOCKY's own
+# linear-time engine, so a cron line with 40 000 characters cannot make the
+# scan itself the incident.
+let risky_patterns = [
+  [r"(curl|wget)[^|]{0,160}\|\s*(ba|z|da)?sh\b", "download-and-execute", "critical"],
+  [r"/dev/tcp/", "bash-reverse-shell", "critical"],
+  [r"(base64|xxd)\s+(-d|--decode|-r)", "encoded-payload", "high"],
+  [r"(eval|exec)\s*\(", "dynamic-eval", "medium"],
+  [r"nc[a-z]*\s+[^\n]{0,80}\s-e\b", "netcat-exec", "critical"],
+  [r"chmod\s+\+x", "chmod-executable", "medium"],
+  [r"(/tmp/|/var/tmp/|/dev/shm/|/run/shm/)", "references-drop-zone", "medium"],
+  [r"(history\s+-c|rm\s+-rf?\s+/var/log|>\s*/var/log/)", "log-tampering", "high"]
+]
+
+let task_count = 0
+let script_count = 0
+let risky_count = 0
+let unreadable = 0
+
+# `first_hit(patterns, text)` returns the first matching [pattern, label,
+# severity] row or nil. A helper rather than an inline loop because JOCKY
+# miscompiles `break` inside a nested loop (see the note in
+# docs/DESIGN.md's control-flow section): a function that returns early is both
+# correct and clearer than a break.
+fn first_hit(patterns, text) {
+  for row in patterns {
+    if re.test(row[0], text) {
+      return row
+    }
+  }
+  return nil
+}
+
+fn insecure_mode(metadata) {
+  # mode_str is the ls-style string: index 5 is the group-write bit, index 8 the
+  # other-write bit. Reading the bits from the string keeps this independent of
+  # how `mode` is formatted.
+  if metadata.world_writable {
+    return true
+  }
+  return metadata.mode_str.substr(5, 6) == "w" or metadata.mode_str.substr(8, 9) == "w"
+}
+
+fn check_permissions(path, metadata) {
+  if metadata == nil {
+    return 0
+  }
+  # A symlink's own mode is always lrwxrwxrwx and says nothing about its
+  # target, so the target is what gets checked — otherwise every symlinked
+  # cron entry (/etc/cron.daily/google-chrome on a Chrome install) is reported
+  # as world-writable, and the operator learns to ignore this finding.
+  if metadata.is_link {
+    let target = metadata.get("target", nil)
+    if target != nil and target.starts_with("/") {
+      return check_permissions(path + " -> " + target, fs.stat(target))
+    }
+    return 0
+  }
+  if insecure_mode(metadata) or (metadata.uid != 0 and metadata.uid != nil) {
+    emit {
+      "kind": "cron_file_insecure",
+      "severity": "high",
+      "path": path,
+      "mode": metadata.mode,
+      "mode_str": metadata.mode_str,
+      "uid": metadata.uid,
+      "gid": metadata.gid,
+      "mtime": metadata.mtime,
+      "recommendation": "restore root:root 0644; a cron source a non-root user can rewrite schedules code that runs as root, which is the whole reason this check is here"
+    }
+  }
+  return 0
+}
+
+fn grade_command(file, line_no, runs_as, command) {
+  let hit = first_hit(risky_patterns, command)
+  if hit == nil {
+    return 0
+  }
+  set risky_count = risky_count + 1
+  emit {
+    "kind": "scheduled_task_risky_command",
+    "severity": hit[2],
+    "file": file,
+    "line": line_no,
+    "pattern": hit[1],
+    "runs_as": runs_as,
+    "command": command.substr(0, 400),
+    "recommendation": "read what the job actually runs and where it fetches from before deleting it: a removed job is re-established on the next tick, and the payload is what names the attacker"
+  }
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# 2. Crontab files: /etc/crontab and the drop-in directory
+# -----------------------------------------------------------------------------
+fn scan_crontab_file(path) {
+  let content = ""
+  try {
+    set content = fs.read(path, 65536)
+  } catch e {
+    set unreadable = unreadable + 1
+    emit {
+      "kind": "cron_unreadable",
+      "severity": "low",
+      "path": path,
+      "reason": e,
+      "note": "not inspected; re-run with privilege before concluding this source is empty"
+    }
+    return 0
+  }
+
+  check_permissions(path, fs.stat(path))
+
+  # A crontab file is line-oriented: comments, environment assignments, and
+  # either five schedule fields (plus a user column in a system crontab) or an
+  # @reboot-style macro.
+  let is_system_file = path == "/etc/crontab" or contains("/cron.d/", path)
+  let index = 0
+  for raw in content.lines() {
+    set index = index + 1
+    let text = raw.strip()
+    if text == "" or text.starts_with("#") {
+      continue
+    }
+    if re.test(r"^[A-Za-z_][A-Za-z0-9_]*\s*=", text) {
+      emit {
+        "kind": "cron_environment_override",
+        "severity": "low",
+        "file": path,
+        "line": index,
+        "assignment": text.substr(0, 200),
+        "recommendation": "confirm the assignment matches the distribution default: PATH and SHELL here decide which binaries every later job in this file executes"
+      }
+      continue
+    }
+
+    let fields = text.split()
+    let runs_as = "(file owner)"
+    let schedule = ""
+    let command = text
+    if fields[0].starts_with("@") {
+      set schedule = fields[0]
+      if is_system_file and len(fields) > 2 {
+        set runs_as = fields[1]
+        set command = join(fields.slice(2), " ")
+      } else {
+        set command = join(fields.slice(1), " ")
+      }
+    } else {
+      set schedule = join(fields.slice(0, 5), " ")
+      if is_system_file and len(fields) > 6 {
+        set runs_as = fields[5]
+        set command = join(fields.slice(6), " ")
+      }
+    }
+
+    set task_count = task_count + 1
+    emit {
+      "kind": "scheduled_task",
+      "severity": "info",
+      "file": path,
+      "line": index,
+      "schedule": schedule,
+      "runs_as": runs_as,
+      "command": command.substr(0, 400)
+    }
+    grade_command(path, index, runs_as, command)
+  }
+  return 0
+}
+
+for path in crontab_files {
+  if fs.exists(path) {
+    scan_crontab_file(path)
+  }
+}
+
+for path in crontab_dirs {
+  if not fs.exists(path) {
+    continue
+  }
+  let metadata = fs.stat(path)
+  if metadata == nil or not metadata.is_dir {
+    scan_crontab_file(path)
+    continue
+  }
+  # Spool directories hold one file per user on RHEL and one flat directory on
+  # Debian, so the scan descends two levels. Editor and package leftovers are
+  # skipped: a crontab daemon ignores them, and so should the inventory.
+  for entry in fs.scan(path, 200, nil, 2) {
+    if entry.is_dir {
+      continue
+    }
+    let base = fs.basename(entry.path)
+    if base.starts_with(".") or base.ends_with("~") or base.ends_with(".rpmsave") or base.ends_with(".dpkg-old") {
+      continue
+    }
+    scan_crontab_file(entry.path)
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 3. run-parts directories: executables, not schedule lines
+# -----------------------------------------------------------------------------
+# Parsing these as crontab entries produces a page of nonsense (the first token
+# of a shell line is not a schedule), so they are inventoried as what they are.
+# The executables are still worth reading: a script dropped here runs as root on
+# a timer nobody looks at.
+for path in run_parts_dirs {
+  if not fs.exists(path) {
+    continue
+  }
+  for entry in fs.scan(path, 200, nil, 1) {
+    if entry.is_dir {
+      continue
+    }
+    let base = fs.basename(entry.path)
+    if base.starts_with(".") or base.ends_with("~") or base.ends_with(".dpkg-old") or base.ends_with(".rpmsave") {
+      continue
+    }
+    set script_count = script_count + 1
+    let fresh = entry.mtime > time.now() - 30 * 24 * 3600
+    emit {
+      "kind": "run_parts_script",
+      "severity": "info",
+      "path": entry.path,
+      "directory": path,
+      "executable": entry.executable,
+      "mode": entry.mode,
+      "size": entry.size,
+      "mtime": entry.mtime,
+      "runs_as": "root",
+      "modified_in_last_30_days": fresh
+    }
+    check_permissions(entry.path, entry)
+    if fresh and entry.executable {
+      emit {
+        "kind": "run_parts_script_modified_recently",
+        "severity": "medium",
+        "path": entry.path,
+        "mtime": entry.mtime,
+        "iso_mtime": time.iso(entry.mtime),
+        "recommendation": "compare against the package manifest: run-parts directories execute everything executable in them as root, and a recent modification is how a distribution-provided job is quietly replaced"
+      }
+    }
+    if entry.executable and entry.size < 262144 {
+      # The content is graded line by line, not as one blob: a pattern hit
+      # inside a 500-line package script must say *which* line matched, or the
+      # evidence is unusable. Comment lines are skipped, and the walk is capped
+      # so a pathological script cannot dominate the run.
+      let body = ""
+      try {
+        set body = fs.read(entry.path, 16384)
+      } catch e {
+        set body = ""
+      }
+      let body_lines = body.lines().slice(0, 400)
+      let body_line = 0
+      for raw in body_lines {
+        set body_line = body_line + 1
+        let text = raw.strip()
+        if text == "" or text.starts_with("#") {
+          continue
+        }
+        grade_command(entry.path, body_line, "root", text)
+      }
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 4. systemd timers: the modern form of the same persistence
+# -----------------------------------------------------------------------------
+# Only unit files are reported. Enabled state lives in symlinks under
+# *.wants directories, which the depth-2 scan reaches as entries of their own.
+# The paired service name is derived the way systemd does it — same unit name,
+# different suffix — and a missing service file is reported, because a timer
+# whose service was deleted after it was installed is a deletion artefact.
+let timer_count = 0
+for dir in unit_dirs {
+  if not fs.exists(dir) {
+    continue
+  }
+  for entry in fs.scan(dir, 400, nil, 2) {
+    if entry.is_dir or not entry.path.ends_with(".timer") {
+      continue
+    }
+    set timer_count = timer_count + 1
+    let unit = fs.basename(entry.path)
+    let service_name = unit.substr(0, len(unit) - 6) + ".service"
+    let service_path = fs.dirname(entry.path) + "/" + service_name
+    let content = ""
+    try {
+      set content = fs.read(entry.path, 32768)
+    } catch e {
+      set content = ""
+    }
+    let calendar = []
+    let target = ""
+    for raw in content.lines() {
+      let text = raw.strip()
+      if text.starts_with("OnCalendar=") {
+        calendar.push(text.substr(11, 120))
+      }
+      if text.starts_with("Unit=") {
+        set target = text.substr(5, 200)
+      }
+    }
+    emit {
+      "kind": "systemd_timer",
+      "severity": "info",
+      "unit": entry.path,
+      "on_calendar": calendar,
+      "falls_back_to": target,
+      "service_exists": fs.exists(service_path),
+      "service_path": service_path,
+      "mtime": entry.mtime,
+      "modified_in_last_30_days": entry.mtime > time.now() - 30 * 24 * 3600,
+      "recommendation": "a timer outside /usr/lib/systemd/system is a local addition: confirm it against the package manifest, and read the service it starts rather than the timer itself"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 5. Summary
+# -----------------------------------------------------------------------------
+emit {
+  "kind": "scheduled_task_summary",
+  "severity": "info",
+  "crontab_entries": task_count,
+  "run_parts_scripts": script_count,
+  "systemd_timers": timer_count,
+  "risky_commands": risky_count,
+  "sources_unreadable": unreadable,
+  "note": "sources_unreadable > 0 means this inventory is partial; the honest reading is 'these are the scheduled tasks this run could see'"
+}

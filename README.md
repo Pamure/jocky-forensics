@@ -15,7 +15,7 @@ language**:
 | Automated CI/CD polymorphic pipeline | `jocky/ci.py` + `.github/workflows/polymorphism.yml` — `jocky ci` builds N artifacts per commit, fails the build on any hash collision, and compares re-executed findings against a source run so uniqueness cannot drift from semantics |
 | Living-off-the-land execution (no noisy API calls / file-less) | `jocky/rt/` + `jocky/exec/` — pure `/proc`, `/proc/net`, `/sys` collection (**zero external binaries**), direct syscalls via a generated trampoline, and **true fileless execution** (interpreter + runtime + payload in memfds → `/proc/<pid>/exe = /memfd:python3 (deleted)`) |
 | BYOVD / kernel-integrity forensics | `jocky/rt/byovd.py` — loaded-module integrity: known-vulnerable driver matches (20 curated entries, CVE-checked), out-of-tree/unsigned/force-loaded taint classes, modules loaded long after boot, modules whose backing `.ko` was deleted, and the global taint bits. Read-only: nothing here loads or modifies a module |
-| Central management interface | `jocky/agent/` — TLS server with token auth, sqlite job/finding store, polling agents, frontable client mode (separate SNI/Host), and a **self-contained web console** at `GET /` (no CDN, no build step, CSP-restricted, DOM built with `textContent` so hostile agent names cannot become XSS) |
+| Central management interface | `jocky/agent/` — TLS server with token auth, sqlite job/finding store, polling agents, and a **self-contained web console** at `GET /` (no CDN, no build step, CSP-restricted, DOM built with `textContent` so hostile agent names cannot become XSS). The agent can dial an address while presenting a different TLS name (`--sni`) and `Host` (`--host-header`) — vhost selection at an ingress you control, **not** domain fronting; see the limits below |
 | Cross-platform collection | `jocky/rt/winapi.py` — Windows equivalents of the process/socket/module collectors through pure `ctypes` (**no `tasklist`, `netstat`, `wmic` or PowerShell**), emitting the same key names as the Linux side so a script runs unchanged on either |
 | Detection counterpart | `jocky/rt/detect.py` — finds the very techniques above (fileless processes, executable memfd mappings, deleted executables, hidden kernel modules, injected `LD_*`, suspicious command lines, vulnerable drivers, IOC correlation) |
 
@@ -111,16 +111,22 @@ script cannot wedge an investigation.
 | `net` | socket tables (`tcp/tcp6/udp/udp6/raw/unix`), listeners, established connections, per-process attribution, interfaces, routes |
 | `fs` | hashing, metadata + POSIX flags, magic sniffing, bounded scans, timeline, SUID/SGID inventory, `PATH` audit, `ld.so.preload` |
 | `sys` | kernel/distro/uptime/memory/cpu, mounts, module views (+hidden-module diff), kallsyms visibility, containers |
-| `det` | triage: fileless processes, memfd mappings, deleted executables, temp executables, rwx regions, unusual listeners, deleted-open files, `LD_*` injection, suspicious command lines, persistence, hijackable PATH entries |
+| `det` | triage: fileless processes, memfd mappings, deleted executables, temp executables, rwx regions, unusual listeners, deleted-open files, `LD_*` injection, suspicious command lines, persistence, hijackable PATH entries, BYOVD/kernel integrity, Windows process-injection detection |
 | `ioc` | correlate indicator sets (IPs, names, paths, domains, hashes) against processes, sockets and files |
 | `mem` | direct-syscall probe/execute, memfd self-test, `is_memfd`/`memfd_maps` |
 | `re` | linear-time pattern matching (`test`/`full`/`find`/`captures`/`replace`/`split`/`escape`) and `fs.grep` for log lines — never the host's backtracking regex engine |
+| `pcap` | **offline network forensics**: read libpcap and pcapng captures, decode packets, reconstruct bidirectional flows, extract DNS queries, TLS ClientHello SNI + JA3, and cleartext HTTP requests |
+| `sigma` | evaluate Sigma rules (documented YAML subset) on the linear-time engine |
+| `yara` | evaluate YARA-subset byte signatures on the same engine |
 | `time` | UTC timestamps: `now`, `iso`, `parse`, `format`, `filetime`, `delta` |
 | `tl` | timeline shaping: `merge`, `window`, `bucket` over collected events |
 
 ## Why it does not trip noisy telemetry
 
-Measured by the evidence harness, not asserted:
+Two kinds of evidence, and they are different questions:
+
+**Measured by the evidence harness** (`jocky evidence`), which reports what the
+runtime *does*:
 
 * **No external processes.** Collection reads `/proc` and `/sys` directly, so
   there is no `ps`, `ss`, `lsof`, `lsmod`, `find`, `sha256sum` or shell in the
@@ -130,9 +136,19 @@ Measured by the evidence harness, not asserted:
   `/proc/<pid>/exe` reads `/memfd:python3 (deleted)` and the kernel reports
   memfd-backed mappings (`evidence/artifacts.json`).
 * **No stable byte signature.** Each build permutes opcodes, re-maps slots,
-  encrypts and splits constants, inserts junk, pads and re-keys the payload: a
-  thousand builds of one script produce a thousand distinct SHA-256 digests
-  with identical behaviour (`evidence/polymorphism.csv`).
+  encrypts and splits constants, inserts opaque guards and dead code, and
+  **reshapes the control flow** — a thousand builds of one script produce a
+  thousand distinct SHA-256 digests *and* a thousand distinct control-flow
+  signatures, with identical behaviour (`evidence/polymorphism.csv`).
+
+**Measured against a real endpoint protection** (`docs/EVASION.md`), which
+answers "does anything flag it" — the question the problem statement actually
+asks. Microsoft Defender, signature `1.459.226.0`, real-time protection on: 29
+polymorphic artifacts scanned clean, execution produced zero detections, and the
+harnesses carry a positive control (EICAR) that *was* detected, so "clean" is a
+result rather than a broken test. That report also states plainly what was not
+tested — other vendors, kernel telemetry, network inspection — and one
+measurement that turned out to be unreliable and was discarded.
 
 ## Honest limits (what this does *not* claim)
 
@@ -142,9 +158,18 @@ Measured by the evidence harness, not asserted:
   *noisy, noisy-by-convention* part (spawning tools, writing files, mangling argv).
 * In-memory payloads remain visible in `/proc/<pid>/maps` while they run —
   which is exactly why the same runtime ships the detector that finds them.
-* Domain fronting needs a real CDN; the client implements the *frontable*
-  mechanics (separate SNI and Host, TLS over 443) and says so in `--help`
-  rather than pretending a front exists.
+* **Domain fronting is dead and is not claimed.** The runtime lets an agent
+  dial one address while presenting a different TLS server name and `Host`
+  header, which is *vhost selection at an ingress you control*. It is not
+  fronting: fronting needs an SNI that differs from the `Host` and a CDN that
+  routes on the inner header, and every tier-1 provider closed that — Google in
+  2018, Cloudflare and AWS in 2020, Azure across Front Door and CDN, Fastly by
+  2024. An earlier version of this file described the feature as "frontable
+  mechanics"; that was wrong in two ways (the single parameter set both fields,
+  so it could not express the mismatch the technique requires) and the claim has
+  been withdrawn. What still works, and is what the code is for, is a shared
+  ingress answering for several virtual hosts. Measured evidence for the
+  detection side is in [`docs/EVASION.md`](docs/EVASION.md).
 * **Linux-only mechanisms on Windows.** Collection, the language, the encoder,
   the CI gate and the management console all run on Windows (verified on
   Windows 11, Python 3.13, non-elevated: 244 kernel drivers, 231 processes, 135

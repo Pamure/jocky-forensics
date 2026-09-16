@@ -1,0 +1,414 @@
+# 03_interface_anomaly_scan.jky — is any interface listening to traffic that is
+# not addressed to it, is the host forwarding, and does the ARP table show a
+# sweep or a spoof?
+#
+# The problem this answers
+# ------------------------
+# Three questions that a socket list cannot answer:
+#
+#   1. Is an interface in *promiscuous* mode? That is the kernel's own flag for
+#      "hand me every frame on this segment", and it is what a capture that the
+#      operator did not start looks like. It is a single readable bit in sysfs,
+#      and it is invisible to `net.listeners()` because a sniffer binds no port.
+#   2. Is this host forwarding packets? `ip_forward=1` turns a workstation into
+#      a router, which is what a pivot through a compromised host needs.
+#   3. Does the ARP table look like a sweep or a spoof? Incomplete entries are
+#      the residue of a host probing addresses that do not answer, and two
+#      addresses sharing one MAC is the classic ARP-poisoning shape.
+#
+# On the MAC checks: a locally administered address (the 0x02 bit of the first
+# octet) is normal on virtual interfaces — containers, bridges, VPNs and
+# hypervisor NICs all generate them — so the check excludes interfaces whose name
+# matches a known virtual prefix. What remains is an interface that looks like
+# hardware and is claiming an identity nobody assigned to it.
+#
+# Output shape
+# ------------
+# ``network_interface``                     the inventory: name, MAC, MTU, state,
+#                                           type, counters, and the decoded
+#                                           IFF_UP / IFF_LOOPBACK / IFF_PROMISC
+#                                           flags.
+# ``interface_in_promiscuous_mode``         high — the flag is set.
+# ``loopback_flags_anomalous``              medium — `lo` exists without
+#                                           IFF_LOOPBACK, which the kernel sets
+#                                           at creation; it means the interface
+#                                           table has been rebuilt by something.
+# ``mac_locally_administered``              medium — a hardware-looking interface
+#                                           with a generated MAC.
+# ``duplicate_mac_across_interfaces``       low — two interfaces sharing an
+#                                           address. Bridges and bonds do this by
+#                                           design; anything else does not.
+# ``ip_forwarding_enabled``                 medium — the host routes packets.
+# ``arp_incomplete_entry``                  low — a neighbour that did not
+#                                           answer, i.e. residue of probing.
+# ``possible_arp_spoofing``                 high — an address sharing the
+#                                           gateway's MAC.
+# ``arp_entry_on_down_interface``           low — a cached neighbour on an
+#                                           interface that is not up.
+# ``interface_table_summary``               counts, including how many ARP
+#                                           entries were examined.
+#
+# Read-only and local: nothing is sent on the network, no interface is changed,
+# and no name is resolved.
+
+let interfaces = net.interfaces()
+
+# The kernel's IFF_* bits, decoded from the hex flag word in sysfs. Bit positions
+# follow <linux/if.h>: 0 UP, 1 BROADCAST, 3 LOOPBACK, 4 POINTOPOINT, 7 NOARP,
+# 8 PROMISC, 9 ALLMULTI, 12 MULTICAST.
+let hex_bits = {
+  "0": [0, 0, 0, 0], "1": [1, 0, 0, 0], "2": [0, 1, 0, 0], "3": [1, 1, 0, 0],
+  "4": [0, 0, 1, 0], "5": [1, 0, 1, 0], "6": [0, 1, 1, 0], "7": [1, 1, 1, 0],
+  "8": [0, 0, 0, 1], "9": [1, 0, 0, 1], "a": [0, 1, 0, 1], "b": [1, 1, 0, 1],
+  "c": [0, 0, 1, 1], "d": [1, 0, 1, 1], "e": [0, 1, 1, 1], "f": [1, 1, 1, 1]
+}
+
+# Which hex digit holds a given bit, and which bit inside that digit. Fourth and
+# second entries are the same table read two ways, so the arithmetic that would
+# need integer division is a lookup instead.
+let bit_digit = [0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3]
+let bit_offset = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]
+
+fn flags_int_to_bits(text) {
+  # "0x1003" -> the positions of the set bits, as a readable list.
+  let digits = text.replace("0x", "").replace("0X", "").lower()
+  let set_bits = []
+  let position = 0
+  for character in digits.chars() {
+    set position = position + 1
+  }
+  # Walk from the leftmost digit so the list reads like the number does.
+  let index = 0
+  for character in digits.chars() {
+    let bits = hex_bits.get(character, [0, 0, 0, 0])
+    let digit_from_right = position - 1 - index
+    let offset = 0
+    for bit in bits {
+      if bit == 1 {
+        set_bits.push(digit_from_right * 4 + offset)
+      }
+      set offset = offset + 1
+    }
+    set index = index + 1
+  }
+  return set_bits
+}
+
+fn flag_set(text, bit) {
+  let digits = text.replace("0x", "").replace("0X", "").lower()
+  let target = len(digits) - 1 - bit_digit[bit]
+  if target < 0 {
+    return false
+  }
+  let character = digits.substr(target, target + 1)
+  let bits = hex_bits.get(character, [0, 0, 0, 0])
+  return bits[bit_offset[bit]] == 1
+}
+
+fn flags_of(name) {
+  # sysfs exposes the flag word as text; an interface that disappeared between
+  # the enumeration and this read yields "" and every flag reads false, which is
+  # reported as unknown rather than as clean.
+  let path = "/sys/class/net/" + name + "/flags"
+  try {
+    return fs.read(path, 64).strip()
+  } catch e {
+    return ""
+  }
+}
+
+fn is_virtual_name(name) {
+  # Generators that legitimately assign a local MAC. The list is prefixes, not a
+  # whitelist of hardware: anything not matched is treated as hardware-like.
+  let virtual_prefixes = ["veth", "docker", "br-", "virbr", "tap", "tun", "wg",
+                          "zt", "vnet", "sn-", "vmnet", "vboxnet", "pan", "utun",
+                          "bond", "dummy", "kube", "cni", "flannel", "cali",
+                          "tailscale", "nb", "podman", "lxdbr", "wsl", "eth0."]
+  for prefix in virtual_prefixes {
+    if name.starts_with(prefix) {
+      return true
+    }
+  }
+  return false
+}
+
+let promiscuous = 0
+let mac_seen = {}
+let up_count = 0
+
+for iface in interfaces {
+  let flags_text = flags_of(iface.name)
+  let flags_known = flags_text != ""
+  let up = flag_set(flags_text, 0)
+  let loopback = flag_set(flags_text, 3)
+  let promisc = flag_set(flags_text, 8)
+  let noarp = flag_set(flags_text, 7)
+  if up {
+    set up_count = up_count + 1
+  }
+
+  let mac = iface.get("mac", nil)
+  let mac_text = ""
+  if mac != nil {
+    set mac_text = mac
+  }
+
+  emit {
+    "kind": "network_interface",
+    "severity": "info",
+    "name": iface.name,
+    "mac": mac,
+    "mtu": iface.get("mtu", nil),
+    "state": iface.get("state", nil),
+    "type": iface.get("type", nil),
+    "flags": flags_text,
+    "flags_known": flags_known,
+    "up": up,
+    "loopback": loopback,
+    "promiscuous": promisc,
+    "noarp": noarp,
+    "set_bits": flags_int_to_bits(flags_text),
+    "rx_bytes": iface.get("rx_bytes", nil),
+    "tx_bytes": iface.get("tx_bytes", nil),
+    "virtual_name": is_virtual_name(iface.name)
+  }
+
+  # ---------------------------------------------------------------------------
+  # 1. Promiscuous mode
+  # ---------------------------------------------------------------------------
+  if promisc {
+    set promiscuous = promiscuous + 1
+    emit {
+      "kind": "interface_in_promiscuous_mode",
+      "severity": "high",
+      "name": iface.name,
+      "mac": mac,
+      "flags": flags_text,
+      "state": iface.get("state", nil),
+      "recommendation": "the interface is receiving frames addressed to other hosts, which is what a network capture does and nothing else on a host does by accident. Find the process holding an AF_PACKET socket (its descriptor appears in /proc/<pid>/fd as socket:[inode], and det.deleted_open/proc.sockets can attribute it) before disabling the interface"
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 2. The loopback interface without its loopback flag
+  # ---------------------------------------------------------------------------
+  # lo is created by the kernel with IFF_LOOPBACK set. A missing flag means the
+  # interface was recreated by userland — a container runtime or an attacker
+  # building a namespace — and the usual reason is to give loopback an address
+  # range that a probe will not recognise.
+  if iface.name == "lo" and flags_known and not loopback {
+    emit {
+      "kind": "loopback_flags_anomalous",
+      "severity": "medium",
+      "name": iface.name,
+      "flags": flags_text,
+      "set_bits": flags_int_to_bits(flags_text),
+      "recommendation": "confirm how this interface was created: the kernel sets IFF_LOOPBACK on lo at creation, so an lo without it was rebuilt by userland, and a rebuilt loopback is how a namespace gets a 127.0.0.0/8 that behaves unlike the host's"
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 3. A hardware-looking interface with a generated MAC
+  # ---------------------------------------------------------------------------
+  if len(mac_text) >= 2 and not is_virtual_name(iface.name) {
+    let first_octet_low = mac_text.substr(1, 2).lower()
+    let bits = hex_bits.get(first_octet_low, [0, 0, 0, 0])
+    if bits[1] == 1 {
+      emit {
+        "kind": "mac_locally_administered",
+        "severity": "medium",
+        "name": iface.name,
+        "mac": mac,
+        "reason": "the 0x02 bit of the first octet is set, so this address was assigned by software rather than by a vendor",
+        "recommendation": "compare the address against the host's documented configuration and against the DHCP lease or the switch's MAC table: virtual interfaces do this by design (the check excludes the usual virtual name prefixes), so on an interface that looks like hardware it means the identity was chosen by something other than the NIC"
+      }
+    }
+  }
+
+  if mac_text != "" and mac_text != "00:00:00:00:00:00" {
+    mac_seen.set(mac_text, mac_seen.get(mac_text, []).push(iface.name))
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 4. Two interfaces, one address
+# -----------------------------------------------------------------------------
+# Bridges and bonds legitimately share the MAC of a member (and a bridge shows the
+# member's). Reported low and with the names, so the analyst can rule it out in
+# one line rather than investigating two interfaces.
+for mac in keys(mac_seen) {
+  let holders = mac_seen[mac]
+  if len(holders) > 1 {
+    emit {
+      "kind": "duplicate_mac_across_interfaces",
+      "severity": "low",
+      "mac": mac,
+      "interfaces": holders,
+      "recommendation": "check whether these interfaces are bonded or bridged (in which case the shared address is the point) or whether two interfaces are claiming one identity, which makes every ARP entry and every switch port map ambiguous"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 5. Packet forwarding
+# -----------------------------------------------------------------------------
+# Read from the kernel, not inferred: a forwarder answers for other hosts, which
+# changes what its logs and its connections mean, and it is the single setting
+# that turns a compromised workstation into a route into the network.
+let forward_outcome = {"ok": true, "content": ""}
+try {
+  set forward_outcome.content = fs.read("/proc/sys/net/ipv4/ip_forward", 64).strip()
+} catch e {
+  set forward_outcome.ok = false
+}
+if forward_outcome.ok {
+  # The grade depends on the value, not on the fact that it could be read: a
+  # disabled sysctl is the normal state and is reported for the record, because
+  # "forwarding is off" is a fact an analyst wants to see stated rather than
+  # inferred from the absence of a finding.
+  let forwarding = forward_outcome.content == "1"
+  let grade = "info"
+  let why = "forwarding is disabled, which is the normal state on a host that is not a router"
+  if forwarding {
+    set grade = "medium"
+    set why = "this host forwards packets addressed to other machines"
+  }
+  emit {
+    "kind": "ip_forwarding_enabled",
+    "severity": grade,
+    "value": forward_outcome.content,
+    "forwarding": forwarding,
+    "reason": why,
+    "note": "enabling forwarding is expected on routers, VPN gateways and container hosts; on a workstation it is either a deliberate pivot or a side effect of one",
+    "recommendation": "if this host is not a router or a container host, find out what enabled forwarding: a VPN client sets it, and so does an operator establishing a route through a compromised machine"
+  }
+} else {
+  emit {
+    "kind": "ip_forwarding_enabled",
+    "severity": "info",
+    "value": nil,
+    "note": "the forwarding sysctl could not be read in this run, so forwarding is unknown rather than disabled"
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 6. The ARP table: residue of a sweep, or two addresses on one MAC
+# -----------------------------------------------------------------------------
+# /proc/net/arp is the kernel's neighbour cache. It is small, it is written by
+# the kernel rather than by userland, and it holds the two shapes worth reading:
+# entries that never resolved, and entries that resolved to an address another
+# entry already owns.
+let arp_lines = []
+try {
+  set arp_lines = fs.read("/proc/net/arp", 262144).lines()
+} catch e {
+  set arp_lines = []
+}
+
+let arp_entries = 0
+let incomplete = 0
+let gateway_mac = nil
+let arp_by_ip = {}
+
+# The default gateway comes from the routing table, which is a different kernel
+# view from the ARP cache — the check only works because both are read.
+let gateways = []
+for route in net.routes() {
+  if route.default {
+    gateways.push(route.gateway)
+  }
+}
+
+let down_interfaces = {}
+for iface in interfaces {
+  let flags_text = flags_of(iface.name)
+  down_interfaces.set(iface.name, not flag_set(flags_text, 0))
+}
+
+let arp_index = 0
+for raw in arp_lines {
+  set arp_index = arp_index + 1
+  let text = raw.strip()
+  if text == "" or text.starts_with("IP address") {
+    continue
+  }
+  let fields = text.split()
+  if len(fields) < 6 {
+    continue
+  }
+  set arp_entries = arp_entries + 1
+  let address = fields[0]
+  let flags = fields[2]
+  let mac = fields[3]
+  let device = fields[5]
+  arp_by_ip.set(address, mac)
+
+  if flags == "0x0" {
+    set incomplete = incomplete + 1
+    emit {
+      "kind": "arp_incomplete_entry",
+      "severity": "low",
+      "line": arp_index,
+      "address": address,
+      "device": device,
+      "recommendation": "a neighbour that never answered: one of these is a host that is down, and a table full of them is what probing a subnet leaves behind. Compare the count with the interface's address range to see whether a range was walked"
+    }
+  }
+
+  if down_interfaces.get(device, false) {
+    emit {
+      "kind": "arp_entry_on_down_interface",
+      "severity": "low",
+      "line": arp_index,
+      "address": address,
+      "mac": mac,
+      "device": device,
+      "recommendation": "a cached neighbour on an interface that is not up is stale state, unless the interface was brought up, used and brought down — which is how a capture is configured to leave no interface behind"
+    }
+  }
+
+  if contains(address, gateways) {
+    set gateway_mac = mac
+  }
+}
+
+if gateway_mac != nil {
+  for address in keys(arp_by_ip) {
+    if arp_by_ip[address] == gateway_mac and not contains(address, gateways) {
+      emit {
+        "kind": "possible_arp_spoofing",
+        "severity": "high",
+        "address": address,
+        "shared_mac": gateway_mac,
+        "gateways": gateways,
+        "recommendation": "two addresses answered by one MAC is the shape of ARP poisoning, and the standard false positive is a gateway that also owns another address or a load balancer doing the same. Confirm against the switch's MAC table or a capture before treating traffic through this neighbour as trustworthy: everything the host sends to the gateway is currently going to the MAC that also claims this address"
+      }
+    }
+  }
+} else {
+  if arp_entries > 0 and len(gateways) > 0 {
+    emit {
+      "kind": "arp_spoofing_unchecked",
+      "severity": "info",
+      "gateways": gateways,
+      "arp_entries": arp_entries,
+      "note": "the default gateway has no entry in the neighbour cache, so the spoofing comparison could not run; that is a statement about this table, not about the network"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 7. Summary
+# -----------------------------------------------------------------------------
+emit {
+  "kind": "interface_table_summary",
+  "severity": "info",
+  "interfaces": len(interfaces),
+  "interfaces_up": up_count,
+  "promiscuous_interfaces": promiscuous,
+  "arp_entries": arp_entries,
+  "arp_incomplete": incomplete,
+  "default_gateways": gateways,
+  "forwarding": forward_outcome.content,
+  "note": "promiscuous_interfaces is the number to quote: it is 0 on a host nobody is capturing on, and every capture on a host is either the operator's or not"
+}

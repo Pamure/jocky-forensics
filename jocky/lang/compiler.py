@@ -173,7 +173,13 @@ class Compiler:
 
         self.proto: Optional[Proto] = None
         self.scope: Optional[_FunctionScope] = None
-        self._loops: List[Tuple[int, int]] = []      # (continue_target, break_jumps_placeholder)
+        # (continue_target, break_jumps_placeholder, iterator_on_stack).
+        # The third flag is what makes ``break`` correct inside a ``for``: the
+        # loop's iterator lives on the operand stack and ITER_NEXT pops it on
+        # normal exhaustion, so leaving by ``break`` must pop it too or the
+        # *enclosing* loop's ITER_NEXT finds the wrong iterator and replays the
+        # inner sequence forever.
+        self._loops: List[Tuple[int, int, bool]] = []
         self._break_patches: List[List[int]] = []
         self._cell_slots: set = set()                # current function's cell-allocated slots
 
@@ -267,6 +273,14 @@ class Compiler:
         elif isinstance(node, N.Break):
             if not self._loops:
                 raise JockyCompileError(f"'break' outside of a loop (line {node.line})")
+            if self._loops[-1][2]:
+                # A ``for`` leaves its iterator on the operand stack (ITER_NEXT
+                # pops it when the loop ends by exhaustion). Leaving by ``break``
+                # must pop it too, or the enclosing loop's ITER_NEXT sees the
+                # inner iterator and replays the inner sequence forever — the
+                # outer variable is rebound to the inner values and the loop
+                # never terminates.
+                self.emit("POP")
             self._break_patches[-1].append(self.emit("JMP", -1))
         elif isinstance(node, N.Continue):
             if not self._loops:
@@ -328,7 +342,7 @@ class Compiler:
         start = len(self.proto.code)
         self.expr(node.cond)
         jf = self.emit("JMPF", -1)
-        self._loops.append((start, 0))
+        self._loops.append((start, 0, False))   # a ``while`` keeps nothing on the stack
         self._break_patches.append([])
         for s in node.body.stmts:
             self.stmt(s)
@@ -345,7 +359,7 @@ class Compiler:
         jn = self.emit("ITER_NEXT", -1)
         slot = self.scope.declare(node.name)
         self.local_set(slot)
-        self._loops.append((start, 0))
+        self._loops.append((start, 0, True))    # ITER_INIT left an iterator on the stack
         self._break_patches.append([])
         for s in node.body.stmts:
             self.stmt(s)

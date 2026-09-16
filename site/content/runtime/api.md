@@ -10,11 +10,12 @@ arity-checked `NativeFn`; every read is a direct kernel-interface access
 
 | Namespace | Functions |
 |---|---|
-| [`det`](#det) | 14 |
+| [`det`](#det) | 15 |
 | [`fs`](#fs) | 19 |
 | [`ioc`](#ioc) | 1 |
 | [`mem`](#mem) | 6 |
 | [`net`](#net) | 7 |
+| [`pcap`](#pcap) | 6 |
 | [`proc`](#proc) | 16 |
 | [`re`](#re) | 7 |
 | [`sigma`](#sigma) | 2 |
@@ -50,6 +51,7 @@ print(result.findings, result.errors)
 | `temp_exes` | 0..0 |
 | `triage` | 0..1 |
 | `unusual_listeners` | 0..0 |
+| `winject` | 0..0 |
 | `world_writable_path` | 0..0 |
 
 ## fs
@@ -104,6 +106,17 @@ print(result.findings, result.errors)
 | `listeners` | 0..0 |
 | `routes` | 0..0 |
 | `unusual_listeners` | 0..0 |
+
+## pcap
+
+| Call | Arity |
+|---|---|
+| `decode` | 1..2 |
+| `dns` | 1..2 |
+| `flows` | 1..2 |
+| `http` | 1..2 |
+| `read` | 1..2 |
+| `tls` | 1..2 |
 
 ## proc
 

@@ -526,7 +526,8 @@ def cmd_agent(args: argparse.Namespace) -> int:
     return client.run(server=args.server, token=token,
                       interval=args.interval, once=args.once, name=args.name,
                       state_dir=args.state, insecure=args.insecure, pin=args.pin,
-                      sni=args.sni, verify_ca=args.verify_ca)
+                      sni=args.sni, host_header=args.host_header,
+                      verify_ca=args.verify_ca)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -745,8 +746,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_agent.add_argument("--insecure", action="store_true",
                          help="do NOT verify or pin the server certificate — lab use only")
     p_agent.add_argument("--sni", default=None,
-                         help="TLS SNI / Host header to present when the address in "
-                              "--server differs (frontable deployments)")
+                         help="TLS server name to present when the address in --server "
+                              "differs (shared ingress, or dialling by IP)")
+    p_agent.add_argument("--host-header", default=None,
+                         help="HTTP Host to send, when it should differ from --sni; "
+                              "defaults to --sni. Note: this is vhost selection at an "
+                              "ingress you control, NOT domain fronting — every tier-1 "
+                              "CDN closed fronting between 2018 and 2024")
     p_agent.add_argument("--verify-ca", action="store_true",
                          help="require a certificate valid against the system trust store "
                               "(default: self-signed server authenticated by --pin)")

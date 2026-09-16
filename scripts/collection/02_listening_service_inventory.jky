@@ -1,0 +1,224 @@
+# 02_listening_service_inventory.jky — what is offering a service on this host,
+# and who is behind each one?
+#
+# The problem this answers
+# ------------------------
+# A listener is the host's attack surface *and* a common way to keep access: an
+# implant that binds a port survives a reboot of everything except itself, and a
+# service that has been running since boot looks exactly like a service that was
+# installed an hour ago unless you look at who owns it. This script answers, for
+# every TCP socket in LISTEN state: which address and port, which process, and
+# as which user — then flags the four combinations that are worth escalating.
+#
+# Read the ``listening_service`` rows as the inventory and the rest as the
+# findings:
+#
+# ``exposed_non_root_listener``   bound to a wildcard address (0.0.0.0 / ::) by
+#                                 a process running as a non-root user. Every
+#                                 host that accepts logins has one of these
+#                                 (sshd), so grade it by whether you recognise
+#                                 the binary, not by the finding alone.
+# ``unattributed_listener``       a LISTEN socket with no owning process in the
+#                                 table. Legitimate causes exist (the owner
+#                                 exited, /proc/<pid>/fd is unreadable because
+#                                 it is another user's), and so does the
+#                                 illegitimate one (the owner is hidden). The
+#                                 next step is `ls -l /proc/*/fd | grep <inode>`
+#                                 or an lsof-equivalent from memory.
+# ``listener_from_deleted_binary`` / ``listener_from_temp_path``
+#                                 the listening binary is unlinked or lives in
+#                                 /tmp, /dev/shm or /var/tmp. Neither occurs on
+#                                 a package-managed service.
+# ``privileged_port_non_root``    a port below 1024 held by a non-root uid. On
+#                                 Linux that needs CAP_NET_BIND_SERVICE, so it
+#                                 is evidence of a capability grant someone made
+#                                 deliberately (or of a setcap binary).
+#
+# Notes on scope: UDP is not included because a bound UDP socket is not
+# "listening" in the accept sense and the signal-to-noise ratio is poor; UNIX
+# sockets are excluded for the same reason. Both are one argument away
+# (``net.connections(true, true)``) if a case needs them.
+#
+# Read-only: this reads /proc/net/tcp[6] and attributes each socket through
+# /proc/<pid>/fd. Nothing connects to anything, so scanning does not touch the
+# remote end and cannot be observed by it.
+
+# -----------------------------------------------------------------------------
+# 1. Both views at once: the socket table and the process table
+# -----------------------------------------------------------------------------
+let listeners = net.listeners()
+let procs = proc.list(600)
+let by_pid = index_by(procs, fn(p) { return p.pid })
+
+# Attribution of a socket to a process is done by reading /proc/<pid>/fd, which
+# is only readable for processes of the same user (without CAP_SYS_PTRACE). The
+# kernel's socket table, on the other hand, records the uid that created the
+# socket, so a socket whose creator uid differs from ours is *unreadable*, not
+# suspicious — and the two cases must not be reported the same way.
+let self_info = proc.info(sys.pid())
+let self_uid = self_info.uid
+
+let non_root_exposed = 0
+let unattributed = 0
+let blind_attribution = 0
+let compromised_binary = 0
+
+for c in listeners {
+  let pid = c.pid
+  let owner = nil
+  if pid != nil {
+    set owner = by_pid.get(str(pid), nil)
+  }
+
+  # ---------------------------------------------------------------------------
+  # 2. The inventory row: one per listener, always emitted
+  # ---------------------------------------------------------------------------
+  # `severity` is info because the row itself is not a finding — it is the
+  # recording of who holds the port, which is what a stakeholder report needs.
+  let owner_user = "unattributed"
+  let owner_uid = nil
+  let owner_exe = nil
+  let owner_cmdline = nil
+  if owner != nil {
+    set owner_user = owner.name
+    set owner_uid = owner.uid
+    set owner_exe = owner.exe
+    set owner_cmdline = owner.cmdline
+  }
+
+  let exposed = c.local_addr == "0.0.0.0" or c.local_addr == "::" or c.local_addr == "0:0:0:0:0:0:0:0"
+  emit {
+    "kind": "listening_service",
+    "severity": "info",
+    "proto": c.proto,
+    "address": c.local_addr,
+    "port": c.local_port,
+    "wildcard": exposed,
+    "pid": pid,
+    "process": owner_user,
+    "uid": owner_uid,
+    "exe": owner_exe,
+    "cmdline": owner_cmdline,
+    "inode": c.inode
+  }
+
+  # ---------------------------------------------------------------------------
+  # 3. A wildcard bind by a non-root user
+  # ---------------------------------------------------------------------------
+  # Loopback-only binds are not reported: a developer's local server on
+  # 127.0.0.1 is not reachable from the network, and flagging it trains the
+  # operator to ignore this check.
+  if exposed and owner != nil and owner_uid != nil and owner_uid != 0 {
+    set non_root_exposed = non_root_exposed + 1
+    emit {
+      "kind": "exposed_non_root_listener",
+      "severity": "medium",
+      "proto": c.proto,
+      "address": c.local_addr,
+      "port": c.local_port,
+      "pid": pid,
+      "user": owner_user,
+      "uid": owner_uid,
+      "exe": owner_exe,
+      "cmdline": owner_cmdline,
+      "recommendation": "decide whether this port is meant to be reachable off-host; if it is, confirm the service, its patch level and its network ACL, and if it is not, find out who bound the wildcard address instead of loopback"
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 4. A listener with no owner in the visible table
+  # ---------------------------------------------------------------------------
+  if owner == nil {
+    set unattributed = unattributed + 1
+    # A socket created by another user cannot be attributed from an
+    # unprivileged run; say so instead of implying the owner is hiding.
+    let blind = c.uid != nil and self_uid != nil and c.uid != self_uid
+    let grade = "medium"
+    let why = "no visible process holds this socket inode"
+    if blind {
+      set grade = "low"
+      set blind_attribution = blind_attribution + 1
+      set why = "the socket's creator uid (" + str(c.uid) + ") differs from this run's uid (" + str(self_uid) + "), so /proc/<pid>/fd could not be read: re-run with privilege before treating this as hiding"
+    }
+    emit {
+      "kind": "unattributed_listener",
+      "severity": grade,
+      "proto": c.proto,
+      "address": c.local_addr,
+      "port": c.local_port,
+      "pid": pid,
+      "inode": c.inode,
+      "socket_uid": c.uid,
+      "blind_attribution": blind,
+      "note": why,
+      "recommendation": "resolve the socket inode against /proc/*/fd; if no process holds it, the socket belongs to kernel code (or to a process hidden from the table) and the host should be treated as suspect"
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 5. A service whose binary is gone or lives in a drop zone
+  # ---------------------------------------------------------------------------
+  if owner != nil {
+    if owner.deleted_exe {
+      set compromised_binary = compromised_binary + 1
+      emit {
+        "kind": "listener_from_deleted_binary",
+        "severity": "high",
+        "pid": pid,
+        "port": c.local_port,
+        "exe": owner_exe,
+        "cmdline": owner_cmdline,
+        "recommendation": "copy the running image out of /proc/<pid>/exe before terminating the process; an unlinked listener is a deliberately unrecoverable-on-disk implant or a crashed update"
+      }
+    }
+    if owner.suspicious_path {
+      set compromised_binary = compromised_binary + 1
+      emit {
+        "kind": "listener_from_temp_path",
+        "severity": "high",
+        "pid": pid,
+        "port": c.local_port,
+        "exe": owner_exe,
+        "cmdline": owner_cmdline,
+        "recommendation": "a service executed from /tmp, /dev/shm or /var/tmp is not package-managed; preserve the file and the process tree that launched it"
+      }
+    }
+    if c.local_port < 1024 and owner_uid != nil and owner_uid != 0 {
+      emit {
+        "kind": "privileged_port_non_root",
+        "severity": "medium",
+        "pid": pid,
+        "port": c.local_port,
+        "user": owner_user,
+        "exe": owner_exe,
+        "recommendation": "the process holds CAP_NET_BIND_SERVICE or a setcap binary was used; locate the grant (getcap -r / or the unit's CapabilityBoundingSet) and confirm it was intended"
+      }
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 6. Summary: the counts a report quotes, plus the exposure surface
+# -----------------------------------------------------------------------------
+# `wildcard_ports` is the list a reviewer reads to answer "what could a remote
+# host reach", which is the question this script exists for.
+let wildcard_ports = []
+for c in listeners {
+  if c.local_addr == "0.0.0.0" or c.local_addr == "::" {
+    wildcard_ports.push(str(c.local_port) + "/" + c.proto)
+  }
+}
+
+emit {
+  "kind": "listening_service_summary",
+  "severity": "info",
+  "listeners": len(listeners),
+  "wildcard_binds": len(wildcard_ports),
+  "wildcard_ports": sort(wildcard_ports).unique(),
+  "exposed_non_root": non_root_exposed,
+  "unattributed": unattributed,
+  "unattributed_blind": blind_attribution,
+  "suspicious_binaries": compromised_binary,
+  "processes_scanned": len(procs),
+  "note": "wildcard_binds > 0 means the host accepts inbound connections on those ports; compare the list against the host's documented service catalogue"
+}

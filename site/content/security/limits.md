@@ -382,7 +382,7 @@ measured reasons:
 | "Survives an EDR" | **not claimed** — an EDR can kill the process; no EDR was available to measure against on this host | self-detection measurement above |
 | "A clean triage means a clean host" | **no** — coverage was 0.36–0.40 as uid 1000; `partial_visibility` fires below 95% and does not notice a single hidden process | triage runs with and without a hidden process |
 | "Findings are evidence" | findings are **snapshots**: a finding's pid was already gone when inspected; consecutive scans differed | `/proc/<pid>/exe` after exit; two triage runs |
-| "Frontable" | the client mechanics exist (separate SNI and `Host`); no CDN is involved and none is claimed | [Server & agents](/docs/operations/management) |
+| Ingress selection | `--sni`/`--host-header` pick a vhost at an ingress you control; this is **not** domain fronting, which every tier-1 CDN closed between 2018 and 2024 | [Server & agents](/docs/operations/management) |
 
 ## Where the limits point
 

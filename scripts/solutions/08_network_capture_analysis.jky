@@ -1,0 +1,245 @@
+# 08_network_capture_analysis.jky — offline network forensics over a packet capture.
+#
+# The question this answers
+# -------------------------
+# The live collectors (`net.connections()`) answer "what is connected *now*".
+# Most network investigations do not have that luxury: the analyst arrives after
+# the fact with a capture taken by someone else, or pulled from a tap, and has to
+# answer "what happened". That is a different problem — it needs the packets, not
+# the socket table — and it is the half of "computer **and network** forensic
+# analysis" that a live-only tool cannot reach.
+#
+# Usage
+# -----
+#   jocky run scripts/solutions/08_network_capture_analysis.jky -- <capture>
+# or edit `capture_path` below. Both libpcap and pcapng are read; the format is
+# taken from the file's magic, not its extension, because a capture called
+# `evidence.txt` is still a capture.
+#
+# What "suspicious" means here, and what it does not
+# --------------------------------------------------
+# Every heuristic below is a *review queue*, not a verdict. Long DNS names are
+# also what a content delivery network uses; a missing TLS SNI is also what a
+# health check looks like. Each finding carries the evidence an analyst needs to
+# decide, and the recommendations say what to correlate — they never claim the
+# traffic is malicious.
+
+let capture_path = "/tmp/jky-capture.pcap"
+
+if not fs.exists(capture_path) {
+  emit {
+    "kind": "capture_missing",
+    "severity": "info",
+    "path": capture_path,
+    "recommendation": "point `capture_path` at a pcap or pcapng file; both formats are read, and the format is detected from the file's magic rather than its name"
+  }
+} else {
+
+  let cap = pcap.read(capture_path)
+
+  # ---------------------------------------------------------------------------
+  # 1. Summary first: an analyst needs to know what they are holding
+  # ---------------------------------------------------------------------------
+  # `truncated` and `stop_reason` are reported rather than assumed. A capture
+  # that was cut short, hit a read limit, or contained malformed records does
+  # not support the conclusion "this traffic never happened", and the difference
+  # between "nothing there" and "I stopped looking" is the single most important
+  # thing a capture reader can tell you.
+  emit {
+    "kind": "capture_summary",
+    "severity": "info",
+    "format": cap.format,
+    "packets": len(cap.packets),
+    "bytes_read": cap.bytes_read,
+    "truncated": cap.truncated,
+    "stop_reason": cap.stop_reason,
+    "byte_order": cap.byte_order,
+    "malformed_records": cap.malformed_records,
+    "recommendation": "treat findings as incomplete when truncated is true or malformed_records is non-zero"
+  }
+
+  let packets = cap.packets
+
+  # ---------------------------------------------------------------------------
+  # 2. Conversations, ranked — who talked, how much, for how long
+  # ---------------------------------------------------------------------------
+  # Flows are bidirectional and direction-aware (`bytes_a_to_b` vs
+  # `bytes_b_to_a`), because "the host sent 40 MB and received 2 KB" and the
+  # reverse are different stories: exfiltration versus download.
+  let all_flows = pcap.flows(cap)
+
+  let ranked = []
+  for f in all_flows {
+    ranked.push(f)
+  }
+
+  # A tiny insertion sort keeps the top talkers without depending on a sort
+  # helper's ordering rules for maps; reports are read by humans and the list is
+  # bounded by `top_n`.
+  let top_n = 10
+  let top = []
+  for f in ranked {
+    let placed = false
+    let rebuilt = []
+    for existing in top {
+      if not placed and f.bytes > existing.bytes {
+        rebuilt.push(f)
+        set placed = true
+      }
+      rebuilt.push(existing)
+    }
+    if not placed { rebuilt.push(f) }
+    # keep only the largest `top_n`
+    let trimmed = []
+    let taken = 0
+    for item in rebuilt {
+      if taken < top_n {
+        trimmed.push(item)
+        set taken = taken + 1
+      }
+    }
+    set top = trimmed
+  }
+
+  for f in top {
+    emit {
+      "kind": "top_conversation",
+      "severity": "info",
+      "endpoints": f.a + " <-> " + f.b,
+      "protocol": f.proto,
+      "packets": f.packets,
+      "bytes": f.bytes,
+      "bytes_out": f.bytes_a_to_b,
+      "bytes_in": f.bytes_b_to_a,
+      "duration_s": f.duration,
+      "note": "bytes_out is a->b; a long-lived flow with a large outbound share is worth a look, and is also what a backup or an upload looks like"
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 3. DNS — the highest-value signal in most captures
+  # ---------------------------------------------------------------------------
+  # Two patterns matter most in practice: tunnelling (data smuggled in long,
+  # high-entropy labels) and beaconing (a name resolved on a regular schedule).
+  # Both are heuristics; the evidence is emitted so the analyst can judge.
+  let queries = pcap.dns(cap)
+  let long_name_threshold = 40
+
+  for q in queries {
+    if q.is_response { continue }
+    for question in q.questions {
+      let name = question.name
+      if len(name) >= long_name_threshold {
+        emit {
+          "kind": "dns_long_name",
+          "severity": "medium",
+          "name": name,
+          "length": len(name),
+          "qtype": question.type_name,
+          "src": q.src,
+          "ts": q.ts,
+          "recommendation": "long labels carry data; compare against the host's normal resolution pattern and check whether the same parent domain recurs, which is what distinguishes tunnelling from a CDN hostname"
+        }
+      }
+      if question.type_name == "TXT" {
+        emit {
+          "kind": "dns_txt_query",
+          "severity": "low",
+          "name": name,
+          "src": q.src,
+          "ts": q.ts,
+          "recommendation": "TXT is a common smuggling channel because it carries arbitrary text; verify the domain has a legitimate reason to be queried by this host"
+        }
+      }
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 4. TLS — which names were contacted, and which connections hid the name
+  # ---------------------------------------------------------------------------
+  # A ClientHello without SNI is what a connection to a bare IP looks like, which
+  # is also what a health check looks like — hence `low`, and a recommendation
+  # that asks the analyst to correlate rather than to act.
+  let hellos = pcap.tls(cap)
+  for h in hellos {
+    if h.server_name == nil or h.server_name == "" {
+      emit {
+        "kind": "tls_without_sni",
+        "severity": "low",
+        "src": h.src,
+        "dst": h.dst,
+        "dst_port": h.dst_port,
+        "ts": h.ts,
+        "ja3": h.ja3,
+        "recommendation": "the destination was addressed by IP with no server name; legitimate for health checks and some appliances, worth correlating against the host's baseline"
+      }
+    } else {
+      emit {
+        "kind": "tls_sni",
+        "severity": "info",
+        "sni": h.server_name,
+        "src": h.src,
+        "dst": h.dst,
+        "ts": h.ts,
+        "ja3": h.ja3,
+        "ja3_hash": h.ja3_hash,
+        "note": "ja3_hash fingerprints the client's TLS stack; the same hash across different hosts suggests the same tool, and a hash that matches no known browser is worth a look"
+      }
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 5. Cleartext HTTP — the requests themselves
+  # ---------------------------------------------------------------------------
+  # Nothing here is hidden, so the value is in what was asked for: an executable
+  # or script fetched over plain HTTP is a delivery step, and a user agent that
+  # does not belong to a browser is a tool.
+  let requests = pcap.http(cap)
+  let payload_suffixes = [".exe", ".dll", ".ps1", ".bat", ".sh", ".scr", ".js", ".vbs", ".jar"]
+
+  for r in requests {
+    let path_lower = r.path.lower()
+    let risky = false
+    for suffix in payload_suffixes {
+      if path_lower.ends_with(suffix) { set risky = true }
+    }
+    if risky {
+      emit {
+        "kind": "http_payload_download",
+        "severity": "high",
+        "method": r.method,
+        "host": r.host,
+        "path": r.path,
+        "user_agent": r.user_agent,
+        "src": r.src,
+        "dst": r.dst,
+        "ts": r.ts,
+        "recommendation": "an executable or script fetched over cleartext is a delivery step; retrieve the file by hash from the capture if it is present, and check whether this host executed it"
+      }
+    } else {
+      emit {
+        "kind": "http_request",
+        "severity": "info",
+        "method": r.method,
+        "host": r.host,
+        "path": r.path,
+        "user_agent": r.user_agent,
+        "ts": r.ts,
+        "note": "cleartext request; the User-Agent names the client, and one that is not a browser usually names a tool"
+      }
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 6. What to do next
+  # ---------------------------------------------------------------------------
+  # The capture answers what crossed the wire. Attribution needs the host side:
+  #
+  #   net.connections()      -> what is connected now, with owning pid
+  #   proc.list()            -> which process holds it
+  #   det.triage()           -> whether that process is itself suspicious
+  #   tl.merge(pcap.dns(c), ...) -> put capture time and host time on one timeline
+  #
+  # `pcap.read` reports `malformed_records` and `stop_reason` on every run, so a
+  # report built from a partial capture says so instead of implying completeness.
+}

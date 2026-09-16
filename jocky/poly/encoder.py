@@ -9,8 +9,13 @@ not.  Every transform below is drawn from a PRNG seeded with fresh entropy on
 each :meth:`PolyEncoder.encode` call, so artifacts are unique per call even
 when the build seed is fixed.
 
-Transforms (all applied by :meth:`PolyEncoder.encode`, in this order)
---------------------------------------------------------------------
+Transforms (all applied by :meth:`PolyEncoder.encode`)
+-----------------------------------------------------
+The numbers are stable labels, not execution order: :meth:`encode` runs
+constant splitting (4) first, then the control-flow pass (6-9), junk insertion
+(5), slot permutation (2), opcode permutation (1), payload encryption (10) and
+the integrity footer (11).
+
 1. **Opcode permutation** -- a random bijection canonical opcode -> byte in
    ``1..255`` is drawn per artifact and stored in the header (a byte value of
    ``0`` is never used, which keeps the payload free of zero runs).  The
@@ -39,11 +44,42 @@ Transforms (all applied by :meth:`PolyEncoder.encode`, in this order)
    targets (``JMP``/``JMPF``/``JMPT``/``ITER_NEXT``), the
    ``(start, end, handler, slot)`` tuple of ``TRY_ENTER``, ``proto.handlers``
    and ``proto.starts``.
-6. **Payload encryption and padding** -- the whole payload is XORed with a
+6. **Branch inversion** -- each eligible ``JMPF t`` becomes ``JMPT <next>;
+   JMP t`` and each eligible ``JMPT`` becomes ``JMPF <next>; JMP t``, so which
+   opcode a build uses for a conditional branch, and where the block boundary
+   around it falls, both change while the stack effect does not.
+7. **Opaque predicates** -- a random subset of instructions is prefixed with
+   ``CONST k; CONST m; <cmp>; JMPT|JMPF <join>``.  ``k`` and ``m`` are two
+   *distinct* pool entries holding the same value with different per-constant
+   ciphers, so the outcome is fixed at build time but not readable from the
+   artifact; the arm never taken carries dead code and both arms rejoin at the
+   original instruction with the operand stack exactly as it was.
+8. **Unreachable-block injection** -- each unconditional ``JMP`` may be
+   followed by a stack-neutral block that no edge can reach but that references
+   real constants, names, slots and jump targets, so it disassembles like live
+   code.
+9. **Jump indirection** -- each eligible ``JMP t`` becomes ``CONST nil;
+   ITER_INIT; ITER_NEXT t; POP; POP``: the iterator is empty, so the dispatch
+   always jumps, and the two ``POP``s that follow are an arm no run reaches.
+   The target is still written in the operand, but which way the dispatch goes
+   is decided by a pool value the analyst has to decrypt; a target taken from a
+   slot or the stack would need an opcode the VM does not have.
+10. **Payload encryption and padding** -- the whole payload is XORed with a
    SHA-256(key || counter) keystream and followed by random-length padding,
    so two encodes of one program differ in content *and* in size.
-7. **Integrity** -- a truncated HMAC-SHA256 footer over every preceding byte;
+11. **Integrity** -- a truncated HMAC-SHA256 footer over every preceding byte;
    :meth:`decode` refuses to parse an artifact whose footer does not match.
+
+Transforms 6-9 are the ones that change the *shape* of the emitted code rather
+than only its bytes: :func:`control_flow_signature` measures exactly that, and
+a build's signature (over the main proto) now differs from build to build
+instead of being fixed by the source (measured on ``scripts/hunt.jky``: one
+branch-skeleton signature before, one per build after).  Because they splice
+instructions, each one remaps every absolute index it moved -- jump targets,
+``TRY_ENTER``'s ``(start, end, handler)``, ``proto.handlers`` and
+``proto.starts`` -- through :func:`_rewrite_code`, and refuses to consume an
+instruction that control flow can land on (:func:`_landing_indices`), since a
+replacement begins with a branch that pops an operand.
 
 Artifact layout (bytes)
 -----------------------
@@ -208,6 +244,25 @@ def _remap_try_entry(entry: Any, index_map: Dict[int, int], old_length: int) -> 
     return mapped if not isinstance(entry, list) else list(mapped)
 
 
+class _LocalJump:
+    """A jump that targets an instruction inside the replacement carrying it.
+
+    ``index_map`` can only name *old* indices, so a replacement that has to
+    jump over its own payload — the join point of an opaque predicate, for
+    instance — cannot address it with one.  The tag carries the offset from the
+    replacement's first instruction instead, and :func:`_rewrite_code` resolves
+    it once that base is known.
+    """
+
+    __slots__ = ("offset",)
+
+    def __init__(self, offset: int):
+        self.offset = offset
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"_LocalJump({self.offset})"
+
+
 def _rewrite_code(proto: Proto, replacements: Dict[int, List[Tuple[str, Any]]]) -> None:
     """Splice replacement sequences into the code and fix every absolute index.
 
@@ -218,18 +273,29 @@ def _rewrite_code(proto: Proto, replacements: Dict[int, List[Tuple[str, Any]]]) 
     old_length = len(old_code)
     new_code: List[Tuple[str, Any]] = []
     index_map: Dict[int, int] = {}
+    bases: List[int] = []          # replacement base per new instruction, -1 if spliced
     for ip, instruction in enumerate(old_code):
         index_map[ip] = len(new_code)
         replacement = replacements.get(ip)
         if replacement is None:
             new_code.append(instruction)
+            bases.append(-1)
         else:
-            new_code.extend(replacement)
+            base = len(new_code)
+            for entry in replacement:
+                new_code.append(entry)
+                bases.append(base)
     index_map[old_length] = len(new_code)
 
     for i, (op, arg) in enumerate(new_code):
         if op in _JUMP_OPS:
-            new_code[i] = (op, _remap_index(arg, index_map, old_length))
+            if isinstance(arg, _LocalJump):
+                if bases[i] < 0:
+                    raise JockyArtifactError(
+                        "control-flow transform used a local jump outside a replacement")
+                new_code[i] = (op, bases[i] + arg.offset)
+            else:
+                new_code[i] = (op, _remap_index(arg, index_map, old_length))
         elif op == "TRY_ENTER":
             new_code[i] = (op, _remap_try_entry(arg, index_map, old_length))
 
@@ -290,6 +356,267 @@ def _insert_junk(prog: Program, rng: random.Random) -> None:
             ] + [proto.code[start]]
         if replacements:
             _rewrite_code(proto, replacements)
+
+
+# --------------------------------------------------------- control-flow shape
+#: Opcodes that can move the program counter.  ``_JUMP_OPS`` is the subset whose
+#: operand is an absolute index; the rest are terminators.  Both the signature
+#: helper (``is-branch``) and the transforms below read this.
+_BRANCH_OPS = frozenset(_JUMP_OPS | {"RET", "HALT"})
+
+#: Opcodes no injection may touch: a guard in front of one of these would put
+#: an opaque branch inside the protected region that ``TRY_ENTER`` opens or in
+#: the unwind path itself, for no obfuscation gain.
+_TERMINATORS = frozenset({"TRY_ENTER", "TRY_EXIT", "RET", "HALT"})
+
+
+def _landing_indices(proto: Proto) -> set:
+    """Indices control flow can enter without falling through into them.
+
+    A transform that *consumes* an instruction is only sound when no edge lands
+    on the replacement's first instruction: replacing a conditional branch
+    starts with a branch that pops an operand, so an edge landing there would
+    take a value off a stack that never pushed one.  Statement starts are
+    included because the compiler patches loop back edges and ``break`` jumps
+    onto them, and ``TRY_ENTER``'s three indices because an unwind jumps to the
+    handler directly, with no instruction in between.
+    """
+    lands = {start for start in proto.starts if isinstance(start, int)}
+    for op, arg in proto.code:
+        if op in _JUMP_OPS and isinstance(arg, int):
+            lands.add(arg)
+        elif op == "TRY_ENTER":
+            lands.update(part for part in arg[:3] if isinstance(part, int))
+    for entry in proto.handlers:
+        lands.update(part for part in entry[:3] if isinstance(part, int))
+    return lands
+
+
+def _live_targets(proto: Proto) -> List[int]:
+    """Indices that already look like branch targets, for dead branches to use."""
+    length = len(proto.code)
+    targets = [start for start in proto.starts if 0 <= start < length]
+    for op, arg in proto.code:
+        if op in _JUMP_OPS and isinstance(arg, int) and 0 <= arg < length:
+            targets.append(arg)
+    return targets or [0]
+
+
+def _append_const(prog: Program, value: Any) -> int:
+    """Add ``value`` to the constant pool and return its index."""
+    prog.consts.append(value)
+    return len(prog.consts) - 1
+
+
+def _dead_atom(prog: Program, rng: random.Random, consts: List[int],
+               targets: List[int], names: List[int], slots: List[int]
+               ) -> List[Tuple[str, Any]]:
+    """One stack-neutral fragment of never-executed code.
+
+    Every fragment leaves the operand stack exactly as it found it and
+    references real constants, names, slots and jump targets, so emitted dead
+    code disassembles exactly like live code.
+    """
+    forms = [0, 1, 2, 3, 4, 5, 6, 7]
+    if names:
+        forms += [8, 9]
+    if slots:
+        forms.append(10)
+    form = rng.choice(forms)
+    c = rng.choice(consts)
+    d = rng.choice(consts)
+    if form == 0:
+        return [("CONST", c), ("POP", None)]
+    if form == 1:
+        return [("CONST", c), ("DUP", None), ("POP", None), ("POP", None)]
+    if form == 2:
+        return [("CONST", c), ("CONST", d), ("ADD", None), ("POP", None)]
+    if form == 3:
+        return [("CONST", c), ("CONST", d), ("EQ", None), ("POP", None)]
+    if form == 4:
+        return [("CONST", c), ("CONST", d), ("NE", None), ("JMPF", rng.choice(targets))]
+    if form == 5:
+        return [("CONST", c), ("CONST", d), ("EQ", None), ("JMPT", rng.choice(targets))]
+    if form == 6:
+        return [("CONST", c), ("CONST", d), ("LT", None), ("JMPF", rng.choice(targets))]
+    if form == 7:
+        return [("CONST", c), ("CONST", d), ("EQ", None), ("NOT", None),
+                ("JMPF", rng.choice(targets))]
+    if form == 8:
+        return [("LOADG", rng.choice(names)), ("POP", None)]
+    if form == 9:
+        return [("LOADG", rng.choice(names)), ("GET_MEM", rng.choice(names)),
+                ("POP", None)]
+    return [("LOADL", rng.choice(slots)), ("POP", None)]
+
+
+def _dead_block(prog: Program, rng: random.Random, consts: List[int],
+                targets: List[int], names: List[int], slots: List[int],
+                length: int, closing_jump: bool = False) -> List[Tuple[str, Any]]:
+    """Net-zero dead code at least ``length`` instructions long."""
+    block: List[Tuple[str, Any]] = []
+    while len(block) < length:
+        block.extend(_dead_atom(prog, rng, consts, targets, names, slots))
+    if closing_jump:
+        block.append(("JMP", rng.choice(targets)))
+    return block
+
+
+def _opaque_guard(prog: Program, rng: random.Random
+                  ) -> Tuple[List[Tuple[str, Any]], str]:
+    """A comparison whose outcome the writer knows and the bytecode does not.
+
+    Two *separate* pool entries hold the same value and the per-constant cipher
+    gives each its own key, so "these two constants are equal" cannot be read
+    off the artifact.  The returned opcode branches on the known outcome —
+    ``JMPT`` for a predicate that is always true, ``JMPF`` for one that is
+    always false — so the caller puts its dead arm on the arm never taken.
+    """
+    value = rng.randrange(-4096, 4096)
+    form = rng.randrange(5)
+    if form == 0:                       # x == x, with no second pool entry
+        idx = _append_const(prog, value)
+        return [("CONST", idx), ("DUP", None), ("EQ", None)], "JMPT"
+    left = _append_const(prog, value)
+    right = _append_const(prog, value)
+    if form == 1:
+        return [("CONST", left), ("CONST", right), ("EQ", None)], "JMPT"
+    if form == 2:
+        return [("CONST", left), ("CONST", right), ("NE", None)], "JMPF"
+    if form == 3:
+        return [("CONST", left), ("CONST", right), ("LT", None)], "JMPF"
+    return [("CONST", left), ("CONST", right), ("LT", None), ("NOT", None)], "JMPT"
+
+
+def _invert_branches(prog: Program, rng: random.Random) -> None:
+    """Transform 6: ``JMPF t`` -> ``JMPT <continuation>; JMP t`` (and ``JMPT`` -> ``JMPF``).
+
+    The opcode a build uses for a conditional branch changes and the block the
+    condition guards splits in two, while the stack effect is exactly the
+    original's: the inverted branch pops the condition on the path that
+    *continues* and the unconditional jump carries the original target.  ``t``
+    is remapped like every other absolute index; the continuation is named by
+    the old index of the following instruction, which is where the splice puts
+    it back, so no new label is needed.
+    """
+    for proto in prog.all_protos():
+        lands = _landing_indices(proto)
+        last = len(proto.code) - 1
+        rate = rng.uniform(0.5, 1.0)
+        replacements: Dict[int, List[Tuple[str, Any]]] = {}
+        for ip, (op, arg) in enumerate(proto.code):
+            if op not in ("JMPF", "JMPT") or not isinstance(arg, int):
+                continue
+            # ``ip + 1`` must stay a real index: a jump to ``old_length`` would
+            # end the proto, which the decoder's operand check rejects.
+            if ip in lands or ip >= last or rng.random() >= rate:
+                continue
+            inverted = "JMPT" if op == "JMPF" else "JMPF"
+            replacements[ip] = [(inverted, ip + 1), ("JMP", arg)]
+        if replacements:
+            _rewrite_code(proto, replacements)
+
+
+def _opaque_predicates(prog: Program, rng: random.Random, consts: List[int],
+                       names: List[int]) -> None:
+    """Transform 7: prefix a random subset of instructions with an opaque branch.
+
+    ``CONST k; CONST m; <cmp>; JMPT|JMPF <join>; <dead arm>; join: <original>``
+    — the branch is decided at build time, the arm that is not taken holds dead
+    code, and both arms arrive at the original instruction with the operand
+    stack exactly as it was (the guard's net effect is zero and every dead atom
+    is net zero as well).
+    """
+    for proto in prog.all_protos():
+        lands = _landing_indices(proto)
+        targets = _live_targets(proto)
+        slots = list(range(max(proto.nlocals, 0)))
+        rate = rng.uniform(0.04, 0.10)
+        replacements: Dict[int, List[Tuple[str, Any]]] = {}
+        for ip, (op, _arg) in enumerate(proto.code):
+            if ip in lands or op in _TERMINATORS or rng.random() >= rate:
+                continue
+            guard, branch = _opaque_guard(prog, rng)
+            arm = _dead_block(prog, rng, consts, targets, names, slots,
+                              rng.randint(2, 5))
+            join = len(guard) + len(arm) + 1     # offset of the original instruction
+            replacements[ip] = guard + [(branch, _LocalJump(join))] + arm + [proto.code[ip]]
+        if replacements:
+            _rewrite_code(proto, replacements)
+
+
+def _insert_dead_code(prog: Program, rng: random.Random, consts: List[int],
+                      names: List[int]) -> None:
+    """Transform 8: append an unreachable block after each unconditional ``JMP``.
+
+    Nothing falls through a ``JMP`` and no branch targets the block — jumps name
+    old indices, which map to the *first* instruction of a replacement and never
+    into the middle of one — so the block never runs, yet it is built from the
+    same atoms as live code and references real constants, names and targets.
+    """
+    for proto in prog.all_protos():
+        targets = _live_targets(proto)
+        slots = list(range(max(proto.nlocals, 0)))
+        rate = rng.uniform(0.4, 0.9)
+        replacements: Dict[int, List[Tuple[str, Any]]] = {}
+        for ip, (op, arg) in enumerate(proto.code):
+            if op != "JMP" or not isinstance(arg, int) or rng.random() >= rate:
+                continue
+            block = _dead_block(prog, rng, consts, targets, names, slots,
+                                rng.randint(2, 4), closing_jump=rng.random() < 0.5)
+            replacements[ip] = [("JMP", arg)] + block
+        if replacements:
+            _rewrite_code(proto, replacements)
+
+
+def _indirect_jumps(prog: Program, rng: random.Random) -> None:
+    """Transform 9: dispatch an unconditional ``JMP`` through an iterator.
+
+    ``JMP t`` becomes ``CONST nil; ITER_INIT; ITER_NEXT t; POP; POP``: the
+    iterator built from ``nil`` is empty, so ``ITER_NEXT`` always takes its
+    jump.  The target still appears in the operand, but whether the dispatch
+    jumps or falls through is decided by a pool value the analyst has to
+    decrypt, and the fallthrough arm is stack-neutral (the two ``POP``s remove
+    the item and the iterator), so an artifact whose pool were rewritten
+    degrades to "the jump is skipped" instead of corrupting the stack.  A true
+    indirect jump — a target taken from a slot or from the stack — needs an
+    opcode the VM does not have.
+    """
+    # ``nil`` is what the compiler hands back from every function, so an
+    # artifact usually already carries the entry this needs; reuse it instead of
+    # growing the pool by one encrypted constant per jump.
+    none_index = next((i for i, value in enumerate(prog.consts) if value is None), None)
+    if none_index is None:
+        none_index = _append_const(prog, None)
+    for proto in prog.all_protos():
+        rate = rng.uniform(0.25, 0.6)
+        replacements: Dict[int, List[Tuple[str, Any]]] = {}
+        for ip, (op, arg) in enumerate(proto.code):
+            if op != "JMP" or not isinstance(arg, int) or rng.random() >= rate:
+                continue
+            replacements[ip] = [
+                ("CONST", none_index), ("ITER_INIT", None),
+                ("ITER_NEXT", arg), ("POP", None), ("POP", None),
+            ]
+        if replacements:
+            _rewrite_code(proto, replacements)
+
+
+def _obfuscate_control_flow(prog: Program, rng: random.Random) -> None:
+    """Transforms 6-9: change the *shape* of the code, not only its bytes.
+
+    One pass so the transforms share the handful of pool entries dead code
+    references, and so each build draws its densities once.  Order matters:
+    inversion and the guards run first, unreachable-block injection then fills
+    behind every unconditional jump, and jump indirection last, so that the
+    blocks are attached to the plain jumps the earlier passes produced.
+    """
+    consts = [_append_const(prog, rng.randrange(-4096, 4096)) for _ in range(4)]
+    names = list(range(len(prog.names)))
+    _invert_branches(prog, rng)
+    _opaque_predicates(prog, rng, consts, names)
+    _insert_dead_code(prog, rng, consts, names)
+    _indirect_jumps(prog, rng)
 
 
 def _permute_slots(prog: Program, rng: random.Random) -> List[List[int]]:
@@ -542,6 +869,53 @@ def _decode_payload(payload: bytes, header: Dict[str, Any]) -> Program:
 
 
 # ----------------------------------------------------------------------- public
+def control_flow_signature(program_or_proto: Any, skeleton: bool = False) -> str:
+    """Fingerprint the **shape** of a compiled program's control flow.
+
+    This is the metric the byte-level transforms cannot move and the
+    control-flow transforms are meant to: two builds whose instruction counts
+    and bytes differ but whose branching is identical share a signature, and any
+    change to where the branches are, which opcode they use or how far they jump
+    changes it.
+
+    Two modes:
+
+    * default — every instruction contributes its opcode, and a branch the
+      signed distance to its target as well, so block layout *and* edges are
+      covered;
+    * ``skeleton=True`` — only the branches, in order, with no distances.  That
+      is the part NOP padding and constant splitting cannot move, so it is the
+      honest before/after measure of a change to the emitted control flow.
+
+    The hash is taken over the compiled/decoded program, never over artifact
+    bytes, so build entropy (opcode bijection, keys, padding, seed) never
+    reaches it: encoding one program twice with a deterministic encoder yields
+    one signature, while the default encoder yields a fresh one per build.
+
+    Args:
+        program_or_proto: A :class:`Program` (its main proto is fingerprinted)
+            or a :class:`Proto`.
+        skeleton: Fingerprint only the branch sequence.
+
+    Returns:
+        Hex digest (``_BUILD_HASH_HEX`` characters) of the instruction shape.
+    """
+    proto = program_or_proto.main if isinstance(program_or_proto, Program) else program_or_proto
+    if not isinstance(proto, Proto):
+        raise TypeError("control_flow_signature needs a Program or a Proto, got "
+                        f"{type(program_or_proto).__name__}")
+    parts: List[str] = []
+    for ip, (op, arg) in enumerate(proto.code):
+        if skeleton:
+            if op in _BRANCH_OPS:
+                parts.append(op)
+        elif op in _JUMP_OPS and isinstance(arg, int):
+            parts.append(f"{op}{arg - ip:+d}")
+        else:
+            parts.append(op)
+    return hashlib.sha256("\x1f".join(parts).encode("ascii")).hexdigest()[:_BUILD_HASH_HEX]
+
+
 class PolyEncoder:
     """Encodes compiled programs into unique, self-describing artifacts.
 
@@ -575,6 +949,7 @@ class PolyEncoder:
         work = _clone(prog)
 
         _split_constants(work, rng)
+        _obfuscate_control_flow(work, rng)
         _insert_junk(work, rng)
         slotmaps = _permute_slots(work, rng)
         opmap = _opcode_map(rng)

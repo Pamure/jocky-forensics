@@ -1,0 +1,290 @@
+# 04_session_surface_inventory.jky — who is on this host, through which
+# terminal, and did each session start from a login program?
+#
+# The problem this answers
+# ------------------------
+# utmp/wtmp answer "who logged in" and are the first things an intruder edits
+# (or truncates). This script answers the same question from the process table
+# instead, which no userland tool rewrites: a session is a process holding a
+# controlling terminal, and its origin is the login program in its ancestry.
+# That makes it the cross-check for a tampered `last`, and it works on a host
+# whose wtmp has been rotated away.
+#
+# What the output gives you
+# -------------------------
+# ``session_process``        one row per process with a controlling terminal:
+#                            the tty, the session id, the owning uid, and the
+#                            login program found in its ancestry.
+# ``interactive_root_session``
+#                            a uid 0 process on a terminal. Normal on a
+#                            maintenance window, a finding during one you did
+#                            not schedule.
+# ``session_not_rooted_in_login``
+#                            no sshd, login, getty, su, sudo, screen or tmux in
+#                            the process's ancestry. That is what a process
+#                            attached to a stolen pty looks like — and also
+#                            what a container-init or a hand-started process
+#                            looks like, so it is graded medium.
+# ``uid_without_account``    a uid that owns processes but has no /etc/passwd
+#                            entry. Deleted accounts and accounts created
+#                            outside the distribution tooling both land here;
+#                            so do container uids that overlap the host's
+#                            numeric space, which is why the finding carries
+#                            the passwd file it was checked against.
+# ``ssh_session_origin``     a session whose environment carries
+#                            SSH_CONNECTION: the source address of a remote
+#                            login, read from the process environment rather
+#                            than from a log file.
+#
+# Read ``session_inventory_summary`` first for the counts, then
+# ``interactive_root_session`` rows: those are the ones a stakeholder asks
+# about.
+
+# -----------------------------------------------------------------------------
+# 1. The account table, read once
+# -----------------------------------------------------------------------------
+# /etc/passwd is world-readable by design, so this works unprivileged. A parse
+# failure is not fatal: the session checks still run, and the uid/account
+# cross-check is skipped with an explicit note rather than reporting every uid
+# as missing an account.
+let accounts = {}
+let accounts_readable = false
+let passwd_lines = []
+try {
+  set passwd_lines = fs.read("/etc/passwd", 262144).lines()
+  set accounts_readable = true
+} catch e {
+  set passwd_lines = []
+}
+
+for raw in passwd_lines {
+  let text = raw.strip()
+  if text == "" or text.starts_with("#") {
+    continue
+  }
+  let fields = text.split(":")
+  if len(fields) < 7 {
+    continue
+  }
+  accounts.set(fields[2], {
+    "name": fields[0],
+    "uid": fields[2],
+    "gid": fields[3],
+    "home": fields[5],
+    "shell": fields[6]
+  })
+}
+
+# -----------------------------------------------------------------------------
+# 2. Sessions: processes with a controlling terminal
+# -----------------------------------------------------------------------------
+# `tty` is field 7 of /proc/<pid>/stat, i.e. the device number of the
+# controlling terminal; 0 means none. Service daemons have 0, and that is
+# exactly why this is a session view and not a process view.
+let procs = proc.list(600)
+let by_pid = index_by(procs, fn(p) { return p.pid })
+
+# The programs that legitimately put a user onto a terminal. Keep this list to
+# things that *create* a session: adding pty multiplexers is necessary (tmux
+# and screen re-parent every pane), but adding anything looser turns the check
+# into a no-op.
+let login_programs = ["sshd", "sshd-session", "login", "getty", "agetty",
+                      "mingetty", "su", "sudo", "runuser", "pkexec", "systemd",
+                      "systemd-logind", "systemd-user", "cron", "crond", "atd",
+                      "gdm", "gdm3", "gdm-session-worker", "lightdm", "sddm",
+                      "xdm", "startx", "tmux", "tmux: server", "screen",
+                      "docker", "containerd-shim", "tini", "container-init",
+                      "jocky"]
+
+# Shells and interpreters: an interactive *root* session is a shell held by uid
+# 0. getty and login also run as root on a terminal and are not sessions anyone
+# is typing into, so they are deliberately not in this list.
+let interpreters = ["bash", "sh", "dash", "ash", "zsh", "ksh", "csh", "tcsh",
+                    "fish", "python", "python2", "python3", "perl", "ruby",
+                    "php", "node", "busybox", "irb"]
+
+fn ancestry(pid, table) {
+  # Walk up to 12 hops so a pathological tree cannot cost more than 12 lookups.
+  let chain = []
+  let current = table.get(str(pid), nil)
+  let hops = 0
+  while current != nil and hops < 12 {
+    chain.push(current)
+    set current = table.get(str(current.ppid), nil)
+    set hops = hops + 1
+  }
+  return chain
+}
+
+fn identity(row) {
+  # The exe symlink is the authoritative name, but reading it needs the same
+  # privilege as the process: for another user's process it is empty. The
+  # kernel's comm field (row.name, /proc/<pid>/stat) is always readable, so it
+  # is the fallback — truncated to 15 characters, which is why the comparisons
+  # below are prefix matches on short names rather than exact ones.
+  let exe = row.exe
+  if exe != nil {
+    return fs.basename(exe)
+  }
+  return row.name
+}
+
+fn login_origin(chain) {
+  for row in chain {
+    let base = identity(row)
+    if contains(base, login_programs) {
+      return base
+    }
+  }
+  return nil
+}
+
+fn ssh_origin(pid) {
+  # The environment of a session carries the remote address of the login. It is
+  # read only for processes that already have a terminal, so the cost is one
+  # read per session rather than one per process.
+  let vars = []
+  try {
+    set vars = filter(proc.environ(pid), fn(v) { return v.starts_with("SSH_CONNECTION=") })
+  } catch e {
+    set vars = []
+  }
+  if len(vars) > 0 {
+    return vars[0].substr(15, 200)
+  }
+  return nil
+}
+
+let tty_processes = filter(procs, fn(p) { return p.tty != nil and p.tty != 0 })
+let session_count = 0
+let root_sessions = 0
+let orphan_sessions = 0
+
+for p in tty_processes {
+  set session_count = session_count + 1
+  let chain = ancestry(p.pid, by_pid)
+  let origin = login_origin(chain)
+  let remote = ssh_origin(p.pid)
+  let account = accounts.get(str(p.uid), nil)
+  let user = "uid " + str(p.uid)
+  if account != nil {
+    set user = account.name
+  }
+
+  emit {
+    "kind": "session_process",
+    "severity": "info",
+    "pid": p.pid,
+    "tty": p.tty,
+    "session_id": p.session,
+    "user": user,
+    "uid": p.uid,
+    "name": p.name,
+    "exe": p.exe,
+    "cmdline": p.cmdline,
+    "started": p.start_epoch,
+    "started_iso": time.iso(p.start_epoch),
+    "login_origin": origin,
+    "chain_depth": len(chain)
+  }
+
+  if remote != nil {
+    emit {
+      "kind": "ssh_session_origin",
+      "severity": "info",
+      "pid": p.pid,
+      "user": user,
+      "tty": p.tty,
+      "ssh_connection": remote,
+      "note": "source address of a login taken from the live environment; compare it with the sshd log, which is the file an intruder edits"
+    }
+  }
+
+  let self_name = identity(p)
+  if p.uid != nil and p.uid == 0 and contains(self_name, interpreters) {
+    set root_sessions = root_sessions + 1
+    emit {
+      "kind": "interactive_root_session",
+      "severity": "low",
+      "pid": p.pid,
+      "tty": p.tty,
+      "name": self_name,
+      "exe": p.exe,
+      "cmdline": p.cmdline,
+      "started_iso": time.iso(p.start_epoch),
+      "login_origin": origin,
+      "recommendation": "confirm this root shell against the change record; a terminal held open by root is how an unattended session outlives its purpose"
+    }
+  }
+
+  if origin == nil {
+    set orphan_sessions = orphan_sessions + 1
+    # The deepest visible ancestor is what names the thing that started it.
+    let tail = chain.last()
+    let deepest = "unknown"
+    let deepest_exe = nil
+    if tail != nil {
+      set deepest = tail.name
+      set deepest_exe = tail.exe
+    }
+    emit {
+      "kind": "session_not_rooted_in_login",
+      "severity": "medium",
+      "pid": p.pid,
+      "tty": p.tty,
+      "user": user,
+      "name": self_name,
+      "exe": p.exe,
+      "cmdline": p.cmdline,
+      "deepest_visible_ancestor": deepest,
+      "deepest_visible_ancestor_exe": deepest_exe,
+      "ancestry": transform(chain, fn(row) { return str(row.pid) + ":" + row.name }),
+      "recommendation": "no login program appears in the ancestry of this terminal; corroborate with the audit log — a pty attached from a stolen session or from a container has this shape, and so does a process started by a supervising init"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 3. Uids with processes but no account to own them
+# -----------------------------------------------------------------------------
+# Reported once per uid, not once per process: a uid with 40 processes is one
+# question, not forty rows.
+let reported_uids = {}
+let unknown_uid_count = 0
+if accounts_readable {
+  for p in procs {
+    if p.uid == nil or reported_uids.has(str(p.uid)) {
+      continue
+    }
+    if accounts.get(str(p.uid), nil) == nil {
+      reported_uids.set(str(p.uid), true)
+      set unknown_uid_count = unknown_uid_count + 1
+      emit {
+        "kind": "uid_without_account",
+        "severity": "medium",
+        "uid": p.uid,
+        "example_pid": p.pid,
+        "example_exe": p.exe,
+        "example_cmdline": p.cmdline,
+        "checked_against": "/etc/passwd",
+        "note": "a uid that owns processes but has no account entry is a deleted account left running, a container uid overlapping the host namespace, or an account created outside the distribution tooling"
+      }
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 4. Summary
+# -----------------------------------------------------------------------------
+emit {
+  "kind": "session_inventory_summary",
+  "severity": "info",
+  "processes": len(procs),
+  "processes_with_tty": len(tty_processes),
+  "root_sessions": root_sessions,
+  "sessions_without_login_origin": orphan_sessions,
+  "uids_without_account": unknown_uid_count,
+  "accounts_parsed": len(accounts),
+  "passwd_readable": accounts_readable,
+  "note": "if passwd_readable is false the uid cross-check did not run: 'no unknown uid' then means 'not looked', and this field is how you tell the two apart"
+}

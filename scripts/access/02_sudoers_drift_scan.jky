@@ -1,0 +1,361 @@
+# 02_sudoers_drift_scan.jky — who can become root on this host without a
+# password, and which rules hand out root by accident?
+#
+# The problem this answers
+# ------------------------
+# /etc/sudoers is the file that decides which accounts can be root on purpose.
+# Two things make it worth reading during an incident. The first is a
+# `NOPASSWD` rule: it is a deliberate operational choice, it is invisible in
+# `auth.log` (nothing to log, no password was asked for), and it is the first
+# thing an intruder adds to an account they intend to come back to. The second
+# is a rule that grants a *program* rather than a privilege — `sudo vim`,
+# `sudo find`, `sudo systemctl` — which is root with a wrapper, because those
+# programs can run other programs. A rule like that is not an intrusion, but it
+# is why the intrusion worked, and it is what an auditor is asking about.
+#
+# What each finding means
+# -----------------------
+# ``sudoers_rule``                one row per rule: the account, the run-as
+#                                 target, the command list, and whether the rule
+#                                 is passwordless. The inventory.
+# ``sudoers_nopasswd_rule``       high — a rule with NOPASSWD.
+# ``sudoers_full_root_command``   high — a rule whose command is `ALL`.
+# ``sudoers_root_equivalent_command``
+#                                 high — a rule whose command is a program that
+#                                 runs other programs (`sh`, `vim`, `find`,
+#                                 `tar`, `systemctl`, `docker`, `python3`, …).
+#                                 Each carries the command name so the operator
+#                                 can judge it.
+# ``sudoers_passwordless_defaults``
+#                                 `Defaults !authenticate`: every rule in scope
+#                                 stops asking for a password.
+# ``sudoers_env_keep_injection``  `Defaults env_keep += "LD_PRELOAD"` (or
+#                                 LD_LIBRARY_PATH, LD_AUDIT). That one line turns
+#                                 every sudo invocation into a library-injection
+#                                 primitive.
+# ``sudoers_file_insecure``       a sudoers file a non-root account can write.
+# ``sudoers_d_ignored_name``      a file in /etc/sudoers.d whose name contains a
+#                                 dot or ends in `~`: sudo *ignores* it, so a
+#                                 rule in it takes effect only if someone later
+#                                 renames the file — and a plain `grep
+#                                 /etc/sudoers.d/*` will read it and believe it.
+# ``sudoers_include_missing``     an include directive naming a path that does
+#                                 not exist.
+#
+# Read ``sudoers_summary`` first: it states how many files were readable, which
+# is what makes "no NOPASSWD rules" a claim rather than a hope. /etc/sudoers is
+# mode 0440 and unreadable to most accounts, so an unprivileged run legitimately
+# sees nothing — and says so.
+
+let sudoers_path = "/etc/sudoers"
+let sudoers_dir = "/etc/sudoers.d"
+
+# Programs that are root with a wrapper. Not a curiosity list: each of these can
+# run another program or write a file that is executed later, which is the
+# definition of the problem. Basenames are compared, so `/usr/bin/env` and `env`
+# are the same finding.
+let root_equivalent = ["all", "sh", "bash", "dash", "zsh", "ksh", "fish", "csh",
+                       "tcsh", "env", "vi", "vim", "nvim", "view", "less",
+                       "more", "man", "find", "python", "python2", "python3",
+                       "perl", "ruby", "php", "node", "lua", "awk", "gawk",
+                       "sed", "tee", "cp", "mv", "dd", "tar", "zip", "unzip",
+                       "rsync", "git", "docker", "podman", "systemctl",
+                       "service", "mount", "umount", "chroot", "chmod", "chown",
+                       "chattr", "nano", "emacs", "editor", "screen", "tmux",
+                       "ftp", "curl", "wget", "nc", "ncat", "socat", "nmap",
+                       "ssh", "scp", "sftp", "mysql", "psql", "sqlite3", "apt",
+                       "apt-get", "dpkg", "snap", "pip", "pip3", "npm", "sudo",
+                       "su", "passwd", "crontab", "at", "ldconfig", "insmod",
+                       "modprobe", "sysctl", "ip", "iptables", "nft", "ar",
+                       "base64", "xargs", "nohup", "timeout", "watch", "xxd",
+                       "od", "install", "make", "gcc", "perl6", "tclsh", "ftp",
+                       "busybox", "journalctl", "mount.nfs"]
+
+fn command_basename(token) {
+  # A command spec carries tags and arguments: `NOPASSWD: /bin/sh -c`, or
+  # `sha256:abcdef… /usr/bin/rsync`. The command is the first field that is not a
+  # tag (ends with a colon), not a digest prefix, and not a parenthesised
+  # run-as fragment — taking fields[0] unconditionally returned "(root)" for
+  # `user ALL=(root) /usr/bin/vim` and "ALL)" for `user ALL=(ALL:ALL) ALL`,
+  # which silently missed both.
+  let fields = token.strip().split()
+  for field in fields {
+    if field == "" or field.ends_with(":") or field.starts_with("(") or field.ends_with(")") {
+      continue
+    }
+    if contains(":", field) and not field.starts_with("/") {
+      # A tag glued to its command: `NOPASSWD:ALL`, `SETENV:/bin/x`. The command
+      # is what follows the last colon; a bare tag leaves nothing and the loop
+      # moves on to the next field.
+      let segments = field.split(":")
+      let tail = segments[len(segments) - 1]
+      if tail != "" {
+        return fs.basename(tail).lower()
+      }
+      continue
+    }
+    return fs.basename(field).lower()
+  }
+  return ""
+}
+
+fn rule_files() {
+  let files = []
+  if fs.exists(sudoers_path) {
+    files.push(sudoers_path)
+  }
+  if fs.exists(sudoers_dir) {
+    for entry in fs.scan(sudoers_dir, 200, nil, 1) {
+      if not entry.is_dir {
+        files.push(entry.path)
+      }
+    }
+  }
+  return files
+}
+
+let readable_files = 0
+let total_files = 0
+let rule_count = 0
+let nopasswd_count = 0
+let dangerous_count = 0
+let now = time.now()
+
+# -----------------------------------------------------------------------------
+# 1. Permission and name checks, before any parsing
+# -----------------------------------------------------------------------------
+for path in rule_files() {
+  set total_files = total_files + 1
+  let metadata = fs.stat(path)
+  let base = fs.basename(path)
+
+  # A sudoers file a normal account can write is root, so this is checked even
+  # when the content cannot be read.
+  if metadata != nil and not metadata.is_dir {
+    let group_write = metadata.mode_str.substr(5, 6) == "w"
+    if metadata.world_writable or group_write or (metadata.uid != 0 and metadata.uid != nil) {
+      emit {
+        "kind": "sudoers_file_insecure",
+        "severity": "critical",
+        "path": path,
+        "mode": metadata.mode,
+        "mode_str": metadata.mode_str,
+        "uid": metadata.uid,
+        "gid": metadata.gid,
+        "recommendation": "restore root:root 0440 and find out who changed it: a writable sudoers file is root for whichever account can write it, and the audit trail for the change is the first thing to collect"
+      }
+    }
+  }
+
+  # sudo reads only files in /etc/sudoers.d whose names contain no dot and do
+  # not end in a tilde. A rule in an ignored name is dormant until it is
+  # renamed, and a naive sweep that globs the directory will report it as active.
+  if path != sudoers_path and (contains(".", base) or base.ends_with("~")) {
+    let modified = nil
+    if metadata != nil {
+      set modified = time.iso(metadata.mtime)
+    }
+    emit {
+      "kind": "sudoers_d_ignored_name",
+      "severity": "medium",
+      "path": path,
+      "rule_name": base,
+      "mtime_iso": modified,
+      "recommendation": "sudo ignores this file because of its name, so the rules in it do not apply today: either someone left an editor backup here or a rule was staged to be activated by a rename, and a tool that reads the directory with a glob will misreport which of the two it is"
+    }
+  }
+
+  let content = ""
+  try {
+    set content = fs.read(path, 262144)
+  } catch e {
+    emit {
+      "kind": "sudoers_unreadable",
+      "severity": "low",
+      "path": path,
+      "note": "this sudoers file could not be read by this run: rules in it are unknown, not absent. /etc/sudoers is 0440 root on a stock host, so an unprivileged run expects this"
+    }
+    continue
+  }
+  set readable_files = readable_files + 1
+
+  # ---------------------------------------------------------------------------
+  # 2. Parsing
+  # ---------------------------------------------------------------------------
+  let index = 0
+  for raw in content.lines() {
+    set index = index + 1
+    let text = raw.strip()
+    if text == "" {
+      continue
+    }
+
+    # Include directives. `#include`/`#includedir` are directives, not comments,
+    # which is exactly the line a naive "# starts a comment" parser drops.
+    if text.starts_with("#include") or text.starts_with("@include") {
+      let parts = text.replace("@include", "#include").replace("#includedir", "#include").split()
+      let target = "unknown"
+      if len(parts) > 1 {
+        set target = parts[1]
+      }
+      emit {
+        "kind": "sudoers_include",
+        "severity": "info",
+        "path": path,
+        "line": index,
+        "directive": text.substr(0, 200),
+        "target": target,
+        "target_exists": target.starts_with("/") and fs.exists(target)
+      }
+      if target.starts_with("/") and not fs.exists(target) {
+        emit {
+          "kind": "sudoers_include_missing",
+          "severity": "low",
+          "path": path,
+          "line": index,
+          "target": target,
+          "recommendation": "the included path does not exist: either the include is stale or the file that held a rule was removed, and the second reading is why this is reported rather than ignored"
+        }
+      }
+      continue
+    }
+
+    if text.starts_with("#") {
+      continue
+    }
+
+    if text.starts_with("Defaults") {
+      if contains("!authenticate", text) or contains("!authenticate", text.lower()) {
+        emit {
+          "kind": "sudoers_passwordless_defaults",
+          "severity": "high",
+          "path": path,
+          "line": index,
+          "line_text": text.substr(0, 300),
+          "recommendation": "every rule in the scope of this Default stops asking for a password: find who set it, because it converts every grant in the file into a passwordless one and it does not appear in any log line"
+        }
+      }
+      if contains("env_keep", text) and contains("LD_", text) {
+        emit {
+          "kind": "sudoers_env_keep_injection",
+          "severity": "high",
+          "path": path,
+          "line": index,
+          "line_text": text.substr(0, 300),
+          "recommendation": "keeping LD_PRELOAD / LD_LIBRARY_PATH / LD_AUDIT across sudo makes every privileged invocation load a library the invoking user chose: that is arbitrary code as root from an unprivileged account, and it needs no exploit"
+        }
+      }
+      emit {
+        "kind": "sudoers_defaults",
+        "severity": "info",
+        "path": path,
+        "line": index,
+        "line_text": text.substr(0, 300),
+        "security_relevant": contains("env_keep", text) or contains("env_reset", text) or contains("secure_path", text) or contains("authenticate", text)
+      }
+      continue
+    }
+
+    # A rule line. Shape: `user host=(runas) [TAG:] command[, command]`.
+    let has_nopasswd = contains("NOPASSWD", text)
+
+    # The command list starts after the last closing parenthesis of the run-as
+    # specification. `user host=(runas) cmd` and `user host= cmd` are both
+    # shapes in the wild, so the parenthesis is preferred and the `=` is the
+    # fallback; splitting on `:` (the obvious choice) breaks on `=(ALL:ALL)`.
+    let after_rules = text
+    if contains(")", text) {
+      let segments = text.split(")")
+      set after_rules = segments[len(segments) - 1]
+    } elif contains("=", text) {
+      let segments = text.split("=")
+      set after_rules = segments[len(segments) - 1]
+    }
+    let commands = []
+    for token in after_rules.split(",") {
+      let name = command_basename(token)
+      if name != "" {
+        commands.push(name)
+      }
+    }
+    let grants = text.split("=")[0].strip()
+    let runas = "self"
+    let runas_part = re.find(r"=\(([^)]*)\)", text)
+    if len(runas_part) > 0 {
+      set runas = runas_part[0].groups[0]
+    }
+
+    set rule_count = rule_count + 1
+    emit {
+      "kind": "sudoers_rule",
+      "severity": "info",
+      "path": path,
+      "line": index,
+      "grant": grants.substr(0, 200),
+      "run_as": runas,
+      "commands": commands,
+      "nopasswd": has_nopasswd,
+      "line_text": text.substr(0, 400)
+    }
+
+    if has_nopasswd {
+      set nopasswd_count = nopasswd_count + 1
+      emit {
+        "kind": "sudoers_nopasswd_rule",
+        "severity": "high",
+        "path": path,
+        "line": index,
+        "grant": grants.substr(0, 200),
+        "commands": commands,
+        "line_text": text.substr(0, 400),
+        "recommendation": "confirm this rule against the change record: a passwordless sudo rule leaves no authentication in auth.log, survives a password rotation, and is what an intruder adds to an account they intend to reuse. If it is legitimate, it belongs in the fleet's documented baseline"
+      }
+    }
+
+    for name in commands {
+      if name == "all" {
+        set dangerous_count = dangerous_count + 1
+        emit {
+          "kind": "sudoers_full_root_command",
+          "severity": "high",
+          "path": path,
+          "line": index,
+          "grant": grants.substr(0, 200),
+          "run_as": runas,
+          "line_text": text.substr(0, 400),
+          "recommendation": "the rule delegates every command as the run-as user. That is the ordinary shape for an administrator account and the whole point for a compromised one — the question to answer is who owns the account on the left, and whether the delegation is still intended"
+        }
+      } else {
+        if contains(name, root_equivalent) {
+          set dangerous_count = dangerous_count + 1
+          emit {
+            "kind": "sudoers_root_equivalent_command",
+            "severity": "high",
+            "path": path,
+            "line": index,
+            "grant": grants.substr(0, 200),
+            "run_as": runas,
+            "command": name,
+            "line_text": text.substr(0, 400),
+            "recommendation": "this command can run another command or write a file that runs later, so the rule grants root with a wrapper rather than a narrow privilege. Confirm the grant is understood as such by its owner: the usual fix is to replace it with the specific subcommand the task needs"
+          }
+        }
+      }
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 3. Summary
+# -----------------------------------------------------------------------------
+emit {
+  "kind": "sudoers_summary",
+  "severity": "info",
+  "files_present": total_files,
+  "files_readable": readable_files,
+  "rules": rule_count,
+  "nopasswd_rules": nopasswd_count,
+  "root_equivalent_grants": dangerous_count,
+  "collected_at_iso": time.iso(now),
+  "note": "files_readable is the number that bounds every other claim here: /etc/sudoers is 0440 root, so an unprivileged run reports zero rules and this field is how a reader tells that apart from a host with no rules"
+}

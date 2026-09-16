@@ -1,0 +1,287 @@
+# 02_log_gap_scan.jky — are the logs still being written, is anything pointing
+# them somewhere else, and where does the record stop?
+#
+# The problem this answers
+# ------------------------
+# Anti-forensics on a Linux host usually starts with the logs, because they are
+# the only record that survives the process that wrote them. The techniques are
+# few and each leaves a shape: symlink the log at /dev/null, truncate it, make it
+# writable so it can be rewritten, stop the service that writes it, or delete the
+# session records (`wtmp`/`utmp`/`btmp`) so `last` and `who` return nothing.
+# This script looks for those shapes and, just as importantly, says how far the
+# record actually goes — a scan that cannot distinguish "no gaps" from "no logs
+# at all" is the failure it exists to prevent.
+#
+# What the output gives you
+# -------------------------
+# ``log_file``                  inventory row for every log this run considers
+#                               *active* (see the vocabulary note below):
+#                               size, mode, owner, mtime, ctime.
+# ``log_symlinked_away``        a log that is a symlink — to /dev/null (the
+#                               classic), or to a path outside /var/log, where
+#                               the writer's output lands somewhere nobody
+#                               looks.
+# ``log_writable_by_non_root``  a log a non-root account can write. Log forgery
+#                               needs exactly this.
+# ``log_empty``                 an active log of zero bytes. Rotation produces
+#                               this too, so it is graded low and the
+#                               recommendation says what to compare against.
+# ``log_metadata_touched_recently``
+#                               the content is old but the metadata changed in
+#                               the last day: chmod, chown, rename or truncate
+#                               rather than a normal write.
+# ``session_record_missing``    wtmp/utmp/btmp absent. Deleting them is how
+#                               `last` is made to report nothing, and their
+#                               absence is invisible to a tool that only reads
+#                               them.
+# ``journal_storage_volatile``  journald is configured to keep its journal in
+#                               /run only, so the next reboot discards it.
+# ``logging_stalled``           no active log has been written for more than the
+#                               stall threshold while the host has been up
+#                               longer than that: logging stopped, which is what
+#                               an attacker with service-management access does
+#                               instead of editing files.
+#
+# Vocabulary note: the inventory covers the *active* logs — the names a running
+# service writes (syslog, auth.log, kern.log, messages, secure, wtmp, btmp,
+# lastlog, dpkg.log, ufw.log, ...) plus any file directly under /var/log that
+# was written in the last week. Rotated archives and per-run logs (Xorg.pid-*.log
+# and friends) are counted but not listed, because a report of 400 archives
+# buries the eight files that matter. This is stated because the selection rule
+# is the one thing a reader should be able to disagree with.
+
+# -----------------------------------------------------------------------------
+# 1. What counts as an active log
+# -----------------------------------------------------------------------------
+let log_root = "/var/log"
+
+let active_names = ["syslog", "messages", "secure", "auth.log", "kern.log",
+                    "daemon.log", "user.log", "mail.log", "cron", "cron.log",
+                    "wtmp", "btmp", "lastlog", "dpkg.log", "apport.log",
+                    "ufw.log", "fail2ban.log", "boot.log", "bootstrap.log",
+                    "alternatives.log", "fontconfig.log", "gpu-manager.log",
+                    "cups/access_log", "apt/history.log", "apt/term.log",
+                    "audit/audit.log", "nginx/access.log", "nginx/error.log",
+                    "mysql/error.log", "postgresql/postgresql.log"]
+
+let session_records = ["/var/log/wtmp", "/var/log/btmp", "/var/run/utmp",
+                       "/var/log/lastlog"]
+
+let stall_seconds = 6 * 3600
+let now = time.now()
+let uptime_seconds = sys.uptime().seconds
+
+fn is_active_log(path, entry) {
+  let relative = path.substr(len(log_root) + 1, 400)
+  for name in active_names {
+    if relative == name {
+      return true
+    }
+  }
+  # A file directly in /var/log, written this week, is part of the live record
+  # even if its name is not in the list above.
+  if not contains("/", relative) and entry.mtime > now - 7 * 24 * 3600 {
+    return true
+  }
+  return false
+}
+
+let examined = 0
+let active = 0
+let total_bytes = 0
+let newest_active = 0
+let symlinked = 0
+let writable = 0
+
+if not fs.exists(log_root) {
+  emit {
+    "kind": "log_directory_missing",
+    "severity": "high",
+    "path": log_root,
+    "note": "the log directory does not exist on this host; every conclusion about log continuity is vacuous until that is explained"
+  }
+}
+
+if fs.exists(log_root) {
+  for entry in fs.scan(log_root, 500, nil, 2) {
+    if entry.is_dir {
+      continue
+    }
+    set examined = examined + 1
+    set total_bytes = total_bytes + entry.size
+
+    # -------------------------------------------------------------------------
+    # 2. A log that is a symlink
+    # -------------------------------------------------------------------------
+    # Debian ships /var/log/README as a symlink on purpose, so only symlinks
+    # whose name is in the active vocabulary (or that point at /dev/null) are
+    # reported: the rule is about what a *writer* would follow.
+    if entry.is_link {
+      let target = entry.get("target", nil)
+      let sink = target != nil and (target == "/dev/null" or target == "/dev/zero")
+      if sink or is_active_log(entry.path, entry) {
+        set symlinked = symlinked + 1
+        emit {
+          "kind": "log_symlinked_away",
+          "severity": "high",
+          "path": entry.path,
+          "target": target,
+          "points_at_a_sink": sink,
+          "recommendation": "follow the link before reading anything else: a log pointed at /dev/null discards every record the service writes, and a log pointed outside /var/log puts the record where nobody looks. Restoring the file is not enough — the records written while the link was in place do not exist anywhere"
+        }
+      }
+      continue
+    }
+
+    let is_active = is_active_log(entry.path, entry)
+    if is_active {
+      set active = active + 1
+      if entry.mtime > newest_active {
+        set newest_active = entry.mtime
+      }
+      emit {
+        "kind": "log_file",
+        "severity": "info",
+        "path": entry.path,
+        "size": entry.size,
+        "mode": entry.mode,
+        "uid": entry.uid,
+        "gid": entry.gid,
+        "mtime": entry.mtime,
+        "mtime_iso": time.iso(entry.mtime),
+        "ctime": entry.ctime,
+        "ctime_iso": time.iso(entry.ctime),
+        "age_seconds": now - entry.mtime,
+        "empty": entry.size == 0
+      }
+    }
+
+    # -------------------------------------------------------------------------
+    # 3. Writable by someone other than the account that owns it
+    # -------------------------------------------------------------------------
+    # /var/log/wtmp is legitimately group-writable by utmp, so the group is
+    # reported alongside the flag: the analyst decides whether that group is
+    # `utmp` or `users`.
+    let group_write = entry.mode_str.substr(5, 6) == "w"
+    if entry.world_writable or (group_write and is_active) {
+      set writable = writable + 1
+      emit {
+        "kind": "log_writable_by_non_root",
+        "severity": "high",
+        "path": entry.path,
+        "mode": entry.mode,
+        "mode_str": entry.mode_str,
+        "uid": entry.uid,
+        "gid": entry.gid,
+        "world_writable": entry.world_writable,
+        "group_writable": group_write,
+        "recommendation": "compare the group against the service's own group (utmp and adm are expected for session records) and fix anything else: a log a normal account can write is a log whose evidence a normal account can change, and it is the first half of a forged narrative"
+      }
+    }
+
+    # -------------------------------------------------------------------------
+    # 4. Empty, or metadata changed while the content stayed put
+    # -------------------------------------------------------------------------
+    if is_active and entry.size == 0 {
+      emit {
+        "kind": "log_empty",
+        "severity": "low",
+        "path": entry.path,
+        "mtime_iso": time.iso(entry.mtime),
+        "ctime_iso": time.iso(entry.ctime),
+        "recommendation": "log rotation creates an empty file and truncation leaves one, and the two look identical from here. Compare the mtime with /etc/logrotate.d for this file: rotation preserves the old content elsewhere, `> file` and `truncate -s 0` do not, so the absence of the rotated copy is the answer"
+      }
+    }
+
+    if is_active and entry.ctime - entry.mtime > 24 * 3600 and now - entry.ctime < 24 * 3600 {
+      emit {
+        "kind": "log_metadata_touched_recently",
+        "severity": "medium",
+        "path": entry.path,
+        "mtime_iso": time.iso(entry.mtime),
+        "ctime_iso": time.iso(entry.ctime),
+        "size": entry.size,
+        "recommendation": "the content has not changed for a day but the file's metadata changed within it: chmod, chown, rename or a copy into place all produce this, and all of them are ways to replace a log without writing to it"
+      }
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 5. Session records: the files `last` and `who` read
+# -----------------------------------------------------------------------------
+# Their absence is the finding, not their size. A zero-byte btmp is what a
+# monthly rotation leaves; a *missing* wtmp is what removing the record looks
+# like, and no tool that opens the file can report it.
+for path in session_records {
+  if not fs.exists(path) {
+    emit {
+      "kind": "session_record_missing",
+      "severity": "medium",
+      "path": path,
+      "recommendation": "explain the absence before trusting any statement about who logged in: `last`, `who` and `lastb` all read these files, and each of them reports an empty history for a missing file and for a deleted one alike"
+    }
+    continue
+  }
+  let metadata = fs.stat(path)
+  if metadata != nil {
+    emit {
+      "kind": "session_record",
+      "severity": "info",
+      "path": path,
+      "size": metadata.size,
+      "mode": metadata.mode,
+      "uid": metadata.uid,
+      "gid": metadata.gid,
+      "mtime_iso": time.iso(metadata.mtime),
+      "empty": metadata.size == 0,
+      "note": "a zero-byte record right after a rotation is normal; a zero-byte record on a host that has rotated nothing is not"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 6. Journald storage mode
+# -----------------------------------------------------------------------------
+# /var/log/journal means the journal survives reboot; /run/log/journal means it
+# does not. An analyst who assumes the journal is a durable record on a host
+# configured this way will find nothing after the next restart.
+let persistent_journal = fs.exists("/var/log/journal")
+let volatile_journal = fs.exists("/run/log/journal")
+emit {
+  "kind": "journal_storage_state",
+  "severity": "low",
+  "persistent_directory": persistent_journal,
+  "volatile_directory": volatile_journal,
+  "recommendation": "if only the volatile directory exists, collect the journal now: it lives in memory and the next reboot discards it, which changes what an analyst can promise about the timeline"
+}
+
+# -----------------------------------------------------------------------------
+# 7. Summary: how far does the record actually go?
+# -----------------------------------------------------------------------------
+let stalled = active > 0 and uptime_seconds > stall_seconds and (now - newest_active) > stall_seconds
+if stalled {
+  emit {
+    "kind": "logging_stalled",
+    "severity": "medium",
+    "newest_active_log_iso": time.iso(newest_active),
+    "hours_since_last_write": (now - newest_active) / 3600,
+    "uptime_hours": uptime_seconds / 3600,
+    "active_logs": active,
+    "recommendation": "every active log is older than the stall threshold while the host is still up: check the logging service's state and its configuration, because a stopped writer leaves files that look readable and a record that simply ends"
+  }
+}
+
+emit {
+  "kind": "log_inventory_summary",
+  "severity": "info",
+  "files_examined": examined,
+  "active_logs": active,
+  "total_bytes": total_bytes,
+  "newest_active_log_iso": time.iso(newest_active),
+  "newest_active_log_age_seconds": now - newest_active,
+  "symlinked_logs": symlinked,
+  "writable_logs": writable,
+  "uptime_seconds": uptime_seconds,
+  "note": "files_examined counts every file under /var/log including rotated archives; active_logs is the subset the vocabulary selected, and the two numbers together are what makes 'the record is intact' a statement rather than an assumption"
+}

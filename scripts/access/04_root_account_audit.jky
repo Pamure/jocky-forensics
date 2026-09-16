@@ -1,0 +1,364 @@
+# 04_root_account_audit.jky — is uid 0 still one account, and can any account log
+# in without proving anything?
+#
+# The problem this answers
+# ------------------------
+# Every other check in this library assumes "root" means one account whose use is
+# visible in the logs. That assumption is cheap to break and it breaks quietly: a
+# second account with uid 0 shows as `root` in `ps`, `ls -l` and the audit log,
+# an account with an empty password field authenticates without a password on any
+# system whose PAM stack does not refuse it, and a home directory another user can
+# write turns into code execution as that account the next time it logs in. None
+# of the three needs an exploit and all three read as ordinary configuration.
+#
+# What each finding means
+# -----------------------
+# ``duplicate_uid_zero_account``     critical — an account other than `root` with
+#                                    uid 0. Everything it does is attributed to
+#                                    root in every log on the host.
+# ``account_with_empty_password_field``
+#                                    critical — the password field in /etc/passwd
+#                                    is empty, i.e. the account has no password
+#                                    to check.
+# ``account_with_no_password_in_shadow``
+#                                    critical — the same, in /etc/shadow, where it
+#                                    actually matters. Both are reported because
+#                                    the files disagree on some hosts and the
+#                                    effective one is the shadow entry.
+# ``weak_password_hash``             high for a legacy DES hash, medium for MD5.
+#                                    Both are offline-crackable in minutes on
+#                                    hardware anyone has; the finding is about
+#                                    the password being recoverable from the
+#                                    file, not about the account being weak.
+# ``credential_file_insecure``       a credential file with permissions wider than
+#                                    intended: /etc/shadow readable by others is a
+#                                    complete hash-dump for any account.
+# ``root_group_member``              an account in group 0. Often legitimate (some
+#                                    distributions put an operator account there)
+#                                    and always worth naming.
+# ``account_shell_not_declared``     a login shell that is neither a declared
+#                                    shell in /etc/shells nor one of the standard
+#                                    no-login paths. `chsh` refuses such a shell,
+#                                    so it was set by editing the file.
+# ``account_home_writable_by_others``
+#                                    the home directory is writable by another
+#                                    account, which can then plant a shell profile
+#                                    that runs as this account.
+# ``account_home_missing``           an interactive account whose home directory
+#                                    does not exist.
+# ``account_locked``                 (info) a password field of `!`/`*`/`!!`: the
+#                                    account cannot authenticate. Recorded so the
+#                                    count of live accounts is a fact.
+#
+# Readability note: /etc/shadow is mode 0640 root:shadow on every distribution
+# that has it, so an unprivileged run reads /etc/passwd only. The summary states
+# which files were readable, and the shadow-based checks are skipped rather than
+# guessed when they are not.
+
+let now = time.now()
+
+# Shells that explicitly refuse a login. `nologin` prints a message and exits,
+# `false` just fails; neither is an interactive session.
+let no_login_shells = ["/usr/sbin/nologin", "/sbin/nologin", "/bin/false",
+                       "/usr/bin/false", "/bin/nologin", "/usr/bin/nologin",
+                       "/bin/sync", "/usr/sbin/nologin", "/dev/null"]
+
+fn read_text(path) {
+  let outcome = {"ok": true, "content": ""}
+  try {
+    set outcome.content = fs.read(path, 262144)
+  } catch e {
+    set outcome.ok = false
+  }
+  return outcome
+}
+
+# -----------------------------------------------------------------------------
+# 1. Credential file permissions
+# -----------------------------------------------------------------------------
+# Checked before anything is parsed: if /etc/shadow is readable by this run, the
+# shadow checks run; if it is readable by *everyone*, that is the finding.
+let credential_files = ["/etc/passwd", "/etc/shadow", "/etc/group", "/etc/gshadow",
+                        "/etc/shadow-", "/etc/passwd-"]
+
+for path in credential_files {
+  if not fs.exists(path) {
+    continue
+  }
+  let metadata = fs.stat(path)
+  if metadata == nil or metadata.is_dir {
+    continue
+  }
+  let group_read = metadata.mode_str.substr(4, 5) == "r"
+  let other_read = metadata.mode_str.substr(7, 8) == "r"
+  let writable = metadata.world_writable or metadata.mode_str.substr(5, 6) == "w" or metadata.mode_str.substr(8, 9) == "w"
+
+  # What "too wide" means depends on the file. /etc/passwd and /etc/group are
+  # *meant* to be world-readable — every program on the host reads them — so
+  # only write access is a finding there. /etc/shadow and /etc/gshadow are meant
+  # to be 0640 root:shadow, where group-read by the shadow group is the design
+  # and world-read is the leak. Treating them alike fired on six stock files of
+  # a healthy Ubuntu host.
+  let sensitive_contents = contains("shadow", path) or contains("gshadow", path)
+  let over_permissive = false
+  if sensitive_contents {
+    set over_permissive = other_read
+  }
+  if writable or over_permissive {
+    emit {
+      "kind": "credential_file_insecure",
+      "severity": "high",
+      "path": path,
+      "mode": metadata.mode,
+      "mode_str": metadata.mode_str,
+      "uid": metadata.uid,
+      "gid": metadata.gid,
+      "writable_by_others": writable,
+      "readable_by_others": other_read,
+      "recommendation": "restore the distribution's mode (0644 root:root for passwd and group, 0640 root:shadow for shadow and gshadow): a readable shadow file is every account's hash handed to any user, and a writable passwd file is uid 0 on demand"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 2. /etc/passwd: identity
+# -----------------------------------------------------------------------------
+let passwd_outcome = read_text("/etc/passwd")
+let accounts = []
+let uid_zero = []
+let locked_count = 0
+let empty_password_passwd = 0
+
+if passwd_outcome.ok {
+  for raw in passwd_outcome.content.lines() {
+    let text = raw.strip()
+    if text == "" or text.starts_with("#") {
+      continue
+    }
+    let fields = text.split(":")
+    if len(fields) < 7 {
+      continue
+    }
+    let entry = {
+      "name": fields[0],
+      "password_field": fields[1],
+      "uid": fields[2],
+      "gid": fields[3],
+      "gecos": fields[4],
+      "home": fields[5],
+      "shell": fields[6]
+    }
+    accounts.push(entry)
+
+    if fields[2] == "0" {
+      uid_zero.push(entry.name)
+      if entry.name != "root" {
+        emit {
+          "kind": "duplicate_uid_zero_account",
+          "severity": "critical",
+          "account": entry.name,
+          "uid": 0,
+          "gid": entry.gid,
+          "home": entry.home,
+          "shell": entry.shell,
+          "recommendation": "treat every action by uid 0 on this host as ambiguous until this entry is explained: `ps`, `ls -l` and the audit log all show `root` for this account, so attribution requires the account's own files, its home directory and its history. Remove it only after collecting those"
+        }
+      }
+    }
+
+    if fields[1] == "" {
+      set empty_password_passwd = empty_password_passwd + 1
+      emit {
+        "kind": "account_with_empty_password_field",
+        "severity": "critical",
+        "account": entry.name,
+        "uid": entry.uid,
+        "shell": entry.shell,
+        "file": "/etc/passwd",
+        "recommendation": "an empty password field means there is nothing to check: whether this host accepts it depends on PAM (pam_unix with nullok does, without it does not), so the answer is one command away and the entry itself must be explained either way"
+      }
+    }
+
+    if fields[1].starts_with("!") or fields[1] == "*" {
+      set locked_count = locked_count + 1
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 3. Root group membership and shells
+# -----------------------------------------------------------------------------
+let shells_declared = []
+let shells_outcome = read_text("/etc/shells")
+if shells_outcome.ok {
+  for raw in shells_outcome.content.lines() {
+    let text = raw.strip()
+    if text != "" and not text.starts_with("#") {
+      shells_declared.push(text)
+    }
+  }
+}
+
+let homes_checked = 0
+for entry in accounts {
+  if entry.gid == "0" and entry.uid != "0" {
+    emit {
+      "kind": "root_group_member",
+      "severity": "info",
+      "account": entry.name,
+      "uid": entry.uid,
+      "gid": 0,
+      "note": "membership of group 0 grants group-read access to root-owned files and, on some distributions, makes the account a sudoer through the %root rule; check the group's sudoers grant before treating it as harmless"
+    }
+  }
+
+  let declared = contains(entry.shell, shells_declared)
+  let no_login = contains(entry.shell, no_login_shells)
+  if not declared and not no_login and len(shells_declared) > 0 and entry.shell != "" {
+    emit {
+      "kind": "account_shell_not_declared",
+      "severity": "medium",
+      "account": entry.name,
+      "shell": entry.shell,
+      "declared_shells": len(shells_declared),
+      "recommendation": "`chsh` refuses a shell that is not listed in /etc/shells, so this entry was written by editing the file or by an installer: identify what it is, because a login shell that is not a shell is a way to run a program instead of a session"
+    }
+  }
+
+  # A writable home directory is a code-execution path as that account: the next
+  # login reads a profile from a directory someone else can write.
+  #
+  # Scoped to *user* homes (/home, /root, /usr/home). System accounts carry spool
+  # and cache directories in their home field — the mail account's home is
+  # /var/mail, mode 2775 by design — and those follow the policy of the directory
+  # they are, not the policy of a home. Those accounts are still counted in the
+  # summary, so the scoping is visible rather than hidden.
+  let user_home = entry.home.starts_with("/home/") or entry.home == "/root" or entry.home.starts_with("/usr/home/")
+  if entry.home.starts_with("/") and entry.home != "/" and not contains("nonexistent", entry.home) {
+    let metadata = fs.stat(entry.home)
+    if metadata == nil {
+      if not no_login {
+        emit {
+          "kind": "account_home_missing",
+          "severity": "low",
+          "account": entry.name,
+          "home": entry.home,
+          "shell": entry.shell,
+          "note": "an interactive account whose home directory does not exist: a genuine misconfiguration until you find out whether it ever existed, because a deleted home is also how a profile-based foothold is removed"
+        }
+      }
+      continue
+    }
+    set homes_checked = homes_checked + 1
+    if metadata.is_dir and user_home {
+      let group_write = metadata.mode_str.substr(5, 6) == "w"
+      if metadata.world_writable or group_write {
+        emit {
+          "kind": "account_home_writable_by_others",
+          "severity": "high",
+          "account": entry.name,
+          "home": entry.home,
+          "mode": metadata.mode,
+          "mode_str": metadata.mode_str,
+          "uid": metadata.uid,
+          "recommendation": "restore 0755 (or 0700 for a home that holds keys) and check what was written into it: a writable home directory lets another account place a shell profile that runs as this account at its next login"
+        }
+      }
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 4. /etc/shadow: the field that actually decides authentication
+# -----------------------------------------------------------------------------
+let shadow_outcome = read_text("/etc/shadow")
+let shadow_readable = shadow_outcome.ok
+let shadow_entries = 0
+let no_password_shadow = 0
+let weak_hashes = 0
+
+if shadow_readable {
+  for raw in shadow_outcome.content.lines() {
+    let text = raw.strip()
+    if text == "" {
+      continue
+    }
+    let fields = text.split(":")
+    if len(fields) < 2 {
+      continue
+    }
+    set shadow_entries = shadow_entries + 1
+    let account = fields[0]
+    let hash = fields[1]
+
+    if hash == "" {
+      set no_password_shadow = no_password_shadow + 1
+      emit {
+        "kind": "account_with_no_password_in_shadow",
+        "severity": "critical",
+        "account": account,
+        "file": "/etc/shadow",
+        "recommendation": "the account has no password hash, so there is no secret to guess: lock it (`usermod -L`) or give it one, and check the last modification time of this file against the change record — an empty field here is what a password-removal step leaves behind"
+      }
+      continue
+    }
+
+    # `!` and `*` are the locked markers; `!$6$…` is a locked account with a
+    # password that is not currently usable.
+    if hash.starts_with("!") or hash == "*" {
+      continue
+    }
+
+    if hash.starts_with("$1$") {
+      set weak_hashes = weak_hashes + 1
+      emit {
+        "kind": "weak_password_hash",
+        "severity": "medium",
+        "account": account,
+        "algorithm": "md5-crypt",
+        "recommendation": "this hash is offline-crackable in minutes on commodity hardware: treat the password as disclosed, rotate it, and find out why the host is still creating MD5 hashes (the PAM configuration or an old provisioning image)"
+      }
+      continue
+    }
+
+    # A crypt(3) DES hash is exactly 13 characters with no `$` separator.
+    if not contains("$", hash) and len(hash) == 13 {
+      set weak_hashes = weak_hashes + 1
+      emit {
+        "kind": "weak_password_hash",
+        "severity": "high",
+        "account": account,
+        "algorithm": "des-crypt",
+        "recommendation": "a legacy DES hash is limited to eight characters and exhaustible in seconds: treat the password as known to anyone who has read this file, rotate it, and check how the account was created"
+      }
+    }
+  }
+} else {
+  emit {
+    "kind": "shadow_unreadable",
+    "severity": "low",
+    "path": "/etc/shadow",
+    "note": "the password file could not be read by this run, so no statement is made about password hashes or empty password fields; re-run with privilege before signing off, because 'no weak hashes' and 'not looked' are different answers"
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 5. Summary
+# -----------------------------------------------------------------------------
+emit {
+  "kind": "root_account_summary",
+  "severity": "info",
+  "accounts": len(accounts),
+  "uid_zero_accounts": len(uid_zero),
+  "uid_zero_names": uid_zero,
+  "locked_accounts": locked_count,
+  "empty_password_in_passwd": empty_password_passwd,
+  "shadow_readable": shadow_readable,
+  "shadow_entries": shadow_entries,
+  "accounts_without_password_in_shadow": no_password_shadow,
+  "weak_hashes": weak_hashes,
+  "homes_checked": homes_checked,
+  "home_permission_scope": "/home, /root, /usr/home",
+  "collected_at_iso": time.iso(now),
+  "note": "uid_zero_names lists every account that owns uid 0; if it is exactly ['root'] this check has nothing to report and says so, which is different from the check not having run"
+}

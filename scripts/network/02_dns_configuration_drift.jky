@@ -1,0 +1,403 @@
+# 02_dns_configuration_drift.jky — does this host resolve names the way its
+# operators believe it does?
+#
+# The problem this answers
+# ------------------------
+# Name resolution is the layer where an attacker can redirect traffic without
+# touching a route, a firewall rule or a certificate: change the resolver, or add
+# a line to /etc/hosts, and `update.example.com` becomes an address they choose
+# while every signature still verifies against the name. It is also the layer
+# that quietly breaks detection — a sinkholed host cannot be told from an
+# up-to-date one by reading its logs, because nothing failed.
+#
+# The files that decide it are four, and they disagree with each other by design:
+#
+#   /etc/resolv.conf     which servers are asked (often generated, often a
+#                        symlink, sometimes rewritten at runtime by a VPN client)
+#   /etc/hosts           which names never reach a server at all
+#   /etc/nsswitch.conf   which of the two is consulted, and in what order
+#   resolved.conf        systemd's own view, which overrides resolv.conf when
+#                        systemd-resolved is the stub resolver
+#
+# What each finding means
+# -----------------------
+# ``resolv_conf_nameserver``        one row per configured server, with whether
+#                                   it is private. Not a finding by itself: it is
+#                                   the list an analyst compares against the
+#                                   environment's expected resolver.
+# ``resolv_conf_public_resolver``   a well-known public resolver in a config
+#                                   that also has, or should have, an internal
+#                                   one. Reported at low: it is a policy bypass
+#                                   (internal DNS filtering stops applying) and
+#                                   it is also what every laptop has.
+# ``resolv_conf_rewritten_at_runtime``
+#                                   the file changed after boot. A VPN client or
+#                                   DHCP lease does this legitimately; an
+#                                   attacker changing where the host resolves
+#                                   does it too, and the timestamp is what tells
+#                                   the two apart.
+# ``no_dns_resolver_configured``    no nameserver line at all.
+# ``dns_config_writable_by_non_root``
+#                                   resolv.conf, hosts or nsswitch.conf writable
+#                                   by a non-root account: redirecting one name
+#                                   is then a one-line edit by any user.
+# ``hosts_file_sinkhole``           a hostname mapped to 0.0.0.0, 127.0.0.1 or ::
+#                                   — a blocked name. Graded high when the name
+#                                   belongs to a security or update
+#                                   infrastructure domain, because blocking
+#                                   *those* is how a compromise stays
+#                                   undetected for months.
+# ``nsswitch_hosts_ordering``       the `hosts:` line does not consult local
+#                                   files first, or reaches a network directory
+#                                   service. Resolution then depends on a server
+#                                   that may not be the one in resolv.conf.
+# ``resolved_conf_override``        systemd-resolved is configured with its own
+#                                   DNS servers, so resolv.conf is not what is
+#                                   being used.
+#
+# Scope note: this reads configuration only. Nothing resolves a name, so the scan
+# generates no DNS traffic and cannot be observed by a resolver or by a sinkhole
+# that is watching for lookups.
+
+let now = time.now()
+let boot_time = sys.uptime().boot_time
+
+# Public resolvers, by the addresses people actually type. Kept short and
+# explicit: the point is to recognise the four that appear in a policy bypass,
+# not to maintain a catalogue.
+let public_resolvers = ["8.8.8.8", "8.8.4.4", "1.1.1.1", "1.0.0.1", "9.9.9.9",
+                        "149.112.112.112", "208.67.222.222", "208.67.220.220",
+                        "64.6.64.6", "77.88.8.8", "94.140.14.14", "8.26.56.26",
+                        "2606:4700:4700::1111", "2001:4860:4860::8888"]
+
+# Domains whose blocking is a detection problem rather than a privacy choice.
+let protection_domains = ["microsoft.com", "windowsupdate.com", "ubuntu.com",
+                          "debian.org", "security.debian.org", "github.com",
+                          "githubusercontent.com", "dl.google.com", "google.com",
+                          "pypi.org", "npmjs.org", "npmjs.com", "cloudflare.com",
+                          "crowdstrike.com", "sentinelone.net", "carbonblack.com",
+                          "virustotal.com", "mandiant.com", "elastic.co",
+                          "sophos.com", "trendmicro.com", "kaspersky.com",
+                          "avast.com", "clamav.net", "sans.org", "cert.org"]
+
+let resolv_path = "/etc/resolv.conf"
+let hosts_path = "/etc/hosts"
+let nsswitch_path = "/etc/nsswitch.conf"
+
+fn read_lines(path) {
+  # Returns a list, empty when the file is missing or unreadable; every caller
+  # below also reports that separately, so "empty" is never ambiguous in the
+  # output — only in this helper.
+  let outcome = {"ok": true, "content": ""}
+  try {
+    set outcome.content = fs.read(path, 262144)
+  } catch e {
+    set outcome.ok = false
+  }
+  if not outcome.ok {
+    return []
+  }
+  return outcome.content.lines()
+}
+
+fn check_writable(path, depth) {
+  if depth > 3 {
+    # A symlink chain longer than this is a loop or an absurdity; stop instead
+    # of recursing forever.
+    return 0
+  }
+  let metadata = fs.stat(path)
+  if metadata == nil {
+    return 0
+  }
+  # A symlink's own mode is always lrwxrwxrwx, so the target is what gets
+  # checked. /etc/resolv.conf is a symlink on hosts with a resolver stub or a
+  # manufacturer's client, and reporting the link as world-writable would fire
+  # on every one of them.
+  if metadata.is_link {
+    let target = metadata.get("target", nil)
+    if target != nil and target.starts_with("/") {
+      return check_writable(target, depth + 1)
+    }
+    return 0
+  }
+  let group_write = metadata.mode_str.substr(5, 6) == "w"
+  if metadata.world_writable or group_write or (metadata.uid != 0 and metadata.uid != nil) {
+    emit {
+      "kind": "dns_config_writable_by_non_root",
+      "severity": "high",
+      "path": path,
+      "mode": metadata.mode,
+      "mode_str": metadata.mode_str,
+      "uid": metadata.uid,
+      "gid": metadata.gid,
+      "recommendation": "restore root ownership and 0644: one writable line here redirects a name this host trusts for every process on it, including the ones that verify signatures, because signature verification happens after resolution"
+    }
+  }
+  return 0
+}
+
+fn network_config_writable(path) {
+  return check_writable(path, 0)
+}
+
+# -----------------------------------------------------------------------------
+# 1. /etc/resolv.conf
+# -----------------------------------------------------------------------------
+let resolv_meta = fs.stat(resolv_path)
+if resolv_meta == nil {
+  emit {
+    "kind": "no_dns_resolver_configured",
+    "severity": "medium",
+    "path": resolv_path,
+    "reason": "the file does not exist",
+    "recommendation": "explain how this host resolves names before reading anything that depends on it: name resolution may be coming from a stub listener, from an NSS module, or from nothing at all"
+  }
+} else {
+  network_config_writable(resolv_path)
+
+  if resolv_meta.is_link {
+    let target = resolv_meta.get("target", nil)
+    emit {
+      "kind": "resolv_conf_symlinked",
+      "severity": "info",
+      "path": resolv_path,
+      "target": target,
+      "note": "a symlink is the normal shape on hosts with a resolver stub (systemd-resolved) or a manufacturer's client; what matters is that the content below describes the *target*, and that the target's own permissions were checked too"
+    }
+  }
+
+  # A generated file is rewritten by whatever generates it. Reporting "the file
+  # changed after boot" without naming the generator is a dead end, so the
+  # generator is what the recommendation asks for.
+  let grace = 300
+  if resolv_meta.mtime > boot_time + grace {
+    emit {
+      "kind": "resolv_conf_rewritten_at_runtime",
+      "severity": "low",
+      "path": resolv_path,
+      "modified_iso": time.iso(resolv_meta.mtime),
+      "boot_time_iso": time.iso(boot_time),
+      "recommendation": "identify what rewrote this file (the DHCP client, a VPN client, systemd-resolved, or a tool the fleet does not have): the timestamp tells you when the resolver changed, and the client tells you whether anyone intended it"
+    }
+  }
+
+  let nameservers = []
+  let search_domains = []
+  let options = []
+  let index = 0
+  for raw in read_lines(resolv_path) {
+    set index = index + 1
+    let text = raw.strip()
+    if text == "" or text.starts_with("#") or text.starts_with(";") {
+      continue
+    }
+    let fields = text.split()
+    if len(fields) < 2 {
+      continue
+    }
+    if fields[0] == "nameserver" {
+      let server = fields[1]
+      let public = contains(server, public_resolvers)
+      nameservers.push(server)
+      emit {
+        "kind": "resolv_conf_nameserver",
+        "severity": "info",
+        "path": resolv_path,
+        "line": index,
+        "server": server,
+        "public_resolver": public
+      }
+      if public {
+        emit {
+          "kind": "resolv_conf_public_resolver",
+          "severity": "low",
+          "path": resolv_path,
+          "line": index,
+          "server": server,
+          "recommendation": "decide whether this host is supposed to use the environment's internal resolver: a public resolver makes internal names unresolvable and silently removes whatever filtering the internal resolver was applying, which is why it appears in both intrusion playbooks and laptop defaults"
+        }
+      }
+    }
+    if fields[0] == "search" or fields[0] == "domain" {
+      search_domains.push(join(fields.slice(1), " "))
+    }
+    if fields[0] == "options" {
+      options.push(join(fields.slice(1), " "))
+    }
+  }
+
+  if len(nameservers) == 0 {
+    emit {
+      "kind": "no_dns_resolver_configured",
+      "severity": "medium",
+      "path": resolv_path,
+      "reason": "the file has no nameserver line",
+      "recommendation": "a host with no resolver in resolv.conf either resolves through an NSS module or through a stub listener; find out which, because a dependency on resolution that is not configured is a dependency on something outside this file"
+    }
+  }
+
+  emit {
+    "kind": "resolv_conf_summary",
+    "severity": "info",
+    "path": resolv_path,
+    "nameservers": nameservers,
+    "search_domains": search_domains,
+    "options": options,
+    "file_target": resolv_meta.get("target", nil),
+    "modified_iso": time.iso(resolv_meta.mtime),
+    "note": "the search domains and resolver options are recorded because they decide which names are treated as internal and which are sent to a server; a changed search domain can move an entire namespace to a different resolver without touching the nameserver lines"
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 2. /etc/hosts: names that never reach a resolver
+# -----------------------------------------------------------------------------
+network_config_writable(hosts_path)
+let sinkholes = 0
+let blocked_protection_names = 0
+let hosts_lines = read_lines(hosts_path)
+let hosts_index = 0
+for raw in hosts_lines {
+  set hosts_index = hosts_index + 1
+  let text = raw.strip()
+  if text == "" or text.starts_with("#") {
+    continue
+  }
+  let fields = text.split()
+  if len(fields) < 2 {
+    continue
+  }
+  let address = fields[0]
+  let sinkhole_address = address == "0.0.0.0" or address == "127.0.0.1" or address == "::1" or address == "::"
+  if not sinkhole_address {
+    continue
+  }
+  let names = fields.slice(1)
+  # `127.0.0.1 localhost` is the loopback entry, not a blocked name.
+  let real_names = filter(names, fn(name) { return name != "localhost" and name != "ip6-localhost" and name != "ip6-loopback" and name != "localhost.localdomain" })
+  if len(real_names) == 0 {
+    continue
+  }
+  set sinkholes = sinkholes + 1
+  let protection_hits = []
+  for name in real_names {
+    for domain in protection_domains {
+      if name.ends_with(domain) or name == domain {
+        protection_hits.push(name)
+      }
+    }
+  }
+  let grade = "medium"
+  let why = "this name is answered locally, so it never reaches a resolver and never appears in a DNS log"
+  if len(protection_hits) > 0 {
+    set grade = "high"
+    set blocked_protection_names = blocked_protection_names + 1
+    set why = "this entry blocks update or security infrastructure, so the host cannot reach its patches or its protection service while looking healthy"
+  }
+  emit {
+    "kind": "hosts_file_sinkhole",
+    "severity": grade,
+    "path": hosts_path,
+    "line": hosts_index,
+    "address": address,
+    "names": real_names,
+    "protection_infrastructure": protection_hits,
+    "reason": why,
+    "recommendation": "compare this file against the base image: a block list for advertising is a deliberate local policy and reads exactly like the entry that stops a host from receiving its security updates, so the names are what decide"
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 3. /etc/nsswitch.conf: the order that decides which of the two is consulted
+# -----------------------------------------------------------------------------
+# `files` first is what makes /etc/hosts authoritative; anything before it, or a
+# network directory service added to the hosts line, changes where a name comes
+# from without changing either file above.
+network_config_writable(nsswitch_path)
+let nsswitch_lines = read_lines(nsswitch_path)
+let nss_index = 0
+for raw in nsswitch_lines {
+  set nss_index = nss_index + 1
+  let text = raw.strip()
+  if text == "" or text.starts_with("#") or not text.starts_with("hosts:") {
+    continue
+  }
+  let fields = text.substr(6, 400).split()
+  let first = "none"
+  if len(fields) > 0 {
+    set first = fields[0]
+  }
+  let network_directory = false
+  for field in fields {
+    if contains(field, ["nis", "ldap", "winbind", "sss", "hesiod"]) {
+      set network_directory = true
+    }
+  }
+  emit {
+    "kind": "nsswitch_hosts_ordering",
+    "severity": "info",
+    "path": nsswitch_path,
+    "line": nss_index,
+    "line_text": text.substr(0, 300),
+    "first_source": first,
+    "local_files_first": first == "files",
+    "network_directory_service": network_directory,
+    "note": "this is the line that decides whether /etc/hosts is consulted before or after a server; a review of the two files above is incomplete without it"
+  }
+  if first != "files" or network_directory {
+    emit {
+      "kind": "nsswitch_hosts_ordering",
+      "severity": "medium",
+      "path": nsswitch_path,
+      "line": nss_index,
+      "line_text": text.substr(0, 300),
+      "reason": "local files are not the first source for host lookups, or a network directory service is in the chain",
+      "recommendation": "confirm this is the fleet's intended order: with `files` not first, the hosts file above can be bypassed entirely, and with a directory service in the chain a name can be answered by a server that resolv.conf does not mention"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 4. systemd-resolved's own configuration
+# -----------------------------------------------------------------------------
+# When the stub resolver is active, this file wins and resolv.conf is a
+# generated artefact. The DNS= line is reported as a finding because it is the
+# answer to "which server is actually being asked".
+let resolved_path = "/etc/systemd/resolved.conf"
+if fs.exists(resolved_path) {
+  network_config_writable(resolved_path)
+  let index = 0
+  let configured = []
+  for raw in read_lines(resolved_path) {
+    set index = index + 1
+    let text = raw.strip()
+    if text.starts_with("DNS=") or text.starts_with("FallbackDNS=") or text.starts_with("Domains=") {
+      configured.push(text.substr(0, 300))
+    }
+  }
+  if len(configured) > 0 {
+    emit {
+      "kind": "resolved_conf_override",
+      "severity": "medium",
+      "path": resolved_path,
+      "directives": configured,
+      "recommendation": "read the effective resolver from these directives rather than from resolv.conf: with systemd-resolved running, the servers here are the ones asked, and a change to this file moves name resolution without touching any file an analyst usually checks"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 5. Summary
+# -----------------------------------------------------------------------------
+emit {
+  "kind": "dns_configuration_summary",
+  "severity": "info",
+  "resolv_conf_exists": resolv_meta != nil,
+  "resolv_conf_is_symlink": resolv_meta != nil and resolv_meta.is_link,
+  "hosts_sinkhole_entries": sinkholes,
+  "blocked_protection_domains": blocked_protection_names,
+  "nsswitch_hosts_line_found": nss_index > 0,
+  "collected_at_iso": time.iso(now),
+  "note": "a clean result here means the four files agree with a normal host; it does not mean the resolver on the network answers truthfully, which is a question for a capture or for two independent lookups"
+}

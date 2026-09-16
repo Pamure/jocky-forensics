@@ -1,0 +1,295 @@
+# 01_suid_sgid_drift_scan.jky — what on this host can raise privilege, and which
+# of those files is not where a package put it?
+#
+# The problem this answers
+# ------------------------
+# A setuid binary is a pre-authorised privilege transition, and it is the
+# shortest path from "a user" to "root" that does not need an exploit: a
+# world-writable setuid binary, or a setuid binary in a directory any user can
+# write, is root in one line. An intruder who wants to keep root does not need
+# one of those — but an intruder who wants to *get* root, or who wants a second
+# way in after their account is removed, does. The interesting question is
+# therefore not "which setuid binaries exist" (every Debian and Ubuntu host has
+# about a dozen) but "which of them are somewhere a package did not put them,
+# and which of them anybody can rewrite".
+#
+# What each finding means
+# -----------------------
+# ``setuid_binary`` / ``setgid_binary``   the inventory: path, mode, owner,
+#                                         group, mtime. Read it as a list.
+# ``setuid_binary_in_drop_zone``          a setuid or setgid binary under /tmp,
+#                                         /var/tmp or /dev/shm. High, because
+#                                         a setuid binary in a world-writable
+#                                         directory is root for anyone who can
+#                                         create a file there.
+# ``setuid_world_writable``               the binary itself is setuid *and*
+#                                         writable by others — the fastest
+#                                         privilege escalation on the host.
+# ``system_binary_world_writable``        a binary in a system directory any user
+#                                         can rewrite. A package cannot produce
+#                                         this.
+# ``setuid_not_owned_by_root``            setuid bits only matter relative to the
+#                                         owner, and a non-root owner means the
+#                                         file grants *that* account, not root.
+#                                         Unusual enough to look at.
+# ``setuid_binary_recently_modified``     the binary changed recently. A package
+#                                         update does this legitimately, which is
+#                                         why the recommendation is a comparison
+#                                         against the package database rather
+#                                         than a verdict.
+# ``setuid_script``                       the executable bit is setuid on a
+#                                         shell script. Linux ignores that bit on
+#                                         scripts, so nobody builds this by
+#                                         accident — its presence is an attempt,
+#                                         or a build that assumed it would work.
+#
+# Scope: this reads metadata (and two bytes of content, to detect the script
+# case). It never executes anything, and it never changes a mode. Note that some
+# filesystems do not implement POSIX mode bits — the per-root counts in the
+# summary are what tell you whether a root was actually read.
+#
+# One counting rule worth stating: files are deduplicated by inode, because on a
+# merged-usr host /bin and /sbin are symlinks to /usr/bin and /usr/sbin and the
+# same binary would otherwise be counted once per name. The consequence is that
+# the totals describe *files*, not directory entries.
+
+# -----------------------------------------------------------------------------
+# 1. The roots, by what a finding there would mean
+# -----------------------------------------------------------------------------
+# System roots: a setuid binary here is expected and a *writable* one is not.
+# Drop zones: a setuid binary here is not expected at all.
+let system_roots = ["/usr/bin", "/usr/sbin", "/bin", "/sbin", "/usr/local/bin",
+                    "/usr/local/sbin", "/usr/local/lib", "/opt"]
+
+let drop_zone_roots = ["/tmp", "/var/tmp", "/dev/shm", "/run/shm"]
+
+let drop_zones = ["/tmp/", "/var/tmp/", "/dev/shm/", "/run/shm/"]
+
+fn in_drop_zone(path) {
+  for zone in drop_zones {
+    if path.starts_with(zone) {
+      return true
+    }
+  }
+  return false
+}
+
+fn is_script(path) {
+  # Two bytes are enough for a shebang, and reading them costs nothing next to
+  # the stat this already did. A file that cannot be read yields false, so a
+  # permission failure reports "not a script" rather than pretending.
+  let head = ""
+  try {
+    set head = fs.read(path, 2)
+  } catch e {
+    return false
+  }
+  return head.starts_with("#!")
+}
+
+let setuid_total = 0
+let setgid_total = 0
+let per_root = {}
+
+# Deduplicated by inode, not by path. On a merged-usr system /bin and /sbin are
+# symlinks to /usr/bin and /usr/sbin, so the same eleven setuid binaries are
+# found twice and a path-based count would report twenty-two; hardlinked copies
+# of the same file produce the same double count. The inode is what decides
+# whether the analyst is looking at one file or two.
+let seen_inodes = {}
+
+fn examine(entry, root_kind) {
+  let path = entry.path
+  let inode_key = str(entry.inode)
+  if seen_inodes.has(inode_key) {
+    return 0
+  }
+  seen_inodes.set(inode_key, path)
+
+  # ---------------------------------------------------------------------------
+  # 2. A setuid or setgid file where it should not be
+  # ---------------------------------------------------------------------------
+  if entry.setuid or entry.setgid {
+    if entry.setuid {
+      set setuid_total = setuid_total + 1
+    }
+    if entry.setgid {
+      set setgid_total = setgid_total + 1
+    }
+  }
+
+  if in_drop_zone(path) and (entry.setuid or entry.setgid) {
+    emit {
+      "kind": "setuid_binary_in_drop_zone",
+      "severity": "high",
+      "path": path,
+      "mode": entry.mode,
+      "mode_str": entry.mode_str,
+      "uid": entry.uid,
+      "setuid": entry.setuid,
+      "setgid": entry.setgid,
+      "mtime_iso": time.iso(entry.mtime),
+      "magic": entry.magic,
+      "recommendation": "copy the binary out before deleting it and identify who created it: a setuid file in a world-writable directory is privilege escalation with no exploit, and the same directory will accept another one unless the cause is found"
+    }
+    return 0
+  }
+
+  if entry.setuid {
+    emit {
+      "kind": "setuid_binary",
+      "severity": "info",
+      "path": path,
+      "root_class": root_kind,
+      "mode": entry.mode,
+      "mode_str": entry.mode_str,
+      "uid": entry.uid,
+      "gid": entry.gid,
+      "size": entry.size,
+      "mtime": entry.mtime,
+      "mtime_iso": time.iso(entry.mtime),
+      "target": entry.get("target", nil)
+    }
+  }
+  if entry.setgid and entry.gid != 0 {
+    # A setgid binary owned by a non-root group is the usual shape (games,
+    # crontab, ssh-agent); it is recorded, not graded, because what matters is
+    # which group and whether the group holds anything.
+    emit {
+      "kind": "setgid_binary",
+      "severity": "info",
+      "path": path,
+      "gid": entry.gid,
+      "mode": entry.mode,
+      "note": "setgid to the root group (gid 0) is not reported separately: it is how the distribution ships these binaries, and the group is the same as the owner's"
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 3. Writable by someone other than its owner
+  # ---------------------------------------------------------------------------
+  let group_write = entry.mode_str.substr(5, 6) == "w"
+  let writable_by_others = entry.world_writable or group_write
+  if entry.setuid and writable_by_others {
+    emit {
+      "kind": "setuid_world_writable",
+      "severity": "critical",
+      "path": path,
+      "mode": entry.mode,
+      "mode_str": entry.mode_str,
+      "uid": entry.uid,
+      "gid": entry.gid,
+      "recommendation": "restore the mode and the owner before anything else, then check the file's hash against the package: a setuid binary another account can write means that account is root, and whether they have already used it is a question for the audit log"
+    }
+  } else {
+    if writable_by_others and root_kind == "system" {
+      emit {
+        "kind": "system_binary_world_writable",
+      "severity": "high",
+      "path": path,
+      "mode": entry.mode,
+      "mode_str": entry.mode_str,
+      "uid": entry.uid,
+      "gid": entry.gid,
+        "recommendation": "compare the hash against the package manifest and restore the file: a writable binary in a system directory is a trojaned command waiting for root to invoke it, and the mode change itself is the evidence that someone got write access"
+      }
+    }
+  }
+
+  # ---------------------------------------------------------------------------
+  # 4. Ownership and recency
+  # ---------------------------------------------------------------------------
+  if entry.setuid and entry.uid != nil and entry.uid != 0 {
+    emit {
+      "kind": "setuid_not_owned_by_root",
+      "severity": "medium",
+      "path": path,
+      "uid": entry.uid,
+      "mode": entry.mode,
+      "recommendation": "the setuid bit grants the *owner's* privileges, so this file elevates to that account rather than to root: find out which account, and whether that account is one it should be possible to become"
+    }
+  }
+
+  if entry.setuid and entry.mtime > time.now() - 30 * 24 * 3600 {
+    emit {
+      "kind": "setuid_binary_recently_modified",
+      "severity": "low",
+      "path": path,
+      "mtime_iso": time.iso(entry.mtime),
+      "size": entry.size,
+      "recommendation": "compare against the package database: a distribution update explains this and so does a replaced binary, and the difference is a package name and a hash"
+    }
+  }
+
+  if entry.setuid and is_script(path) {
+    emit {
+      "kind": "setuid_script",
+      "severity": "high",
+      "path": path,
+      "mode": entry.mode,
+      "uid": entry.uid,
+      "recommendation": "Linux ignores setuid on scripts, so this file was not written by a build that works: read its content and find the installer that produced it, because someone expected this to run as root"
+    }
+  }
+  return 0
+}
+
+# -----------------------------------------------------------------------------
+# 5. The sweep
+# -----------------------------------------------------------------------------
+# `fs.special_perms` walks each root once and returns the three lists, so the
+# cost is one scan per root rather than three.
+for root in system_roots {
+  if not fs.exists(root) {
+    continue
+  }
+  let perms = fs.special_perms(root, 4000)
+  per_root.set(root, {
+    "setuid": len(perms.setuid),
+    "setgid": len(perms.setgid),
+    "world_writable": len(perms.world_writable)
+  })
+  for entry in perms.setuid {
+    examine(entry, "system")
+  }
+  for entry in perms.setgid {
+    examine(entry, "system")
+  }
+  for entry in perms.world_writable {
+    examine(entry, "system")
+  }
+}
+
+for root in drop_zone_roots {
+  if not fs.exists(root) {
+    continue
+  }
+  let perms = fs.special_perms(root, 1000)
+  per_root.set(root, {
+    "setuid": len(perms.setuid),
+    "setgid": len(perms.setgid),
+    "world_writable": len(perms.world_writable)
+  })
+  for entry in perms.setuid {
+    examine(entry, "drop_zone")
+  }
+  for entry in perms.setgid {
+    examine(entry, "drop_zone")
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 6. Summary
+# -----------------------------------------------------------------------------
+# The per-root triple is the useful part of this summary: a root that reports
+# zero of all three is far more likely to be unreadable or on a filesystem
+# without mode bits than to be perfectly hardened.
+emit {
+  "kind": "suid_sgid_summary",
+  "severity": "info",
+  "setuid_files": setuid_total,
+  "setgid_files": setgid_total,
+  "per_root": per_root,
+  "roots_scanned": len(keys(per_root)),
+  "note": "a setuid file inside a mount without POSIX mode bits (drvfs, 9p, nfs) reports whatever the bridge invents; check the mount table before treating a count from such a root as real"
+}

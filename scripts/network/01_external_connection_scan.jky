@@ -1,0 +1,300 @@
+# 01_external_connection_scan.jky — which processes are talking off-host, and
+# which of them have no business holding a network connection?
+#
+# The problem this answers
+# ------------------------
+# `/proc/net/tcp` answers "what sockets exist" and nothing else: it does not say
+# which of them leave the host, and it does not say what the process on the other
+# end of the socket is. Those two facts together are what turns a socket table
+# into a hunt — a shell with an established connection to a public address is a
+# different incident from a browser with forty of them.
+#
+# What the output gives you
+# -------------------------
+# ``external_connection``            one row per established connection whose
+#                                    remote address is not loopback, link-local,
+#                                    private or unique-local, with the owning
+#                                    process, uid, exe and a service guess for
+#                                    the remote port. This is the inventory a
+#                                    reviewer reads.
+# ``connection_from_interpreter``    an established external connection held by a
+#                                    shell or an interpreter. Shells do open
+#                                    connections legitimately (`curl`, package
+#                                    installs) and the process has usually
+#                                    exited by the time an analyst looks, so
+#                                    this is graded high for the shapes that
+#                                    persist and the cmdline is included so a
+#                                    one-off fetch is easy to rule out.
+# ``connection_from_drop_zone_binary``
+#                                    the connected binary lives in /tmp, /dev/shm
+#                                    or /var/tmp.
+# ``connection_from_deleted_binary`` the connected binary is unlinked. A process
+#                                    holding a socket with no file on disk is
+#                                    either an update in flight or an implant.
+# ``connection_without_owner``       an external connection with no visible
+#                                    process, graded by whether this run *could*
+#                                    attribute it: a socket created by another
+#                                    uid is unreadable without CAP_SYS_PTRACE,
+#                                    and that is a visibility limit, not hiding.
+# ``connection_fanout``              one process holding an unusual number of
+#                                    established connections: a proxy, a scanner,
+#                                    or an agent that has gone wrong.
+# ``connection_many_remote_hosts``   one process talking to many distinct remote
+#                                    addresses, which is the shape of a sweep.
+#
+# What this script deliberately does not claim: ``/proc/net/tcp`` carries no
+# timestamps, so it cannot show *when* a connection was made and therefore cannot
+# show beaconing. Beaconing is a question for a capture or for connection
+# accounting, and the header says so rather than inventing a proxy metric for it.
+#
+# Read-only: nothing here connects to anything, so the remote end sees no probe
+# and the scan cannot be observed from the other side.
+
+# -----------------------------------------------------------------------------
+# 1. What counts as external
+# -----------------------------------------------------------------------------
+# Loopback, RFC1918, carrier-grade NAT (100.64/10), link-local, IPv6 unique-local
+# (fc00::/7), IPv6 link-local (fe80::/10) and the unspecified address are treated
+# as internal. Everything else is reported, which means a public address in a
+# tunnel overlay is reported too — the overlay is exactly where a pivot lives.
+let internal_patterns = [
+  r"^127\.",
+  r"^10\.",
+  r"^172\.(1[6-9]|2[0-9]|3[01])\.",
+  r"^192\.168\.",
+  r"^169\.254\.",
+  r"^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.",
+  r"^0\.0\.0\.0$",
+  r"^::$",
+  r"^::1$",
+  r"^::ffff:127\.",
+  r"^(fc|fd)[0-9a-f]{2}:",
+  r"^fe[89ab][0-9a-f]:",
+  r"^0:0:0:0:0:0:0:1$"
+]
+
+fn is_external(address) {
+  for pattern in internal_patterns {
+    if re.test(pattern, address) {
+      return false
+    }
+  }
+  return true
+}
+
+# A tiny service vocabulary for the inventory row. It is a hint, not a verdict,
+# and an unknown port is reported as unknown rather than guessed at.
+let service_ports = {
+  "22": "ssh", "25": "smtp", "53": "dns", "80": "http", "110": "pop3",
+  "123": "ntp", "143": "imap", "443": "https", "445": "smb", "465": "smtps",
+  "587": "smtp-submission", "993": "imaps", "995": "pop3s", "1194": "openvpn",
+  "3306": "mysql", "3389": "rdp", "5432": "postgres", "5228": "google-play",
+  "6379": "redis", "8080": "http-alt", "8443": "https-alt", "9993": "zerotier",
+  "27017": "mongodb", "51820": "wireguard", "3478": "stun", "19302": "stun-alt"
+}
+
+# Processes that are *not* expected to hold a persistent outbound connection. A
+# browser, a mail client and a package manager all appear here transiently, which
+# is why the cmdline is part of the finding.
+let interpreter_names = ["sh", "bash", "dash", "ash", "zsh", "ksh", "csh", "tcsh",
+                         "fish", "python", "python2", "python3", "perl", "ruby",
+                         "php", "node", "deno", "bun", "lua", "awk", "busybox"]
+
+let fanout_threshold = 20
+let host_spread_threshold = 12
+
+let self_info = proc.info(sys.pid())
+let self_uid = self_info.uid
+
+# -----------------------------------------------------------------------------
+# 2. The socket table, attributed to processes
+# -----------------------------------------------------------------------------
+let connections = net.established()
+let by_pid = index_by(proc.list(600), fn(p) { return p.pid })
+
+let external = 0
+let interpreter_count = 0
+let unattributed = 0
+
+for c in connections {
+  if not is_external(c.remote_addr) {
+    continue
+  }
+  set external = external + 1
+
+  let pid = c.pid
+  let owner = nil
+  if pid != nil {
+    set owner = by_pid.get(str(pid), nil)
+  }
+
+  let name = "unknown"
+  let exe = nil
+  let cmdline = nil
+  let uid = nil
+  let suspicious_path = false
+  let deleted = false
+  if owner != nil {
+    set exe = owner.exe
+    set cmdline = owner.cmdline
+    set uid = owner.uid
+    set suspicious_path = owner.suspicious_path
+    set deleted = owner.deleted_exe
+    set name = owner.name
+    if exe != nil {
+      set name = fs.basename(exe)
+    }
+  }
+
+  emit {
+    "kind": "external_connection",
+    "severity": "info",
+    "proto": c.proto,
+    "local": str(c.local_addr) + ":" + str(c.local_port),
+    "remote": str(c.remote_addr) + ":" + str(c.remote_port),
+    "remote_port": c.remote_port,
+    "service_guess": service_ports.get(str(c.remote_port), "unknown"),
+    "pid": pid,
+    "process": name,
+    "uid": uid,
+    "exe": exe,
+    "cmdline": cmdline,
+    "socket_inode": c.inode
+  }
+
+  if owner == nil {
+    set unattributed = unattributed + 1
+    let my_uid = self_uid
+    let blind = c.uid != nil and my_uid != nil and c.uid != my_uid
+    let grade = "medium"
+    let why = "no visible process holds this socket"
+    if blind {
+      set grade = "low"
+      set why = "the socket's creator uid (" + str(c.uid) + ") differs from this run's uid (" + str(my_uid) + "): /proc/<pid>/fd is not readable without privilege, so this is a visibility limit rather than evidence of hiding"
+    }
+    emit {
+      "kind": "connection_without_owner",
+      "severity": grade,
+      "proto": c.proto,
+      "remote": str(c.remote_addr) + ":" + str(c.remote_port),
+      "socket_uid": c.uid,
+      "socket_inode": c.inode,
+      "reason": why,
+      "recommendation": "resolve the socket inode against /proc/*/fd from a privileged run: an external connection with no owner in the table is either a process that just exited or a process that is not in the table"
+    }
+    continue
+  }
+
+  # ---------------------------------------------------------------------------
+  # 3. The process holding the connection
+  # ---------------------------------------------------------------------------
+  if contains(name, interpreter_names) {
+    set interpreter_count = interpreter_count + 1
+    emit {
+      "kind": "connection_from_interpreter",
+      "severity": "high",
+      "pid": pid,
+      "process": name,
+      "uid": uid,
+      "exe": exe,
+      "cmdline": cmdline,
+      "remote": str(c.remote_addr) + ":" + str(c.remote_port),
+      "recommendation": "read the command line: an interpreter with an established external connection is a script that is still running. A transfer or an update explains it and the process exits; a shell that keeps the connection is the reason this check exists"
+    }
+  }
+
+  if deleted {
+    emit {
+      "kind": "connection_from_deleted_binary",
+      "severity": "high",
+      "pid": pid,
+      "exe": exe,
+      "cmdline": cmdline,
+      "remote": str(c.remote_addr) + ":" + str(c.remote_port),
+      "recommendation": "preserve /proc/<pid>/exe and the socket's peer before touching the process: a binary that is gone from disk while it holds a network connection cannot be recovered after termination, and this is the shape of a payload that unlinks itself"
+    }
+  }
+
+  if suspicious_path {
+    emit {
+      "kind": "connection_from_drop_zone_binary",
+      "severity": "high",
+      "pid": pid,
+      "exe": exe,
+      "cmdline": cmdline,
+      "remote": str(c.remote_addr) + ":" + str(c.remote_port),
+      "recommendation": "a networked process executed from a world-writable directory is not package-managed: hash the binary and capture the connection's endpoints before cleaning up"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 4. Fan-out: one process, many sockets or many peers
+# -----------------------------------------------------------------------------
+# Both counts are computed from the same table, so they are cheap and consistent.
+let per_pid = {}
+for c in connections {
+  if c.pid == nil {
+    continue
+  }
+  let bucket = per_pid.get(str(c.pid), {"sockets": 0, "peers": []})
+  set bucket.sockets = bucket.sockets + 1
+  bucket.peers.push(c.remote_addr)
+  per_pid.set(str(c.pid), bucket)
+}
+
+for pid_key in keys(per_pid) {
+  let bucket = per_pid[pid_key]
+  let owner = by_pid.get(pid_key, nil)
+  let name = "unknown"
+  let cmdline = nil
+  let uid = nil
+  if owner != nil {
+    set name = owner.name
+    set cmdline = owner.cmdline
+    set uid = owner.uid
+  }
+  let peers = bucket.peers.unique()
+  if bucket.sockets >= fanout_threshold {
+    emit {
+      "kind": "connection_fanout",
+      "severity": "medium",
+      "pid": pid_key,
+      "process": name,
+      "uid": uid,
+      "cmdline": cmdline,
+      "established_sockets": bucket.sockets,
+      "threshold": fanout_threshold,
+      "recommendation": "identify the process before assuming a compromise: a package manager, a browser and a proxy all fan out like this, and an implant with a healthy C2 substrate does too"
+    }
+  }
+  if len(peers) >= host_spread_threshold {
+    emit {
+      "kind": "connection_many_remote_hosts",
+      "severity": "medium",
+      "pid": pid_key,
+      "process": name,
+      "uid": uid,
+      "cmdline": cmdline,
+      "distinct_remote_hosts": len(peers),
+      "threshold": host_spread_threshold,
+      "recommendation": "one process talking to this many addresses is doing a sweep or relaying traffic; treat the host as a potential pivot and capture the process's descriptor table"
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# 5. Summary
+# -----------------------------------------------------------------------------
+# `socket_table_limit` is stated explicitly: /proc/net/tcp is a point-in-time
+# table with no history, so a short-lived connection may simply not be in it.
+emit {
+  "kind": "external_connection_summary",
+  "severity": "info",
+  "established_sockets": len(connections),
+  "external_connections": external,
+  "interpreter_connections": interpreter_count,
+  "unattributed_external": unattributed,
+  "processes_scanned": len(by_pid),
+  "note": "the socket table has no timestamps, so this run cannot order these connections in time or detect beaconing; a connection that opened and closed between two runs is invisible here by construction"
+}

@@ -114,14 +114,22 @@ class CertificatePinError(RuntimeError):
     """
 
 
-class _FrontedHTTPSConnection(http.client.HTTPSConnection):
-    """HTTPS connection presenting an SNI that may differ from the connect host.
+class _TLSConnection(http.client.HTTPSConnection):
+    """HTTPS connection that can present an SNI and a Host header independently.
 
-    ``sni`` is the fronting hook: TCP goes to the host in ``--server`` while
-    the ClientHello (and, via the explicit Host header, the request) carries a
-    different name. Nothing here produces domain fronting on its own — that
-    needs a CDN whose edge answers for the fronted name — so this is a
-    *capability*, documented as such.
+    ``sni`` sets the TLS server name; ``host_header`` sets the HTTP ``Host``.
+    They are separate parameters because the deployments this supports need them
+    to be separable — a shared ingress answering for several virtual hosts, or a
+    connection dialled by IP while the certificate and vhost are named.
+
+    **This is not domain fronting, and the earlier claim that it was has been
+    withdrawn.** Classic fronting (SNI one name, ``Host`` another, terminated by
+    a CDN that routes on the inner header) has been closed by every tier-1
+    provider: Google in 2018, Cloudflare and AWS in 2020, Azure across Front Door
+    and CDN, Fastly by 2024. A single parameter that set both fields could not
+    have expressed it even before that — the mismatch *is* the technique. What
+    remains legitimate, and what these two parameters exist for, is vhost
+    selection at an ingress you control.
 
     ``pin`` is the integrity hook. The management server uses a self-signed
     certificate, so certificate *pinning* is what actually authenticates it:
@@ -165,7 +173,8 @@ class _Transport:
     """Minimal JSON transport for the management API (stdlib only)."""
 
     def __init__(self, base: str, token: str, *, insecure: bool = False,
-                 sni: Optional[str] = None, pin: Optional[str] = None,
+                 sni: Optional[str] = None, host_header: Optional[str] = None,
+                 pin: Optional[str] = None,
                  verify_ca: bool = False, timeout: float = 15.0) -> None:
         candidate = base if "://" in base else "https://" + base
         parts = urlsplit(candidate)
@@ -177,7 +186,10 @@ class _Transport:
         self.host = parts.hostname
         self.port = parts.port or (443 if parts.scheme == "https" else 80)
         self.prefix = parts.path.rstrip("/")
+        # ``sni`` and ``host_header`` are independent on purpose; see
+        # ``_TLSConnection`` for why they are not a fronting mechanism.
         self.sni = sni
+        self.host_header = host_header or sni
         self.pin = pin
         self.token = token
         self.timeout = timeout
@@ -212,13 +224,14 @@ class _Transport:
         if body is not None:
             headers["Content-Type"] = "application/json"
             headers["Content-Length"] = str(len(body))
-        if self.sni:
-            # A fronted deployment addresses the fronted name, not the edge IP.
-            headers["Host"] = self.sni
+        if self.host_header:
+            # A shared ingress selects the virtual host from this header when
+            # the connection was dialled by address rather than by name.
+            headers["Host"] = self.host_header
         connection: Any = None
         try:
             if self.scheme == "https":
-                connection = _FrontedHTTPSConnection(
+                connection = _TLSConnection(
                     self.host, self.port, timeout=self.timeout,
                     context=self.context, sni=self.sni, pin=self.pin)
             else:
@@ -387,6 +400,7 @@ def _with_metrics(result: Dict[str, Any], host: str, name: str, job: Dict[str, A
 def run(server: str, token: str, interval: float = 5.0, once: bool = False,
         name: Optional[str] = None, state_dir: str = DEFAULT_STATE_DIR,
         insecure: bool = False, sni: Optional[str] = None,
+        host_header: Optional[str] = None,
         pin: Optional[str] = None, verify_ca: bool = False) -> int:
     """Enrol (once) and serve jobs until interrupted.
 
@@ -413,7 +427,8 @@ def run(server: str, token: str, interval: float = 5.0, once: bool = False,
     # turns it off deliberately.
     effective_pin = None if insecure else (pin or (identity.fingerprint if identity else None))
     try:
-        transport = _Transport(server, token, insecure=insecure, sni=sni, pin=effective_pin,
+        transport = _Transport(server, token, insecure=insecure, sni=sni,
+                               host_header=host_header, pin=effective_pin,
                                verify_ca=verify_ca)
     except ValueError as exc:
         print(f"jocky-agent: bad --server: {exc}", file=sys.stderr)
