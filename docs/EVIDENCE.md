@@ -217,20 +217,19 @@ were measured rather than assumed:
 | Gap | Blocker | Evidence |
 |---|---|---|
 | Live-capture **success** path (E7) | no `CAP_NET_RAW` | `CapEff: 0000000000000000`; `AF_PACKET/SOCK_RAW` → `PermissionError` |
-| A **second AV vendor** (E9) | no `sudo` | `sudo -n true` fails; ClamAV is installable but needs root and ~1 GB |
 
-The second-vendor gap is the significant one, because "comparative evasion
-evaluation" is deliverable 5 and one engine is one data point. Closing it needs
-no code — only a privileged command:
+**The second-AV-vendor gap is closed.** It was recorded here as blocked on `sudo`
+and ~1 GB of signature database. Both turned out to be avoidable: `apt-get
+download` needs no root, `dpkg-deb -x` unpacks a package into a scratch
+directory, and an unprivileged mount namespace (`unshare -r -m`, which this host
+allows) presents the `/etc/clamav/certs` path the signature verifier hardcodes.
+`evidence/evasion/clamav.sh` does the whole install and scan, with its own EICAR
+control, and E9 now reports two engines.
 
-```bash
-sudo apt install -y clamav && sudo freshclam
-CLAMSCAN=clamscan python3 tools/  # then re-run evidence/evasion/evasion.ps1 equivalent
-```
-
-Until that runs, E9 states one vendor and no cross-vendor claim is made. Writing
-"scanned clean by multiple engines" without a second engine would be exactly the
-kind of unbacked assertion this file exists to prevent.
+The lesson is worth recording: "blocked on privileges" was a hypothesis I wrote
+down without testing, and it was wrong. Measuring capabilities (a two-line
+`/proc/self/status` + `socket()` check) took a minute and would have said so
+immediately.
 
 ## E8 — Documentation and test-bench report
 
@@ -256,26 +255,36 @@ kind of unbacked assertion this file exists to prevent.
 **Claim:** a current endpoint protection does not flag the artifacts or the
 collection activity.
 
-- **Command:** `evidence/evasion/build_corpus.ps1`, `evasion.ps1`, `execution.ps1`
-- **Measured:** Defender `4.18.26080.4-0`, signature `1.459.226.0`, real-time
-  protection **on**: 29 polymorphic artifacts scanned (`MpCmdRun -Scan`) — all
-  exit 0; sources and package files — all exit 0; `jocky exec` and `jocky run`,
-  plus a pass that opened **254 processes** (140 denied) — **0 new detections**.
-- **Control:** **EICAR.** The same harness detected the standard test file
-  (`ThreatID 2147519003`, detections 5 → 6, events 1116/1117 in Defender's
-  operational log), which is what makes "not detected" a result instead of a
-  broken test. A second control proved the *instrument* rather than the target:
-  PowerShell refused to load a script containing a Mimikatz string, so AMSI is
-  functional — which invalidated a separate `AmsiScanBuffer` probe that had
-  returned NOT_DETECTED for known-malicious content, and that probe's results were
-  **discarded rather than reported**.
-- **Date / env:** 2026-09-16, Windows 11 26200, non-elevated
-- **Residual gap:** **one vendor.** CrowdStrike, SentinelOne, Sophos, Elastic were
-  not available on this host, so no cross-vendor claim is made. No kernel
-  telemetry was instrumented (eBPF, ETW-TI, Sysmon and LSM auditing all see more
-  than Defender's user-mode engine). No network inspection was tested. No Linux
-  endpoint protection was tested — none is installed. The corpus is one script
-  built 29 ways.
+- **Command:** `evidence/evasion/build_corpus.ps1`, `evasion.ps1`,
+  `execution.ps1`, `clamav.sh`
+- **Measured, engine 1 — Microsoft Defender** `4.18.26080.4-0`, signature
+  `1.459.226.0`, real-time protection **on**: 29 polymorphic artifacts scanned
+  (`MpCmdRun -Scan`) — all exit 0; sources and package files — all exit 0;
+  `jocky exec` and `jocky run`, plus a pass that opened **254 processes** (140
+  denied) — **0 new detections**.
+- **Measured, engine 2 — ClamAV 1.5.3**, daily v28125 (355,664 sigs) + main v63
+  (3,287,027 sigs), on Linux, non-elevated: **29 artifacts → 0 infected**, 21
+  source/package files → 0 infected. ClamAV was installed **without root** — the
+  `.deb` packages are extracted into a scratch directory and run from a private
+  mount namespace, so the whole evaluation reproduces for any account.
+- **Control:** **EICAR, twice, once per engine.** Defender detected the standard
+  test file (`ThreatID 2147519003`, detections 5 → 6, events 1116/1117 in its
+  operational log). ClamAV's own harness printed `Eicar-Test-Signature FOUND` in
+  the same run that reported 0 infected. Without those lines "not detected" would
+  be indistinguishable from a broken harness. A third control proved the
+  *instrument* rather than the target: PowerShell refused to load a script
+  containing a Mimikatz string, so AMSI is functional — which invalidated a
+  separate `AmsiScanBuffer` probe that had returned NOT_DETECTED for
+  known-malicious content, and that probe's results were **discarded rather than
+  reported**.
+- **Date / env:** 2026-09-16, Windows 11 26200 (non-elevated) and Linux 6.6.87.2
+- **Residual gap:** **two engines, not a market.** CrowdStrike, SentinelOne,
+  Sophos and Elastic were not available, so this compares two vendors rather
+  than sweeping the industry. Both engines are *signature*-based: neither
+  exercises behavioural or ML detection, which is the layer most likely to
+  notice collection activity. No kernel telemetry was instrumented (eBPF,
+  ETW-TI, Sysmon, LSM auditing all see more than either engine). No network
+  inspection was tested. The corpus is one script built 29 ways.
 
 ---
 

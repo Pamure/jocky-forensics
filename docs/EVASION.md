@@ -25,7 +25,7 @@ because the control passed.
 
 The instrument itself is the first thing to doubt, not the last.
 
-## 2. Target
+## 2. Targets
 
 | | |
 |---|---|
@@ -35,10 +35,20 @@ The instrument itself is the first thing to doubt, not the last.
 | Real-time protection | **enabled** |
 | Cloud-delivered protection | enabled (event 2010 observed) |
 | Host | Windows 11, x64, non-elevated user |
-| Corpus | 20 freshly built artifacts + 9 from earlier builds, **29 unique SHA-256**, 2.7–3.1 KB each |
+| **Second engine** | **ClamAV 1.5.3**, daily v28125 (355,664 sigs) + main v63 (3,287,027 sigs), on Linux 6.6.87.2, non-elevated |
+| Corpus | 20 freshly built artifacts + 9 from earlier builds, **29 unique SHA-256**, 2.7–5.4 KB each |
 
 The corpus is verified polymorphic before scanning: a scan of 29 byte-identical
 files would test one file, not twenty-nine.
+
+**Two engines, two platforms, two detection models** — a signature engine with a
+cloud backend on Windows, and an open-source signature engine on Linux. Neither
+replaces the other: they share no signatures, and ClamAV runs on the platform
+where the fileless and sandbox mechanisms live. ClamAV was obtained **without
+root** (the `.deb` packages are extracted into a scratch directory and run from
+a private mount namespace), so the evaluation is reproducible by any account —
+`evidence/evasion/clamav.sh` does the whole install and scan, including its own
+EICAR control.
 
 ## 3. Results
 
@@ -57,7 +67,22 @@ code 0 means clean, 2 means a threat was found.
 A fresh artifact is not flagged by a fully-updated Defender with real-time
 protection enabled.
 
-### 3.2 Execution
+### 3.2 On-disk scan, second engine (ClamAV)
+
+`evidence/evasion/clamav.sh`, unrestricted scan of the same corpus.
+
+| Target | Files | Result |
+|---|---|---|
+| Polymorphic artifacts (`*.build`) | 29 | **0 infected** |
+| JOCKY source (`.jky`) and package (`.py`) | 21 | **0 infected** |
+| EICAR control | 1 | **`Eicar-Test-Signature FOUND`** |
+
+The control line is the one that makes the rest mean anything: the same harness,
+in the same run, against the same database, detected the standard test file. An
+independent engine with no shared signatures and no shared vendor reaches the
+same verdict as Defender.
+
+### 3.3 Execution
 
 | Activity | Exit | Elapsed | New detections |
 |---|---|---|---|
@@ -74,7 +99,7 @@ Defender's operational log contained 17 events in the window; the only
 detection events (1116/1117) were the EICAR control. No event referenced any
 JOCKY activity.
 
-### 3.3 What this does and does not mean
+### 3.4 What this does and does not mean
 
 **Supported:** a Defender-protected Windows host runs JOCKY's collection and
 executes its artifacts without generating a detection.
@@ -149,30 +174,31 @@ otherwise would be the kind of unbacked assertion this report exists to avoid.
 
 Stated plainly, because a scope that is not written down gets assumed:
 
-* **Only one product was tested.** Defender. CrowdStrike, SentinelOne, Sophos,
-  Elastic and the rest were not available on this host, so no comparative claim
-  across vendors is made. The deliverable's "comparative" dimension is therefore
-  satisfied in the sense of *comparisons against controls*, not *against other
-  products*.
+* **Two engines were tested, not a market.** Defender (Windows, cloud-backed)
+  and ClamAV (Linux, open source). CrowdStrike, SentinelOne, Sophos and Elastic
+  were not available, so this is a comparison across two vendors rather than an
+  industry sweep, and no claim is made about engines not run. Both are
+  *signature* engines: neither exercises behavioural or ML detection, which is
+  the layer most likely to see collection activity.
 * **No kernel-level telemetry was instrumented.** eBPF, ETW-TI, Sysmon and LSM
   auditing all see more than Defender's user-mode engine. A privileged observer
   sees the process tree, the file reads, and the memory access. Nothing in
   JOCKY attempts to hide from them.
 * **No network inspection was tested.** A TLS-inspecting gateway sees the
   management channel if one is used.
-* **No Linux endpoint protection was tested** — no AV, HIDS or rootkit scanner
-  is installed on the development host, so nothing could be measured there. The
-  equivalent Linux numbers do not exist in this report.
 * **The artifact corpus is one script.** `hunt.jky` built 29 ways. A different
   script produces a different artifact, and the claim "artifacts are not
   flagged" is evidenced for this corpus, not proven for all scripts.
 
 **The honest summary:** JOCKY's artifacts carry no stable byte signature, which
-is what the polymorphic encoder is for, and a fully-updated Defender did not flag
-them on disk or in execution. It does not follow that JOCKY is invisible; it
-follows that a signature-driven engine has nothing to match. Behaviour-based and
-kernel-based detection were out of scope for this evaluation, and the README's
-limits section says the same thing in different words.
+is what the polymorphic encoder is for, and **two independent signature engines
+on two platforms** — Defender over the whole corpus and its execution, ClamAV
+over the corpus and the source — flagged neither the artifacts nor a collection
+run. That is a narrower statement than "evades security solutions": it follows
+that signature-driven engines have nothing to match, not that behaviour-based or
+kernel-based detection would miss it. Those layers were out of scope, the
+telemetry matrix in §5 says what each one can see, and the README's limits
+section says the same thing in different words.
 
 ## 7. Reproducing this
 
@@ -192,6 +218,16 @@ The harnesses live in `evidence/evasion/`. From a Windows checkout:
 python probe_amsi.py
 ```
 
+From the repository root, on Linux, for the second engine — no root, no
+pre-installed ClamAV, and it runs its own EICAR control:
+
+```bash
+EVIDENCE_DIR=/path/to/artifacts ./evidence/evasion/clamav.sh
+```
+
 `evasion.ps1` writes only into its own directory, adds no exclusions, and never
 disables real-time protection. The EICAR file it creates is the industry-standard
 benign test string; Defender quarantines it, which is the point of the control.
+`clamav.sh` unpacks the ClamAV `.deb` packages into a scratch directory and
+presents `/etc/clamav/certs` through a *private* mount namespace, so the host's
+`/etc` is never modified and nothing is installed.
