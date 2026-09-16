@@ -15,7 +15,7 @@ arity-checked `NativeFn`; every read is a direct kernel-interface access
 | [`ioc`](#ioc) | 1 |
 | [`mem`](#mem) | 6 |
 | [`net`](#net) | 7 |
-| [`pcap`](#pcap) | 6 |
+| [`pcap`](#pcap) | 7 |
 | [`proc`](#proc) | 16 |
 | [`re`](#re) | 7 |
 | [`sigma`](#sigma) | 2 |
@@ -115,6 +115,7 @@ print(result.findings, result.errors)
 | `dns` | 1..2 |
 | `flows` | 1..2 |
 | `http` | 1..2 |
+| `live` | 0..4 |
 | `read` | 1..2 |
 | `tls` | 1..2 |
 

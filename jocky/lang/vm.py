@@ -206,6 +206,7 @@ class VM:
             "JMP": self._op_jmp,
             "JMPF": self._op_jmpf,
             "JMPT": self._op_jmpt,
+            "JMPI": self._op_jmpi,
             "CALL": self._op_call,
             "RET": self._op_ret,
             "MK_LIST": self._op_mk_list,
@@ -543,6 +544,26 @@ class VM:
     def _op_jmpt(self, frame: Frame, target: int) -> None:
         if truthy(frame.stack.pop()):
             frame.ip = target
+
+    def _op_jmpi(self, frame: Frame, arg: Any) -> None:
+        """Indirect jump: the target is computed by the code, not read from an operand.
+
+        The constant pool of an artifact is attacker-influenceable, and the
+        target here is a value the script itself built, so neither the type nor
+        the range can be taken on trust: an unchecked ``frame.ip`` set from a
+        decrypted constant would be an out-of-bounds read at the next dispatch
+        (``JMP -1`` used to wrap to the last instruction and spin out the whole
+        step budget).
+        """
+        target = frame.stack.pop()
+        if not isinstance(target, int) or isinstance(target, bool):
+            raise JockyRuntimeError("indirect jump needs an integer target")
+        if not 0 <= target < len(frame.proto.code):
+            raise JockyRuntimeError(
+                f"indirect jump to {target}, outside the {len(frame.proto.code)} "
+                f"instructions of {frame.proto.name}"
+            )
+        frame.ip = target
 
     def _op_mk_list(self, frame: Frame, count: int) -> None:
         if count > MAX_COLLECTION_SIZE:

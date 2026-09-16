@@ -57,13 +57,22 @@ shape, with identical behaviour.
 - **Control:** `jocky ci --count 256 --sample 8` → `PASS`, 256/256 unique,
   **0 mismatches**. Uniqueness alone would be satisfiable by emitting random
   garbage; the equivalence half re-executes artifacts and compares findings, so a
-  build that changed *behaviour* would fail. Measured at 508 builds/s.
-- **Date / env:** 2026-09-16, Linux 6.6.87.2
+  build that changed *behaviour* would fail. Measured at 397 builds/s on Linux,
+  343/s on Windows, and the artifact executes on both (Windows: 489 steps, 0
+  errors). The agent that implemented the indirect jump also ran 300 fresh builds
+  against a source run with 0 mismatches.
+- **Indirect jump, independently verified:** 32 builds → **239 `JMPI` sites, all
+  239 shaped `CONST`/`CONST`/`ADD`/`JMPI`**, none carrying an operand. The
+  destination is a pool *value* produced by arithmetic, so a disassembler must
+  evaluate it rather than read it — which is what "jump indirection" means, and
+  what the previous iterator-based approximation did not achieve.
+- **Date / env:** 2026-09-16, Linux 6.6.87.2 and Windows 11
 - **Residual gap:** the signature is a branch-skeleton hash (the sequence of
   branch opcodes and their relative distances), which is a proxy for graph shape
-  rather than a graph-isomorphism proof. A **true** indirect jump is not
-  implemented — the instruction set has no opcode that takes a target from a
-  register or the stack, and adding one means changing the VM.
+  rather than a graph-isomorphism proof. A process that *evaluates* the artifact
+  rather than disassembling it recovers the target trivially — indirection
+  defeats static reading, not execution. The constant pool is per-build
+  encrypted, so recovering the two halves requires decrypting them first.
 
 ## E3 — Fileless in-memory execution
 
@@ -174,10 +183,54 @@ forensic analysis" a live socket table cannot reach.
   non-DNS UDP payloads are still rejected.
 - **Date / env:** 2026-09-16, Linux 6.6.87.2
 - **Residual gap:** the real captures are small and protocol-focused — tens of
-  kilobytes, no application mix, no adversarial traffic. There is still no live
-  capture path (no `AF_PACKET`/`libpcap` sniffing), so a host with no existing
-  capture cannot be analysed from the wire; and the DNS/TLS/HTTP parsers cover
-  the common cases, not every extension.
+  kilobytes, no application mix, no adversarial traffic. The DNS/TLS/HTTP
+  parsers cover the common cases, not every extension.
+
+### Live capture — implemented, refusal path measured, success path not
+
+`pcap.live()` captures frames from an interface into the same structure the file
+readers return, so every decoder accepts it unchanged.
+
+- **Measured here:** `stop_reason="permission-denied"` with the actionable fix
+  (`CAP_NET_RAW`; this host's `CapEff` is `0000000000000000` and
+  `AF_PACKET/SOCK_RAW` raises `PermissionError`, measured). Off Linux it reports
+  `stop_reason="unsupported"`. The capture loop itself — binding an interface,
+  the count ceiling, the poll timeout, decoding each frame, the byte and
+  malformed counters, and every stop reason — is exercised against a fake socket,
+  including that the socket is always closed and that captured frames decode
+  through `http_requests()` exactly like read ones.
+- **Not measured:** the kernel actually delivering frames. That needs a
+  capability this account does not have, and per the project's own rule a
+  simulated layer may pre-screen but never conclude — so the success path is
+  reported as **untested**, not as working.
+- **Residual gap:** live capture also changes what the host does (a raw socket,
+  and optionally promiscuous mode). It defaults to **not** promiscuous for that
+  reason, and the capability is there for an operator who has the authority, not
+  as the recommended path. Analysing an existing capture remains the primary
+  mode.
+
+## What could not be closed, and why
+
+Two rubric gaps are blocked on privileges this environment does not grant. Both
+were measured rather than assumed:
+
+| Gap | Blocker | Evidence |
+|---|---|---|
+| Live-capture **success** path (E7) | no `CAP_NET_RAW` | `CapEff: 0000000000000000`; `AF_PACKET/SOCK_RAW` → `PermissionError` |
+| A **second AV vendor** (E9) | no `sudo` | `sudo -n true` fails; ClamAV is installable but needs root and ~1 GB |
+
+The second-vendor gap is the significant one, because "comparative evasion
+evaluation" is deliverable 5 and one engine is one data point. Closing it needs
+no code — only a privileged command:
+
+```bash
+sudo apt install -y clamav && sudo freshclam
+CLAMSCAN=clamscan python3 tools/  # then re-run evidence/evasion/evasion.ps1 equivalent
+```
+
+Until that runs, E9 states one vendor and no cross-vendor claim is made. Writing
+"scanned clean by multiple engines" without a second engine would be exactly the
+kind of unbacked assertion this file exists to prevent.
 
 ## E8 — Documentation and test-bench report
 

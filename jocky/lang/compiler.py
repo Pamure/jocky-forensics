@@ -16,6 +16,8 @@ them per build)::
     EQ NE LT LE GT GE IN comparisons
     NEG NOT             unary
     JMP t / JMPF t / JMPT t   control flow (JMPF/JMPT pop)
+    JMPI                pop a computed target and jump to it (encoder only --
+                        the compiler never emits an indirect jump)
     CALL argc           call callee with argc arguments
     RET                 return from function (implicit nil)
     MK_LIST n           build a list from n stack values
@@ -80,6 +82,13 @@ def _collect_bound(node: N.Node) -> set:
 # Instruction names grouped for the polymorpher and the disassembler.
 NOOP_OPS = tuple(f"NOP{i}" for i in range(8))
 
+# ``JMPI`` is appended rather than slotted in with the other jumps, even though
+# that is where it belongs conceptually: a wire image numbers opcodes by
+# position in this tuple, so a name in the middle renumbers every opcode after
+# it and an image written by an earlier build would decode into *different*
+# instructions instead of failing.  Artifacts do not care -- their per-build
+# opcode map is keyed by name -- but the inner serialisation does, and the
+# project's rule is that a layout change is what moves ``WIRE_VERSION``.
 OPCODES = (
     "CONST", "LOADL", "STOREL", "LOAD_CELL", "STORE_CELL", "PUSH_CELL", "LOADG", "STOREG", "POP", "DUP",
     "ADD", "SUB", "MUL", "DIV", "MOD",
@@ -90,7 +99,7 @@ OPCODES = (
     "MK_LIST", "MK_MAP", "GET_IDX", "SET_IDX", "GET_MEM", "SET_MEM",
     "MK_FN", "ITER_INIT", "ITER_NEXT", "EMIT", "HALT",
     "TRY_ENTER", "TRY_EXIT",
-) + NOOP_OPS
+) + NOOP_OPS + ("JMPI",)
 
 _ARITH = {"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV", "%": "MOD"}
 _COMPARE = {"==": "EQ", "!=": "NE", "<": "LT", "<=": "LE", ">": "GT", ">=": "GE", "in": "IN"}

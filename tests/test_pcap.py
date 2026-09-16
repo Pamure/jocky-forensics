@@ -18,6 +18,7 @@ classic ones and each has a test that fails without the fix:
 from __future__ import annotations
 
 import hashlib
+import socket
 import pathlib
 import random
 import struct
@@ -801,3 +802,113 @@ def test_arbitrary_udp_off_port_53_is_not_mistaken_for_dns():
     dhcp = decode_packet(_eth(_ipv4(_udp(
         b"\x01\x01\x06\x00" + b"\x00" * 32, 68, 67), proto=17)))
     assert dns_queries([dhcp]) == []
+
+
+# ---------------------------------------------------------------- live capture
+def test_live_capture_reports_a_missing_capability_instead_of_raising():
+    """Without CAP_NET_RAW the attempt is reported, not raised.
+
+    This is the one path this development host can exercise for real: its
+    CapEff is 0, so `AF_PACKET` is denied. A forensic tool that dies on a
+    privilege it lacks tells the analyst nothing, so the contract is a
+    structured result naming the fix.
+    """
+    result = pcap.live_capture(count=1, timeout_s=0.2)
+    assert result["format"] == "live"
+    assert result["packets"] == []
+    if result["stop_reason"] == "permission-denied":
+        assert "CAP_NET_RAW" in result["error"]
+    else:
+        # A host that *does* have the capability must still return the shape,
+        # and must not have been left truncated by an error.
+        assert result["stop_reason"] in ("limit", "timeout", "eof", "error")
+
+
+def test_live_capture_off_linux_is_unsupported_not_a_crash(monkeypatch):
+    monkeypatch.setattr(pcap.sys, "platform", "win32")
+    result = pcap.live_capture(count=1, timeout_s=0.1)
+    assert result["stop_reason"] == "unsupported"
+    assert "Linux-only" in result["error"]
+    assert result["packets"] == []
+
+
+class _FakePacketSocket:
+    """A stand-in for an AF_PACKET raw socket, so the capture loop is testable.
+
+    Everything except the kernel delivering frames is exercised: option setting,
+    the count ceiling, the timeout, the decode call, the byte and malformed
+    counters, and each stop reason.
+    """
+
+    def __init__(self, frames, exc_after=None):
+        self._frames = list(frames)
+        self._exc_after = exc_after
+        self.bound = None
+        self.timeout = None
+        self.closed = False
+
+    def bind(self, address):
+        self.bound = address
+
+    def settimeout(self, value):
+        self.timeout = value
+
+    def recv(self, _size):
+        if self._exc_after is not None and len(self._frames) <= self._exc_after:
+            raise socket.timeout()
+        if not self._frames:
+            raise socket.timeout()
+        return self._frames.pop(0)
+
+    def close(self):
+        self.closed = True
+
+
+def test_live_capture_loop_decodes_frames_and_counts_them(monkeypatch):
+    import socket as real_socket
+
+    frame = _eth(_ipv4(_tcp(HTTP_REQUEST, 50123, 80), proto=6))
+    fake = _FakePacketSocket([frame, frame])
+
+    def fake_socket(family, kind, proto=0):
+        assert family == real_socket.AF_PACKET and kind == real_socket.SOCK_RAW
+        return fake
+
+    monkeypatch.setattr(real_socket, "socket", fake_socket)
+    result = pcap.live_capture(count=5, timeout_s=1.0, interface="eth0")
+
+    assert result["stop_reason"] == "timeout", "an exhausted socket must end on timeout"
+    assert len(result["packets"]) == 2
+    assert result["bytes_read"] == len(frame) * 2
+    assert result["malformed_records"] == 0
+    assert [p["index"] for p in result["packets"]] == [0, 1]
+    assert fake.bound == ("eth0", 0), "the interface must be bound when named"
+    assert fake.timeout is not None, "the socket must be given a poll timeout"
+    assert fake.closed, "the socket must be closed on every exit path"
+    # The frames must be the same objects the decoders accept from a file read.
+    assert http_requests(result), "a captured frame must decode like a read one"
+
+
+def test_live_capture_stops_at_the_count_ceiling(monkeypatch):
+    import socket as real_socket
+
+    frame = _eth(_ipv4(_tcp(HTTP_REQUEST, 50123, 80), proto=6))
+    fake = _FakePacketSocket([frame] * 10)
+    monkeypatch.setattr(real_socket, "socket",
+                        lambda family, kind, proto=0: fake)
+    result = pcap.live_capture(count=3, timeout_s=5.0)
+    assert len(result["packets"]) == 3, "count is a ceiling, not a target"
+    assert result["stop_reason"] == "limit"
+    assert result["truncated"] is True
+
+
+def test_live_capture_is_not_promiscuous_by_default():
+    """Going promiscuous changes interface state; it must be opt-in.
+
+    Most capture tools default to promiscuous. A forensic tool pointed at a
+    production host should not alter that host's behaviour as a side effect, so
+    the default is off and the flag is explicit.
+    """
+    import inspect
+    signature = inspect.signature(pcap.live_capture)
+    assert signature.parameters["promiscuous"].default is False

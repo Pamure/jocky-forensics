@@ -362,3 +362,103 @@ def test_empty_job_kind_is_refused(management_server):
     status, body = api(management_server, "/v1/jobs/submit", token=TOKEN,
                        payload={"kind": "", "payload_b64": _b64('emit 1')})
     assert status == 400, body
+
+
+# ------------------------------------------------- multi-system coordination
+def test_three_agents_are_dispatched_and_aggregated_independently(management_server,
+                                                                  tmp_path):
+    """The problem statement asks for *multi-system* analysis coordination.
+
+    One agent on one host proves the protocol works; it does not prove the
+    server can hold several systems apart and aggregate what they return. This
+    runs three agents with separate state directories against one server,
+    submits a job targeted at each plus one broadcast job, and then requires:
+
+      * every targeted job to reach the agent it named and no other,
+      * the broadcast job to reach exactly one of them (it must not be executed
+        three times),
+      * every finding to land with the agent id that produced it, so an operator
+        can tell which host said what.
+
+    The last point is the one that matters operationally: findings without
+    provenance are indistinguishable across a fleet, and a fleet is the point.
+    """
+    from jocky.agent import client as client_mod
+
+    names = [f"fleet-{index}-{time.time_ns() % 100000}" for index in range(3)]
+    agents = []
+    states = []
+    for index, name in enumerate(names):
+        status, body = api(management_server, "/v1/enroll", token=TOKEN,
+                           payload={"name": name, "host": f"host-{index}",
+                                    "uid": 1000, "kernel": "test"})
+        assert status == 200, body
+        agents.append(body["agent_id"])
+        # Seed the identity the client will load. Without this the agent enrols
+        # afresh with a *new* id, the job targeted at the id above is never
+        # claimed, and the test silently proves nothing about targeted dispatch
+        # — which is what a first draft of this test did.
+        state = tmp_path / f"state-{index}"
+        state.mkdir()
+        (state / client_mod.IDENTITY_NAME).write_text(
+            json.dumps({"agent_id": body["agent_id"],
+                        "server": management_server["url"],
+                        "name": name, "host": f"host-{index}",
+                        "fingerprint": ""}), encoding="utf-8")
+        states.append(state)
+    assert len(set(agents)) == 3, "each agent must get its own id"
+
+    # One job per agent, each emitting a value unique to that agent.
+    for index, agent_id in enumerate(agents):
+        status, body = api(management_server, "/v1/jobs/submit", token=TOKEN,
+                           payload={"kind": "source",
+                                    "payload_b64": _b64(
+                                        f'emit {{"kind": "per-agent", "index": {index},'
+                                        f' "agent_token": "agent-{index}"}}'),
+                                    "target": agent_id})
+        assert status == 200, body
+
+    # And one broadcast job that any agent may claim.
+    status, body = api(management_server, "/v1/jobs/submit", token=TOKEN,
+                       payload={"kind": "source",
+                                "payload_b64": _b64('emit {"kind": "broadcast"}')})
+    assert status == 200, body
+
+    for index in range(3):
+        code = client_mod.run(server=management_server["url"], token=TOKEN,
+                              once=True, name=names[index],
+                              state_dir=str(states[index]), insecure=True)
+        assert code == 0, f"agent {index} exited {code}"
+
+    # Each agent ran exactly one poll cycle, so each claimed its own targeted
+    # job and the broadcast job is still queued — `next_job` returns the oldest
+    # match, and a targeted job sorts ahead of it. One more cycle by any agent
+    # picks the broadcast up, which is also what proves a second poll resumes
+    # work rather than idling.
+    code = client_mod.run(server=management_server["url"], token=TOKEN,
+                          once=True, name=names[0],
+                          state_dir=str(states[0]), insecure=True)
+    assert code == 0, "the second poll cycle must succeed"
+
+    status, body = api(management_server, "/v1/findings?limit=100", token=TOKEN)
+    assert status == 200, body
+    rows = body["findings"]
+    assert len(rows) >= 4, f"expected at least 4 findings, got {len(rows)}"
+
+    per_agent = [r for r in rows if r["check"] == "per-agent"]
+    assert len(per_agent) == 3, f"each agent's own job must run exactly once: {per_agent}"
+    for row in per_agent:
+        assert row["agent_id"] in agents, "a finding must name the agent that produced it"
+    assert len({row["agent_id"] for row in per_agent}) == 3, (
+        "three agents were enrolled; three agents must have reported"
+    )
+
+    broadcast = [r for r in rows if r["check"] == "broadcast"]
+    assert len(broadcast) == 1, (
+        f"a broadcast job must be claimed once, not once per agent: {len(broadcast)}"
+    )
+
+    status, body = api(management_server, "/v1/status", token=TOKEN)
+    assert status == 200
+    assert len(body["agents"]) >= 3, "the fleet panel must list every enrolled agent"
+    assert body["findings"]["total"] >= 4

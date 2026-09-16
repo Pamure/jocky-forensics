@@ -164,6 +164,45 @@ def test_control_flow_signature_moves_with_the_shape_only():
         for item in decoded) > source_branches, "no build gained any control flow"
 
 
+def test_indirect_jumps_compute_their_target():
+    """The destination of an indirect jump is named nowhere in the artifact.
+
+    Jump indirection is only worth the name if a disassembler cannot read the
+    destination off the instruction stream, so the assertion is negative: a
+    ``JMPI`` carries no operand and the site in front of it holds no literal
+    target.  The destination exists only as two pool values, each encrypted
+    under its own key, that ``ADD`` back into a real instruction index -- which
+    the positive assertions check, so the negative ones cannot pass on a site
+    that has quietly stopped jumping anywhere at all.
+    """
+    sites = 0
+    for name in sorted(PROGRAMS):
+        program = compile_source(PROGRAMS[name])
+        for _ in range(4):
+            decoded = PolyEncoder.decode(PolyEncoder().encode(program))
+            for proto in decoded.all_protos():
+                for ip, (op, arg) in enumerate(proto.code):
+                    if op != "JMPI":
+                        continue
+                    assert arg is None, (
+                        f"JMPI at {ip} in {name} carries an operand ({arg!r})")
+                    head = proto.code[ip - 3:ip]
+                    assert [head_op for head_op, _ in head] == ["CONST", "CONST", "ADD"], (
+                        f"JMPI at {ip} in {name} is not fed by an arithmetic site: {head}")
+                    assert head[2][1] is None, f"ADD at {ip - 1} in {name} has an operand"
+                    left, right = decoded.consts[head[0][1]], decoded.consts[head[1][1]]
+                    target = left + right
+                    assert 0 <= target < len(proto.code), (
+                        f"JMPI at {ip} in {name} computes {target}, outside its "
+                        f"{len(proto.code)} instructions")
+                    # Neither half is the destination: reading the pool does not
+                    # hand the target over, only adding the halves does.
+                    assert left != target and right != target, (
+                        f"JMPI at {ip} in {name} is preceded by its own target ({target})")
+                    sites += 1
+    assert sites >= 8, f"only {sites} indirect jumps across {len(PROGRAMS)} programs"
+
+
 def test_seed_controls_the_build_shape():
     source = PROGRAMS["arith"]
     first, _info_first = build_artifact(source, seed=b"\x01" * 32)

@@ -19,6 +19,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from jocky.errors import JockyError  # noqa: E402
+from jocky.lang.compiler import Proto, Program  # noqa: E402
 from jocky.lang.vm import VM  # noqa: E402
 from jocky.rt.builtins import default_natives  # noqa: E402
 from jocky.runner import compile_source  # noqa: E402
@@ -301,6 +302,31 @@ def test_step_budget_stops_infinite_loop():
 def test_call_depth_limit_is_reported():
     result = run("fn f(n) { return f(n + 1) }\nemit f(0)", max_frames=32)
     assert any("call depth" in e for e in result.errors)
+
+
+@pytest.mark.parametrize("target,fragment", [
+    (-1, "outside"),
+    (3, "outside"),
+    (10 ** 9, "outside"),
+    ("nowhere", "integer"),
+])
+def test_indirect_jump_target_is_checked(target, fragment):
+    """``JMPI`` is the one opcode whose destination is a runtime value.
+
+    The compiler never emits it, so only a hand-built proto or an artifact can
+    produce one -- and an artifact's constant pool is attacker-influenceable,
+    which is exactly why the VM has to grade the value itself rather than trust
+    it: an unchecked target is a read outside ``proto.code``, and a negative
+    one wraps to the end of the code instead of failing.
+    """
+    program = Program(
+        main=Proto(name="<main>", code=[("CONST", 0), ("JMPI", None), ("HALT", None)]),
+        consts=[target],
+    )
+    result = VM(natives=default_natives()).run(program, wall_clock_ms=5_000)
+    assert result.errors, f"JMPI to {target!r} was not reported"
+    assert fragment in result.errors[0], result.errors
+    assert not result.truncated
 
 
 # ------------------------------------------------------------------ output API

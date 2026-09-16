@@ -27,6 +27,8 @@ from __future__ import annotations
 import hashlib
 import re
 import struct
+import sys
+import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 from jocky.errors import JockyRuntimeError
@@ -1265,6 +1267,108 @@ def dns_queries(packets: Union[Dict[str, Any], Iterable[Dict[str, Any]]],
         if limit is not None and len(results) >= limit:
             break
     return results
+
+
+# ============================================================ live capture
+#: Default ceiling on a live capture, so an unbounded read cannot fill memory.
+_CAF_DEFAULT_COUNT = 200
+
+
+def live_capture(count: int = _CAF_DEFAULT_COUNT, timeout_s: float = 5.0,
+                 interface: Optional[str] = None, snaplen: int = 65535,
+                 promiscuous: bool = False
+                 ) -> Dict[str, Any]:
+    """Capture frames from a live interface, in the shape :func:`read_pcap` returns.
+
+    So the decoders accept the result unchanged: ``flows()``, ``dns_queries()``,
+    ``tls_client_hellos()`` and ``http_requests()`` take either.
+
+    **Requires ``CAP_NET_RAW``** — root, or ``setcap cap_net_raw+ep`` on the
+    interpreter. Absence is *reported*, never raised: a capture attempt that
+    cannot run returns ``stop_reason="permission-denied"`` with an actionable
+    ``error``, because a forensic tool that dies on a privilege it lacks tells
+    the analyst nothing. Off Linux, or with a kernel that refuses ``AF_PACKET``,
+    the same applies under ``stop_reason="unsupported"``.
+
+    ``promiscuous`` defaults to **False**, unlike most capture tools. Promiscuous
+    mode changes the interface's state and makes the host process frames that are
+    not addressed to it; on a production host that is an operational change, and
+    a forensic tool should not make one as a side effect of being pointed at a
+    network. Pass it explicitly when the authority to do so exists.
+
+    The result is bounded by ``count`` and by ``timeout_s`` so a live socket
+    cannot pin the run, and every frame is decoded with :func:`decode_packet`
+    using ``LINKTYPE_ETHERNET`` — the link type ``AF_PACKET`` delivers on the
+    interfaces this targets. A frame that does not decode is kept with its
+    ``malformed`` reason rather than dropped.
+    """
+    result = _empty_result("live")
+    result.update({"interface": interface, "snaplen": snaplen,
+                   "linktype": LINKTYPE_ETHERNET, "promiscuous": promiscuous,
+                   "requested_count": count})
+    if not sys.platform.startswith("linux"):
+        result["stop_reason"] = "unsupported"
+        result["error"] = (f"live capture uses AF_PACKET, which is Linux-only "
+                           f"(platform is {sys.platform!r})")
+        return result
+
+    try:
+        import socket as _socket
+    except ImportError as exc:  # pragma: no cover - socket is stdlib
+        result["stop_reason"] = "unsupported"
+        result["error"] = f"no socket module: {exc}"
+        return result
+
+    try:
+        sock = _socket.socket(_socket.AF_PACKET, _socket.SOCK_RAW,
+                              _socket.htons(0x0003))
+    except PermissionError:
+        result["stop_reason"] = "permission-denied"
+        result["error"] = (
+            "opening an AF_PACKET raw socket needs CAP_NET_RAW: run as root, or "
+            "grant it with `setcap cap_net_raw+ep $(readlink -f $(which python3))`")
+        return result
+    except OSError as exc:
+        result["stop_reason"] = "unsupported"
+        result["error"] = f"cannot open AF_PACKET socket: {exc}"
+        return result
+
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    try:
+        if interface:
+            sock.bind((interface, 0))
+        sock.settimeout(0.25)
+        while len(result["packets"]) < max(0, count):
+            if time.monotonic() > deadline:
+                result["stop_reason"] = "timeout"
+                result["truncated"] = True
+                break
+            try:
+                frame = sock.recv(min(snaplen, 65535))
+            except _socket.timeout:
+                continue
+            except OSError as exc:
+                result["stop_reason"] = "error"
+                result["error"] = f"recv failed: {exc}"
+                break
+            if not frame:
+                continue
+            decoded = decode_packet(frame, LINKTYPE_ETHERNET)
+            decoded["index"] = len(result["packets"])
+            decoded["ts"] = time.time()
+            result["packets"].append(decoded)
+            result["bytes_read"] += len(frame)
+            if decoded.get("malformed"):
+                result["malformed_records"] += 1
+        else:
+            result["stop_reason"] = "limit"
+            result["truncated"] = True
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    return result
 
 
 # ============================================================ TCP streams

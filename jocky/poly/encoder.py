@@ -12,9 +12,9 @@ when the build seed is fixed.
 Transforms (all applied by :meth:`PolyEncoder.encode`)
 -----------------------------------------------------
 The numbers are stable labels, not execution order: :meth:`encode` runs
-constant splitting (4) first, then the control-flow pass (6-9), junk insertion
-(5), slot permutation (2), opcode permutation (1), payload encryption (10) and
-the integrity footer (11).
+constant splitting (4) first, then the control-flow pass (6-8), junk insertion
+(5), jump indirection (9) and slot permutation (2), then opcode permutation
+(1), payload encryption (10) and the integrity footer (11).
 
 1. **Opcode permutation** -- a random bijection canonical opcode -> byte in
    ``1..255`` is drawn per artifact and stored in the header (a byte value of
@@ -58,12 +58,15 @@ the integrity footer (11).
    followed by a stack-neutral block that no edge can reach but that references
    real constants, names, slots and jump targets, so it disassembles like live
    code.
-9. **Jump indirection** -- each eligible ``JMP t`` becomes ``CONST nil;
-   ITER_INIT; ITER_NEXT t; POP; POP``: the iterator is empty, so the dispatch
-   always jumps, and the two ``POP``s that follow are an arm no run reaches.
-   The target is still written in the operand, but which way the dispatch goes
-   is decided by a pool value the analyst has to decrypt; a target taken from a
-   slot or the stack would need an opcode the VM does not have.
+9. **Jump indirection** -- each eligible ``JMP t`` becomes ``CONST a; CONST b;
+   ADD; JMPI``, where ``a + b`` is where the target instruction lands *after*
+   the splice and ``a`` is drawn per build.  ``JMPI`` is an opcode the
+   compiler never emits: it takes its destination from the operand stack, so
+   no operand in the artifact names it -- the destination exists only as the
+   sum of two separately encrypted pool entries, and the only way to read it
+   is to evaluate the arithmetic.  The sequence is stack-neutral (two pushes,
+   ``ADD`` consuming them into one value, ``JMPI`` popping it), so it is a
+   drop-in replacement for the jump it replaces.
 10. **Payload encryption and padding** -- the whole payload is XORed with a
    SHA-256(key || counter) keystream and followed by random-length padding,
    so two encodes of one program differ in content *and* in size.
@@ -79,7 +82,10 @@ instructions, each one remaps every absolute index it moved -- jump targets,
 ``TRY_ENTER``'s ``(start, end, handler)``, ``proto.handlers`` and
 ``proto.starts`` -- through :func:`_rewrite_code`, and refuses to consume an
 instruction that control flow can land on (:func:`_landing_indices`), since a
-replacement begins with a branch that pops an operand.
+replacement begins with a branch that pops an operand.  Jump indirection is the
+one transform whose destination is not an operand at all: it is the sum of two
+pool values, which no later pass could recognise as an index, so it is computed
+against that map and runs after every transform that moves an instruction.
 
 Artifact layout (bytes)
 -----------------------
@@ -263,6 +269,25 @@ class _LocalJump:
         return f"_LocalJump({self.offset})"
 
 
+def _spliced_index_map(old_length: int, widths: Dict[int, int]) -> Dict[int, int]:
+    """Where each old index lands once the splices are applied.
+
+    ``widths`` maps an old instruction index to how many instructions replace
+    it (``1`` for the ones that stay put) -- the same thing ``_rewrite_code``
+    reads off its replacements.  That method builds this map to fix up the
+    operands it moves; a transform that has to *compute* a value out of a
+    relocated index before the splice happens -- jump indirection adds one into
+    two halves that cannot be re-split afterwards -- needs the same map up
+    front, so both read it here instead of each deriving it.
+    """
+    index_map: Dict[int, int] = {}
+    shift = 0
+    for ip in range(old_length + 1):
+        index_map[ip] = ip + shift
+        shift += widths.get(ip, 1) - 1
+    return index_map
+
+
 def _rewrite_code(proto: Proto, replacements: Dict[int, List[Tuple[str, Any]]]) -> None:
     """Splice replacement sequences into the code and fix every absolute index.
 
@@ -271,11 +296,11 @@ def _rewrite_code(proto: Proto, replacements: Dict[int, List[Tuple[str, Any]]]) 
     """
     old_code = proto.code
     old_length = len(old_code)
+    index_map = _spliced_index_map(
+        old_length, {ip: len(sequence) for ip, sequence in replacements.items()})
     new_code: List[Tuple[str, Any]] = []
-    index_map: Dict[int, int] = {}
     bases: List[int] = []          # replacement base per new instruction, -1 if spliced
     for ip, instruction in enumerate(old_code):
-        index_map[ip] = len(new_code)
         replacement = replacements.get(ip)
         if replacement is None:
             new_code.append(instruction)
@@ -285,7 +310,6 @@ def _rewrite_code(proto: Proto, replacements: Dict[int, List[Tuple[str, Any]]]) 
             for entry in replacement:
                 new_code.append(entry)
                 bases.append(base)
-    index_map[old_length] = len(new_code)
 
     for i, (op, arg) in enumerate(new_code):
         if op in _JUMP_OPS:
@@ -360,9 +384,10 @@ def _insert_junk(prog: Program, rng: random.Random) -> None:
 
 # --------------------------------------------------------- control-flow shape
 #: Opcodes that can move the program counter.  ``_JUMP_OPS`` is the subset whose
-#: operand is an absolute index; the rest are terminators.  Both the signature
-#: helper (``is-branch``) and the transforms below read this.
-_BRANCH_OPS = frozenset(_JUMP_OPS | {"RET", "HALT"})
+#: operand is an absolute index; ``JMPI`` computes its destination, and the rest
+#: are terminators.  Both the signature helper (``is-branch``) and the
+#: transforms below read this.
+_BRANCH_OPS = frozenset(_JUMP_OPS | {"JMPI", "RET", "HALT"})
 
 #: Opcodes no injection may touch: a guard in front of one of these would put
 #: an opaque branch inside the protected region that ``TRY_ENTER`` opens or in
@@ -569,54 +594,90 @@ def _insert_dead_code(prog: Program, rng: random.Random, consts: List[int],
             _rewrite_code(proto, replacements)
 
 
-def _indirect_jumps(prog: Program, rng: random.Random) -> None:
-    """Transform 9: dispatch an unconditional ``JMP`` through an iterator.
+#: Length of the sequence a jump becomes, which the target index depends on.
+_INDIRECT_LEN = 4
 
-    ``JMP t`` becomes ``CONST nil; ITER_INIT; ITER_NEXT t; POP; POP``: the
-    iterator built from ``nil`` is empty, so ``ITER_NEXT`` always takes its
-    jump.  The target still appears in the operand, but whether the dispatch
-    jumps or falls through is decided by a pool value the analyst has to
-    decrypt, and the fallthrough arm is stack-neutral (the two ``POP``s remove
-    the item and the iterator), so an artifact whose pool were rewritten
-    degrades to "the jump is skipped" instead of corrupting the stack.  A true
-    indirect jump — a target taken from a slot or from the stack — needs an
-    opcode the VM does not have.
+
+def _split_target(target: int, rng: random.Random) -> Tuple[int, int]:
+    """Two integers that ``ADD`` back into ``target``, neither of them ``target``.
+
+    The caller guarantees ``target >= 2``, so the drawn half lands in
+    ``1..target-1`` and both halves are strictly inside ``(0, target)``: an
+    analyst reading the pool sees two ordinary integers, neither an address nor
+    the destination itself, in the same way transform 4 hides an integer
+    constant behind a pair.
     """
-    # ``nil`` is what the compiler hands back from every function, so an
-    # artifact usually already carries the entry this needs; reuse it instead of
-    # growing the pool by one encrypted constant per jump.
-    none_index = next((i for i, value in enumerate(prog.consts) if value is None), None)
-    if none_index is None:
-        none_index = _append_const(prog, None)
+    low = rng.randrange(1, target)
+    return low, target - low
+
+
+def _indirect_jumps(prog: Program, rng: random.Random) -> None:
+    """Transform 9: dispatch an unconditional ``JMP`` through a computed target.
+
+    ``JMP t`` becomes ``CONST a; CONST b; ADD; JMPI``, where ``a + b == t`` and
+    ``a`` is drawn per build.  ``JMPI`` pops its destination off the operand
+    stack, so no operand of the artifact names it: the address exists only as
+    the sum of two pool entries encrypted under separate keys, and a
+    disassembler reading the instruction stream sees "push, push, add, jump
+    somewhere".  The sequence is stack-neutral -- two pushes, ``ADD`` consuming
+    them into one value, ``JMPI`` popping it -- so an edge landing on the jump
+    runs it exactly as the ``JMP`` it replaced did; no edge can land *inside*
+    it, because every old index maps to the first instruction of its
+    replacement.
+
+    The two halves must add up to where the target instruction lands *after*
+    this splice, not to its old index, and that position depends on every site
+    replaced in the proto -- including the ones drawn later in the same loop.
+    So the sites are drawn first and the halves are computed from the same map
+    :func:`_rewrite_code` will apply, rather than letting it remap an operand
+    that does not exist.  For the same reason this pass runs after every other
+    transform that moves an instruction (:meth:`PolyEncoder.encode` calls it
+    last): a jump operand would be remapped by the next pass, but the sum in
+    the pool is a number, and nothing downstream could tell that it was one.
+    """
     for proto in prog.all_protos():
         rate = rng.uniform(0.25, 0.6)
+        length = len(proto.code)
+        # Two kinds of site are left as plain jumps: one that falls off the end
+        # of the proto (``_remap_index`` clamps it just past the end, and the
+        # decoder rejects such an operand on the way back in), and one whose
+        # destination is instruction 0 or 1.  Remapping only ever moves an
+        # instruction later, so a target below 2 stays below 2 -- and a target
+        # below 2 cannot be split without handing one half the destination.
+        sites = [ip for ip, (op, arg) in enumerate(proto.code)
+                 if op == "JMP" and isinstance(arg, int) and 2 <= arg < length
+                 and rng.random() < rate]
+        if not sites:
+            continue
+        index_map = _spliced_index_map(length, {ip: _INDIRECT_LEN for ip in sites})
         replacements: Dict[int, List[Tuple[str, Any]]] = {}
-        for ip, (op, arg) in enumerate(proto.code):
-            if op != "JMP" or not isinstance(arg, int) or rng.random() >= rate:
-                continue
+        for ip in sites:
+            target = _remap_index(proto.code[ip][1], index_map, length)
+            low, high = _split_target(target, rng)
             replacements[ip] = [
-                ("CONST", none_index), ("ITER_INIT", None),
-                ("ITER_NEXT", arg), ("POP", None), ("POP", None),
+                ("CONST", _append_const(prog, low)),
+                ("CONST", _append_const(prog, high)),
+                ("ADD", None),
+                ("JMPI", None),
             ]
-        if replacements:
-            _rewrite_code(proto, replacements)
+        _rewrite_code(proto, replacements)
 
 
 def _obfuscate_control_flow(prog: Program, rng: random.Random) -> None:
-    """Transforms 6-9: change the *shape* of the code, not only its bytes.
+    """Transforms 6-8: change the *shape* of the code, not only its bytes.
 
     One pass so the transforms share the handful of pool entries dead code
     references, and so each build draws its densities once.  Order matters:
-    inversion and the guards run first, unreachable-block injection then fills
-    behind every unconditional jump, and jump indirection last, so that the
-    blocks are attached to the plain jumps the earlier passes produced.
+    inversion and the guards run first, then unreachable-block injection, so
+    that the blocks are attached to the plain jumps the earlier passes
+    produced.  Transform 9 is not part of this pass: it has to run after every
+    transform that moves an instruction index (see :func:`_indirect_jumps`).
     """
     consts = [_append_const(prog, rng.randrange(-4096, 4096)) for _ in range(4)]
     names = list(range(len(prog.names)))
     _invert_branches(prog, rng)
     _opaque_predicates(prog, rng, consts, names)
     _insert_dead_code(prog, rng, consts, names)
-    _indirect_jumps(prog, rng)
 
 
 def _permute_slots(prog: Program, rng: random.Random) -> List[List[int]]:
@@ -951,6 +1012,10 @@ class PolyEncoder:
         _split_constants(work, rng)
         _obfuscate_control_flow(work, rng)
         _insert_junk(work, rng)
+        # Last of the index-shifting transforms: the destination of an indirect
+        # jump is a pool value rather than an instruction operand, so nothing
+        # after this point may move an instruction.
+        _indirect_jumps(work, rng)
         slotmaps = _permute_slots(work, rng)
         opmap = _opcode_map(rng)
 

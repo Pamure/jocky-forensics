@@ -29,12 +29,26 @@ a nested `break` into an infinite loop.
   Fuzzed with **304,000 entry-point calls over random and mutated input, zero
   exceptions** — malformed content is reported in-band, never raised.
 - **Control-flow obfuscation** in `jocky/poly/encoder.py`: branch inversion,
-  opaque predicates, unreachable dead-code injection and iterator-based jump
-  indirection, all spliced through the existing index-remapping machinery.
+  opaque predicates, unreachable dead-code injection and **true jump
+  indirection**, all spliced through the existing index-remapping machinery.
   Measured: **64 builds → 64 distinct control-flow signatures** (was 1), at +34%
   artifact size, with the CI gate still passing 128/128 unique and 0 mismatches.
-  A true indirect jump is not implemented — the instruction set has no opcode for
-  it, and adding one means changing the VM.
+
+  Jump indirection needed a new opcode. `JMPI` pops its destination from the
+  operand stack, so the encoder can rewrite `JMP t` as
+  `CONST a; CONST b; ADD; JMPI` with `a + b == t`: the target is *computed*, not
+  read, which is what the technique means. Verified independently — 32 builds
+  produced **239 `JMPI` sites, every one shaped `CONST/CONST/ADD/JMPI`**, none
+  carrying an operand. `JMPI` was appended to the end of `OPCODES` rather than
+  slotted with the other branches, because the canonical wire format numbers
+  opcodes by position and inserting mid-tuple would silently renumber images
+  written by earlier builds.
+
+  The transform also has to run **after** every pass that shifts instruction
+  indices, which the CI gate caught: the destination is a pool value rather than
+  a remappable operand, so leaving it inside the earlier control-flow pass
+  produced `7 mismatch(es)` and an `IndexError`. It now sits immediately after
+  `_insert_junk`.
 - **`jocky/rt/winject.py` — Windows process-injection detection.** Process
   hollowing (mapped image vs file on disk), private executable memory,
   unbacked thread start addresses, and modules loaded from temporary paths. This

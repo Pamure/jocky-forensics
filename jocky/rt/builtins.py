@@ -490,6 +490,11 @@ def _pcap_namespace() -> Dict[str, Any]:
 
     return {
         "read": _fn("pcap.read", _read, 1, 2),
+        "live": _fn("pcap.live", lambda vm, a: pcap_mod.live_capture(
+            count=_int(a[0]) if a and a[0] is not None else 200,
+            timeout_s=float(_int(a[1])) if len(a) > 1 and a[1] is not None else 5.0,
+            interface=(_str(a[2]) or None) if len(a) > 2 else None,
+            promiscuous=_bool(a[3]) if len(a) > 3 else False), 0, 4),
         "decode": _fn("pcap.decode", lambda vm, a: pcap_mod.decode_packet(
             _str(a[0]).encode("latin-1"),
             _int(a[1]) if len(a) > 1 else 1), 1, 2),
