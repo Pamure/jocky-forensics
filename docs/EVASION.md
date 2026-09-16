@@ -84,20 +84,27 @@ same verdict as Defender.
 
 ### 3.3 Execution
 
-| Activity | Exit | Elapsed | New detections |
-|---|---|---|---|
-| `jocky exec art01.build` | 0 | 360 ms | **0** |
-| `jocky run scripts/hunt.jky` | 0 | 309 ms | **0** |
-| Reading the process table (254 processes, 140 denied) | 0 | — | **0** |
+A full collection run script `scripts/hunt.jky` — the one JOCKY's own detector
+would call suspicious under the busy-work proxies (reads the process table, opens
+other processes for read, queries the kernel system information streams) — was
+run under live real-time protection. Before-and-after behavioural event capture
+from Defender's operational log:
 
-The third row is the deliberate worst case: enumerating 254 processes and
-opening as many as the account allows is the behaviour a behavioural engine
-watches hardest. It produced no detection and left **140 recorded denials** —
-the tool reports what it could not read rather than hiding it.
+| Step | Exit | Duration | Defender detection events in the run window |
+|---|---|---:|---|
+| `jocky run scripts\hunt.jky` | 0 | 7.4 s | **0** |
+| `python -c "...open 267 processes for read..."` | 0 | 0.7 s | **0** |
 
-Defender's operational log contained 17 events in the window; the only
-detection events (1116/1117) were the EICAR control. No event referenced any
-JOCKY activity.
+Baseline was 0 Defender events in the prior 5-minute window; the run produced
+none. The host's cumulative detection count did not move (10 before, 10 after;
+the 10 are historical `Eicar` and archive-detections from other files). Full
+details in `evidence/evasion/run-measure.ps1`.
+
+The honest reading of `0`: the things that would trip a behavioural engine are
+not the ones JOCKY does. No child processes are spawned. No memory is written
+into or allocated as executable. No registry or auto-start path is touched.
+It reads state; it does not act on it. Evasion in the *security* sense — hiding
+or subverting — is not present.
 
 ### 3.4 What this does and does not mean
 

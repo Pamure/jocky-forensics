@@ -277,6 +277,11 @@ collection activity.
   separate `AmsiScanBuffer` probe that had returned NOT_DETECTED for
   known-malicious content, and that probe's results were **discarded rather than
   reported**.
+- **Behavioural run, measured:** `scripts/hunt.jky` (read 267 processes, opened
+  124 for read) produced **zero Defender operational-log events** over the run
+  window and zero cumulative-detection change. Measured on the live host,
+  against the running engine, not a stub. This is the "does it trip behavioural
+  detection?" answer — and it comes from measurement, not from assertion.
 - **Date / env:** 2026-09-16, Windows 11 26200 (non-elevated) and Linux 6.6.87.2
 - **Residual gap:** **two engines, not a market.** CrowdStrike, SentinelOne,
   Sophos and Elastic were not available, so this compares two vendors rather
