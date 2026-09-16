@@ -1201,19 +1201,26 @@ def _parse_dns_message(data: bytes) -> Optional[Dict[str, Any]]:
 
 def dns_queries(packets: Union[Dict[str, Any], Iterable[Dict[str, Any]]],
                 limit: Optional[int] = None) -> List[Dict[str, Any]]:
-    """Extract DNS messages from port-53 payloads (UDP and TCP).
+    """Extract DNS messages from a capture (UDP and TCP, any port).
 
     Names are decoded through compression pointers with bounded hops, so a
     hostile capture cannot spin the parser. Each row carries the 5-tuple, the
     header flags decoded, every question and every answer — with A/AAAA/CNAME/
     NS/PTR/MX/TXT/SRV/SOA rendered and the rest as hex, which is enough to see
     a tunnelling name or an NXDOMAIN flood without reimplementing Wireshark.
+
+    **DNS is identified by content, not only by port.** Filtering on port 53 was
+    a real coverage gap found by running this against Wireshark's own
+    ``dns_port.pcap``: the capture is entirely DNS on ports 65282/65333, and the
+    port filter returned zero queries — on the one capture that exists to prove
+    the case. Off port 53 the message must parse cleanly and carry at least one
+    question, which is what keeps the check from matching arbitrary UDP; rows
+    carry ``non_standard_port`` so a caller can weight them, because DNS away
+    from port 53 is itself the signal.
     """
     results: List[Dict[str, Any]] = []
     for packet in _packet_list(packets):
         src_port, dst_port = packet.get("src_port"), packet.get("dst_port")
-        if 53 not in (src_port, dst_port):
-            continue
         if packet.get("protocol") not in (_IPPROTO_UDP, _IPPROTO_TCP):
             continue
         payload = packet.get("payload") or ""
@@ -1226,9 +1233,24 @@ def dns_queries(packets: Union[Dict[str, Any], Iterable[Dict[str, Any]]],
             if prefix is None or prefix[0] > len(data) - 2:
                 continue
             data = data[2:2 + prefix[0]]
+        on_port_53 = 53 in (src_port, dst_port)
         message = _parse_dns_message(data)
         if message is None:
             continue
+        if not on_port_53:
+            # DNS away from port 53 is a documented tunnelling and evasion
+            # technique — it is why a capture like Wireshark's `dns_port.pcap`
+            # exists at all — so identifying it by *content* rather than by port
+            # is the point rather than a nicety. A tool that only watches port 53
+            # reports no DNS on a capture that is entirely DNS.
+            #
+            # The structural test is what keeps this from matching arbitrary UDP:
+            # the message must parse **cleanly** and carry at least one question.
+            # On port 53 a malformed message is still reported (a broken DNS
+            # packet is itself interesting); off port 53 it is not, because the
+            # cost of a false positive is higher than the cost of missing one.
+            if message.get("malformed") is not None or not message.get("questions"):
+                continue
         message.update({
             "ts": packet.get("ts"),
             "src": packet.get("src_ip"),
@@ -1237,6 +1259,7 @@ def dns_queries(packets: Union[Dict[str, Any], Iterable[Dict[str, Any]]],
             "dst_port": dst_port,
             "transport": _PROTO_NAMES.get(packet.get("protocol")),
             "index": packet.get("index"),
+            "non_standard_port": not on_port_53,
         })
         results.append(message)
         if limit is not None and len(results) >= limit:

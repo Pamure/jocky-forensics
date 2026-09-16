@@ -749,3 +749,55 @@ def test_flows_and_decoders_bound_their_work():
     # A stream longer than the cap stays bounded.
     rows = pcap._tcp_streams(packets, max_bytes=100)
     assert all(row["bytes"] <= 100 for row in rows)
+
+
+def test_dns_is_found_off_port_53_and_flagged():
+    """DNS away from port 53 must be decoded, not skipped.
+
+    Regression from a real capture: running this module against Wireshark's own
+    `dns_port.pcap` — which exists precisely to exercise DNS on non-standard
+    ports — returned **zero** queries, because the decoder filtered on port 53.
+    A tool that only watches 53 reports "no DNS" on a capture that is entirely
+    DNS, and DNS on an unusual port is a documented tunnelling technique.
+    """
+    query = (b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+             b"\x07example\x03com\x00\x00\x01\x00\x01")
+    frame = decode_packet(_eth(_ipv4(_udp(query, 65282, 65333), proto=17)))
+    rows = dns_queries([frame])
+    assert len(rows) == 1, "DNS off port 53 was not decoded"
+    assert rows[0]["questions"][0]["name"] == "example.com"
+    assert rows[0]["non_standard_port"] is True
+
+    # On port 53 the same message decodes and is not flagged.
+    on_port = decode_packet(_eth(_ipv4(_udp(query, 40001, 53), proto=17)))
+    standard = dns_queries([on_port])
+    assert len(standard) == 1
+    assert standard[0]["non_standard_port"] is False
+
+
+def test_arbitrary_udp_off_port_53_is_not_mistaken_for_dns():
+    """The content test must be strict enough to reject non-DNS payloads.
+
+    Broadening the filter is only safe if a random UDP payload cannot pass it,
+    so this pins the two conditions: the message parses cleanly *and* carries at
+    least one question.
+    """
+    # Too short to hold a DNS header.
+    tiny = decode_packet(_eth(_ipv4(_udp(b"\x00\x01", 1000, 2000), proto=17)))
+    assert dns_queries([tiny]) == []
+    # A valid header claiming a question that is not there.
+    truncated_question = decode_packet(_eth(_ipv4(_udp(
+        b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00\x07exa", 1000, 2000), proto=17)))
+    assert dns_queries([truncated_question]) == []
+    # Random bytes with a plausible-looking header. Note the label content: a
+    # leading 0x00 is a *valid* zero-length root label, so the bytes must include
+    # a length that runs past the end (0x3f = 63 bytes demanded, few supplied) to
+    # be genuinely unparseable rather than accidentally-valid DNS.
+    noise = decode_packet(_eth(_ipv4(_udp(
+        b"\xaa\xbb\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + b"\x3f" + b"A" * 8,
+        1000, 2000), proto=17)))
+    assert dns_queries([noise]) == []
+    # The DHCP capture's payload shape: DNS has no claim here.
+    dhcp = decode_packet(_eth(_ipv4(_udp(
+        b"\x01\x01\x06\x00" + b"\x00" * 32, 68, 67), proto=17)))
+    assert dns_queries([dhcp]) == []

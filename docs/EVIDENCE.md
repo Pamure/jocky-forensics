@@ -159,8 +159,22 @@ forensic analysis" a live socket table cannot reach.
   findings are enumerated above. Coverage is also fuzzed: **304,000 entry-point
   calls** over random and structurally-mutated input (file readers, packet
   decoder across 9 link types, DNS/TLS/HTTP decoders) with **0 exceptions**.
+- **Real captures:** four captures from the official Wireshark test suite
+  (`dhcp.pcap`, `dns_port.pcap`, `http.pcap`, `http2-data-reassembly.pcap`) were
+  fetched and parsed — all decoded with **0 malformed records**, the DHCP
+  handshake and the HTTP request reconstructed correctly, and a TLS ClientHello
+  identified in the HTTP/2 capture. That exercise found a **real coverage gap**:
+  `dns_port.pcap` is entirely DNS on ports 65282/65333 and the decoder returned
+  **zero** queries, because it filtered on port 53. DNS away from port 53 is a
+  documented tunnelling technique, so this was a detection hole on the one
+  capture that exists to prove the case. The decoder now identifies DNS by
+  content (clean parse plus at least one question), flags rows with
+  `non_standard_port`, and finds 4 messages where it found 0 — with no false
+  positives on the DHCP capture. Pinned by three tests, two of which assert that
+  non-DNS UDP payloads are still rejected.
 - **Date / env:** 2026-09-16, Linux 6.6.87.2
-- **Residual gap:** a synthetic capture, not real-world traffic. There is no live
+- **Residual gap:** the real captures are small and protocol-focused — tens of
+  kilobytes, no application mix, no adversarial traffic. There is still no live
   capture path (no `AF_PACKET`/`libpcap` sniffing), so a host with no existing
   capture cannot be analysed from the wire; and the DNS/TLS/HTTP parsers cover
   the common cases, not every extension.

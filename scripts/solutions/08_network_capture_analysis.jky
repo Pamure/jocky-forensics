@@ -127,6 +127,24 @@ if not fs.exists(capture_path) {
 
   for q in queries {
     if q.is_response { continue }
+    # DNS away from port 53 is itself the finding, before any name inspection:
+    # the protocol has a well-known port and there are few legitimate reasons to
+    # move it, so this is the highest-signal line in the DNS section. It was
+    # also a real gap — the decoder filtered on port 53 until a genuine capture
+    # of DNS on ports 65282/65333 returned nothing.
+    if q.non_standard_port {
+      emit {
+        "kind": "dns_nonstandard_port",
+        "severity": "medium",
+        "src": q.src,
+        "dst": q.dst,
+        "src_port": q.src_port,
+        "dst_port": q.dst_port,
+        "ts": q.ts,
+        "questions": len(q.questions),
+        "recommendation": "DNS on a port other than 53 is a documented tunnelling and evasion technique; identify the process that opened the socket (net.connections() while it is live) and check whether the same peer recurs"
+      }
+    }
     for question in q.questions {
       let name = question.name
       if len(name) >= long_name_threshold {
