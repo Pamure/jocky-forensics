@@ -10,8 +10,8 @@ language**:
 
 | Pillar in the problem statement | What this repository implements |
 |---|---|
-| New programming language + compiler | `jocky/lang/` — hand-written lexer → recursive-descent parser → bytecode compiler → stack VM (closures, `try/catch`, step/clock budgets) |
-| Polymorphic scripts (unique hashes, altered entry points/imports) | `jocky/poly/` — per-build opcode permutation, slot remapping, constant encryption + splitting, junk insertion, keystream-encrypted payload, integrity footer |
+| New programming language + compiler, altered token generation | `jocky/lang/` — hand-written lexer → recursive-descent parser → bytecode compiler → stack VM (closures, `try/catch`, step/clock budgets). `jocky/poly/sourcemut.py` re-spells every keyword from a per-build seed (`jocky build --alias-tokens`): the delivered source text differs per build while the compiled program is provably identical (114 mutated runs over the full script library) |
+| Polymorphic scripts (unique hashes, altered entry points/imports) | `jocky/poly/` — per-build opcode permutation, slot remapping, constant encryption + splitting, junk insertion, keystream-encrypted payload, integrity footer. `jocky/native/` embeds the artifact in a real x86-64 ELF64 executable (`jocky build --target native`): `.text` lands on a per-build page (64 distinct entry addresses measured), the image has **zero imports** — nothing to pattern-match — and every emitted binary runs on the host (tested) |
 | Automated CI/CD polymorphic pipeline | `jocky/ci.py` + `.github/workflows/polymorphism.yml` — `jocky ci` builds N artifacts per commit, fails the build on any hash collision, and compares re-executed findings against a source run so uniqueness cannot drift from semantics |
 | Living-off-the-land execution (no noisy API calls / file-less) | `jocky/rt/` + `jocky/exec/` — pure `/proc`, `/proc/net`, `/sys` collection (**zero external binaries**), direct syscalls via a generated trampoline, and **true fileless execution** (interpreter + runtime + payload in memfds → `/proc/<pid>/exe = /memfd:python3 (deleted)`) |
 | BYOVD / kernel-integrity forensics | `jocky/rt/byovd.py` — loaded-module integrity: known-vulnerable driver matches (20 curated entries, CVE-checked), out-of-tree/unsigned/force-loaded taint classes, modules loaded long after boot, modules whose backing `.ko` was deleted, and the global taint bits. Read-only: nothing here loads or modifies a module |
@@ -152,24 +152,53 @@ measurement that turned out to be unreliable and was discarded.
 
 ## Honest limits (what this does *not* claim)
 
+**Most clauses of the problem statement are implemented and measured. What remains
+unmet is listed here first — read it before the table above.**
+
+* **Native output is ELF-only, and scripts don't run natively yet.** `jocky build
+  --target native` produces a real, executable ELF64 image — its per-build entry
+  address and empty import list satisfy pillar 2's entry-point and import-table
+  clauses — but the embedded artifact is still executed by the bytecode VM, not
+  by AOT-compiled native code. Emitting PE32+ (Windows) and compiling opcodes to
+  machine code are the remaining work.
+* **The offensive half of pillar 3 is deliberately not free-standing.** Process
+  hollowing, reflective DLL injection, API unhooking, thread execution hijacking
+  and BYOVD *exploitation* exist only as harness-scoped mechanisms in
+  `jocky/lab/` — every entry point routes through `HarnessGuard`, which refuses
+  any target the harness did not itself spawn, and the Windows techniques raise
+  `LabRefusal` until the Phase-0 Windows test VM (with test signing) is attached.
+  This is a scope decision, not an omission: a forensic toolkit that weaponises
+  the techniques it finds against arbitrary processes is not a forensic toolkit.
+  The non-offensive half is performed today: in-memory/fileless execution via
+  `memfd_create`, direct Linux x86_64 syscalls through a generated trampoline,
+  and live detection of the rest.
+* **No LLVM frontend.** The pillar offers "custom language syntax **or** a
+  language-independent IR (LLVM) frontend"; this takes the first option. There is no
+  `llvmlite`, no IR emission and no `.ll` anywhere in the tree. The lexer, parser, compiler
+  and VM are hand-written (`jocky/lang/`, ~2,400 lines).
+* **Domain fronting is dead and is not claimed.** The runtime lets an agent dial one
+  address while presenting a different TLS server name and `Host` header, which is *vhost
+  selection at an ingress you control*. It is not fronting: fronting needs an SNI that
+  differs from the `Host` and a CDN that routes on the inner header, and every tier-1
+  provider closed that — Google in 2018, Cloudflare and AWS in 2020, Azure across Front
+  Door and CDN, Fastly by 2024. An earlier version of this file described the feature as
+  "frontable mechanics"; that was wrong in two ways (the single parameter set both fields,
+  so it could not express the mismatch the technique requires) and the claim has been
+  withdrawn. What still works, and is what the code is for, is a shared ingress answering
+  for several virtual hosts. Measured evidence for the detection side is in
+  [`docs/EVASION.md`](docs/EVASION.md).
+* **The evasion evidence is two signature engines, not a market.** Defender and ClamAV
+  were the two available; both are signature-based, so neither exercises the behavioural
+  or ML layer that is most likely to notice collection activity. No eBPF, ETW-TI, Sysmon
+  or LSM instrumentation was in the path. [`docs/EVASION.md`](docs/EVASION.md) states this
+  in full, including an AMSI probe whose results were discarded as unreliable rather than
+  reported.
 * Kernel-level telemetry (eBPF/kprobes, LSM/auditd rules) still sees
   `memfd_create`, the `execve` of `/proc/self/fd/N` and the file reads. Nothing
   user-space can hide those from a privileged observer; what JOCKY removes is the
   *noisy, noisy-by-convention* part (spawning tools, writing files, mangling argv).
 * In-memory payloads remain visible in `/proc/<pid>/maps` while they run —
   which is exactly why the same runtime ships the detector that finds them.
-* **Domain fronting is dead and is not claimed.** The runtime lets an agent
-  dial one address while presenting a different TLS server name and `Host`
-  header, which is *vhost selection at an ingress you control*. It is not
-  fronting: fronting needs an SNI that differs from the `Host` and a CDN that
-  routes on the inner header, and every tier-1 provider closed that — Google in
-  2018, Cloudflare and AWS in 2020, Azure across Front Door and CDN, Fastly by
-  2024. An earlier version of this file described the feature as "frontable
-  mechanics"; that was wrong in two ways (the single parameter set both fields,
-  so it could not express the mismatch the technique requires) and the claim has
-  been withdrawn. What still works, and is what the code is for, is a shared
-  ingress answering for several virtual hosts. Measured evidence for the
-  detection side is in [`docs/EVASION.md`](docs/EVASION.md).
 * **Linux-only mechanisms on Windows.** Collection, the language, the encoder,
   the CI gate and the management console all run on Windows (verified on
   Windows 11, Python 3.13, non-elevated: 244 kernel drivers, 231 processes, 135
@@ -204,12 +233,15 @@ Raw logs: `polymorphism.csv`, `runs.json`, `artifacts.json`, `audit.json`,
 ## Repository layout
 
 ```
-jocky/lang/     lexer, parser (AST), bytecode compiler, VM + native dispatch
-jocky/poly/     polymorphic encoder: wire format + per-build mutation
+jocky/lang/     lexer (+ per-build keyword aliasing), parser, compiler, stack VM
+jocky/poly/     polymorphic encoder + source-token mutation stage
+jocky/native/   ELF64 emitter: artifacts as runnable, dependency-free executables
 jocky/rt/       collectors (procfs, netfs, filefs, sysinfo, detect, raw syscalls)
 jocky/exec/     memfd primitives and true fileless execution
-jocky/agent/    TLS management server (sqlite store) and polling agent
-jocky/runner.py single execution entry point (source / artifact / fileless)
+jocky/lab/      harness-gated execution techniques (guard-refuses-unowned-targets)
+jocky/agent/    TLS management server, polling agent, channel transports (DNS TXT,
+                websocket relay — proven on loopback, pending an operator domain)
+jocky/runner.py single execution entry point (source / artifact / native / fileless)
 jocky/evidence.py proof harness (builds, runs, file deltas, audit hook, detection)
 jocky/cli.py    `jocky run|exec|build|fileless|disasm|info|triage|evidence|serve|agent`
 scripts/*.jky   triage, hunt, inventory, timeline, watch, smoke, evidence
@@ -218,9 +250,13 @@ evidence/       generated proof: raw logs + report.md
 docs/DESIGN.md  deeper design notes: language spec, artifact format, telemetry matrix
 docs/INSTALL.md install guide: Linux, Windows, Docker, capability matrix, troubleshooting
 docs/VERIFY.md  five manual tests you can run to check each claim yourself
-research/       background research behind the design (EDR evasion, in-memory
-                execution, BYOVD, CDN fronting, DSL security, network forensics)
-knowledge.md    consolidated problem-statement analysis and citation index
+docs/           the documentation: language/ (syntax manual), runtime/, security/,
+                operations/, execution/, plus the design, architecture, install,
+                verification, evidence and evasion reports
+docs/PROJECT-AUDIT.md            per-claim audit: what is proven, what is not
+docs/AUDIT-2026-09-17-runtime-modules.md  adversarial audit of pcap.py and winject.py
+research/       the audits and surveys the design decisions rest on, including the
+                twenty-agent review synthesised in docs/project/roadmap.md
 ```
 
 ## Reproducing the claims

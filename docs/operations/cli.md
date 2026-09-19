@@ -1,0 +1,380 @@
+<!-- Maintained by hand — keep in step with jocky.cli.build_parser(). -->
+<!-- regenerate with: cd site && npm run gen -->
+
+
+# CLI reference
+
+Every command is available as `jocky <command>` (installed console script)
+or `python -m jocky <command>` (from a checkout).
+
+```bash
+jocky --help
+```
+
+| Command | Purpose |
+|---|---|
+| [`agent`](#agent) | jocky agent |
+| [`attest`](#attest) | jocky attest |
+| [`build`](#build) | jocky build |
+| [`ci`](#ci) | jocky ci |
+| [`disasm`](#disasm) | jocky disasm |
+| [`doctor`](#doctor) | jocky doctor |
+| [`evidence`](#evidence) | jocky evidence |
+| [`examples`](#examples) | jocky examples |
+| [`exec`](#exec) | jocky exec |
+| [`fileless`](#fileless) | jocky fileless |
+| [`info`](#info) | jocky info |
+| [`init`](#init) | jocky init |
+| [`memfd`](#memfd) | jocky memfd |
+| [`run`](#run) | jocky run |
+| [`serve`](#serve) | jocky serve |
+| [`sigma`](#sigma) | jocky sigma |
+| [`sign`](#sign) | jocky sign |
+| [`test`](#test) | jocky test |
+| [`triage`](#triage) | jocky triage |
+| [`verify`](#verify) | jocky verify |
+| [`yara`](#yara) | jocky yara |
+
+## agent
+
+```text
+usage: jocky agent [-h] --server SERVER [--token TOKEN]
+                   [--token-file TOKEN_FILE] [--interval INTERVAL] [--once]
+                   [--name NAME] [--state STATE] [--pin PIN] [--insecure]
+                   [--sni SNI] [--host-header HOST_HEADER] [--verify-ca]
+```
+
+| Option | Description |
+|---|---|
+| `--server` |  |
+| `--token` | management token (or set JOCKY_TOKEN / --token-file) |
+| `--token-file` | file containing the token |
+| `--interval` |  (default: `5.0`) |
+| `--once` |  |
+| `--name` |  |
+| `--state` |  (default: `.jocky-agent`) |
+| `--pin` | expected SHA-256 of the server certificate (learned automatically at first enrolment) |
+| `--insecure` | do NOT verify or pin the server certificate — lab use only |
+| `--sni` | TLS server name to present when the address in --server differs (shared ingress, or dialling by IP) |
+| `--host-header` | HTTP Host to send, when it should differ from --sni; defaults to --sni. Note: this is vhost selection at an ingress you control, NOT domain fronting — every tier-1 CDN closed fronting between 2018 and 2024 |
+| `--verify-ca` | require a certificate valid against the system trust store (default: self-signed server authenticated by --pin) |
+
+
+## attest
+
+```text
+usage: jocky attest [-h] [--note NOTE] [--anchor ANCHOR] [--json] directory
+```
+
+| Option | Description |
+|---|---|
+| `directory` |  |
+| `--note` | free-text note stored in the manifest |
+| `--anchor` | also write the chain head here (keep it off-host) |
+| `--json` |  |
+
+
+## build
+
+```text
+usage: jocky build [-h] [-o OUTPUT] [--repeat REPEAT] [--deterministic]
+                   [--seed-hex SEED_HEX] [--json]
+                   script
+```
+
+| Option | Description |
+|---|---|
+| `script` |  |
+| `-o, --output` |  |
+| `--repeat` | build N times and report hash uniqueness (default: `1`) |
+| `--deterministic` | reproduce identical bytes from --seed-hex (no per-build entropy) |
+| `--seed-hex` | build seed as hex (with --deterministic for reproducible output) |
+| `--json` |  |
+
+
+## ci
+
+```text
+usage: jocky ci [-h] [--script SCRIPT] [--count COUNT] [--sample SAMPLE]
+                [--markdown] [--json]
+```
+
+| Option | Description |
+|---|---|
+| `--script` | source script to build repeatedly (default: scripts/hunt.jky) (default: `scripts/hunt.jky`) |
+| `--count` | artifacts to build; each one must hash differently (default: 256) (default: `256`) |
+| `--sample` | artifacts to re-execute and compare against a source run (default: 8) (default: `8`) |
+| `--markdown` | emit Markdown for $GITHUB_STEP_SUMMARY |
+| `--json` |  |
+
+
+## disasm
+
+```text
+usage: jocky disasm [-h] script
+```
+
+| Option | Description |
+|---|---|
+| `script` |  |
+
+
+## doctor
+
+```text
+usage: jocky doctor [-h] [--json] [--quick]
+```
+
+| Option | Description |
+|---|---|
+| `--json` |  |
+| `--quick` | skip the end-to-end fileless probe |
+
+
+## evidence
+
+```text
+usage: jocky evidence [-h] [--iterations ITERATIONS] [--out OUT] [--quick]
+```
+
+| Option | Description |
+|---|---|
+| `--iterations` |  (default: `1000`) |
+| `--out` |  (default: `evidence`) |
+| `--quick` |  |
+
+
+## examples
+
+```text
+usage: jocky examples [-h] [--json]
+```
+
+| Option | Description |
+|---|---|
+| `--json` |  |
+
+
+## exec
+
+```text
+usage: jocky exec [-h] [--json] [--ndjson] [--stamp-findings]
+                  [--max-steps MAX_STEPS] [--inspect] [--wall-ms WALL_MS]
+                  [--allow ALLOW] [--sandbox {off,vm,ro,strict}]
+                  artifact
+```
+
+| Option | Description |
+|---|---|
+| `artifact` |  |
+| `--json` |  |
+| `--ndjson` | stream findings as one JSON object per line as they are emitted (no single JSON document, findings not retained) |
+| `--stamp-findings` | add a `ts` (epoch seconds) to every finding map that lacks one |
+| `--max-steps` | instruction budget for an artifact you did not read (default: 50M) (default: `50000000`) |
+| `--inspect` |  |
+| `--wall-ms` |  (default: `60000.0`) |
+| `--allow` | grant privileged capabilities (comma list: syscall,exec) |
+| `--sandbox` | Landlock confinement level for the artifact (default: off) (default: `off`) |
+
+
+## fileless
+
+```text
+usage: jocky fileless [-h] [--json] [--wall-ms WALL_MS] [--timeout TIMEOUT]
+                      [--allow ALLOW] [--private] [--stamp-findings]
+                      script
+```
+
+| Option | Description |
+|---|---|
+| `script` |  |
+| `--json` |  |
+| `--wall-ms` |  (default: `60000.0`) |
+| `--timeout` |  (default: `120.0`) |
+| `--allow` | grant privileged capabilities (comma list: syscall,exec) |
+| `--private` | hide /proc state from other same-uid processes (also hides the process from your own triage) |
+| `--stamp-findings` | add a `ts` (epoch seconds) to every finding map that lacks one |
+
+
+## info
+
+```text
+usage: jocky info [-h]
+```
+
+_No options._
+
+
+## init
+
+```text
+usage: jocky init [-h] [--force] [--json] [directory]
+```
+
+| Option | Description |
+|---|---|
+| `directory` |  (default: `.`) |
+| `--force` | overwrite existing files |
+| `--json` |  |
+
+
+## memfd
+
+```text
+usage: jocky memfd [-h] [--json] [--wall-ms WALL_MS] [--timeout TIMEOUT]
+                   [--allow ALLOW] [--private] [--stamp-findings]
+                   script
+```
+
+| Option | Description |
+|---|---|
+| `script` |  |
+| `--json` |  |
+| `--wall-ms` |  (default: `60000.0`) |
+| `--timeout` |  (default: `120.0`) |
+| `--allow` | grant privileged capabilities (comma list: syscall,exec) |
+| `--private` | hide /proc state from other same-uid processes (also hides the process from your own triage) |
+| `--stamp-findings` | add a `ts` (epoch seconds) to every finding map that lacks one |
+
+
+## run
+
+```text
+usage: jocky run [-h] [--json] [--ndjson] [--stamp-findings]
+                 [--wall-ms WALL_MS] [--max-steps MAX_STEPS] [--allow ALLOW]
+                 [--sandbox {off,vm,ro,strict}]
+                 script
+```
+
+| Option | Description |
+|---|---|
+| `script` |  |
+| `--json` |  |
+| `--ndjson` | stream findings as one JSON object per line as they are emitted (no single JSON document, findings not retained) |
+| `--stamp-findings` | add a `ts` (epoch seconds) to every finding map that lacks one |
+| `--wall-ms` |  (default: `60000.0`) |
+| `--max-steps` |  (default: `50000000`) |
+| `--allow` | grant privileged capabilities (comma list: syscall,exec) |
+| `--sandbox` | Landlock confinement level for the script (default: off) (default: `off`) |
+
+
+## serve
+
+```text
+usage: jocky serve [-h] [--host HOST] [--port PORT] [--token TOKEN]
+                   [--token-file TOKEN_FILE] [--cert CERT] [--key KEY]
+                   [--state STATE]
+```
+
+| Option | Description |
+|---|---|
+| `--host` |  (default: `127.0.0.1`) |
+| `--port` |  (default: `8443`) |
+| `--token` | management token (or set JOCKY_TOKEN / --token-file) |
+| `--token-file` | file containing the token — preferred, because argv is world-readable in /proc/<pid>/cmdline |
+| `--cert` |  |
+| `--key` |  |
+| `--state` |  (default: `.jocky-server`) |
+
+
+## sigma
+
+```text
+usage: jocky sigma [-h] [--json] [--limit LIMIT] [--stamp-findings] rule input
+```
+
+| Option | Description |
+|---|---|
+| `rule` | path to a Sigma rule (.yml) |
+| `input` | log file: one record per line (JSON lines give the rule real fields, anything else is matched as text) |
+| `--json` |  |
+| `--limit` | stop after this many matches (default: 1000) (default: `1000`) |
+| `--stamp-findings` | add a `ts` (epoch seconds) to every finding map that lacks one |
+
+
+## sign
+
+```text
+usage: jocky sign [-h] [--key-file KEY_FILE] [--json] directory
+```
+
+| Option | Description |
+|---|---|
+| `directory` |  |
+| `--key-file` | key file (or set JOCKY_EVIDENCE_KEY) |
+| `--json` |  |
+
+
+## test
+
+```text
+usage: jocky test [-h] [--pattern PATTERN] [--wall-ms WALL_MS]
+                  [--sandbox {off,vm,ro,strict}] [--allow ALLOW] [--json]
+                  [--verbose]
+                  [path]
+```
+
+| Option | Description |
+|---|---|
+| `path` | file or directory (default: tests/lang) (default: `tests/lang`) |
+| `--pattern` | glob within the directory (default: `*.jky`) |
+| `--wall-ms` |  (default: `30000.0`) |
+| `--sandbox` | run every test under confinement (default: `off`) |
+| `--allow` | grant privileged capabilities to the tests (comma list) |
+| `--json` |  |
+| `--verbose` |  |
+
+
+## triage
+
+```text
+usage: jocky triage [-h] [--deep] [--json] [--stamp-findings]
+```
+
+| Option | Description |
+|---|---|
+| `--deep` |  |
+| `--json` |  |
+| `--stamp-findings` | add a `ts` (epoch seconds) to every finding map that lacks one |
+
+
+## verify
+
+```text
+usage: jocky verify [-h] [--key-file KEY_FILE] [--anchor ANCHOR] [--json]
+                    directory
+```
+
+| Option | Description |
+|---|---|
+| `directory` |  |
+| `--key-file` | HMAC key (or set JOCKY_EVIDENCE_KEY) to also check the signature |
+| `--anchor` | chain head stored outside the directory |
+| `--json` |  |
+
+
+## yara
+
+```text
+usage: jocky yara [-h] [--offset OFFSET] [--limit LIMIT] [--json]
+                  [--stamp-findings]
+                  rule target
+```
+
+| Option | Description |
+|---|---|
+| `rule` | path to a YARA rule (.yar) |
+| `target` | file to scan (bytes are read as-is) |
+| `--offset` |  |
+| `--limit` | bytes to read from the target (default: 32 MiB) (default: `33554432`) |
+| `--json` |  |
+| `--stamp-findings` |  |
+
+## Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | success |
+| 1 | the script or artifact produced errors |
+| 2 | the command itself failed (bad path, unreachable server, …) |
+| 130 | interrupted |

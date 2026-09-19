@@ -38,7 +38,7 @@ jocky = "jocky.contrib.pygments_lexer:JockyLexer"
 jocky = "jocky.cli:main"
 
 [project.urls]
-Documentation = "https://jocky.vercel.app"
+Documentation = "https://github.com/Pamure/jocky-forensics/tree/main/docs"
 Source = "https://github.com/Pamure/jocky-forensics"
 Issues = "https://github.com/Pamure/jocky-forensics/issues"
 

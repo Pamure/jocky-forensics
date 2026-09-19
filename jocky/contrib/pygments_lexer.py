@@ -128,7 +128,7 @@ class JockyLexer(RegexLexer):
     aliases = ["jocky", "jky"]
     filenames = ["*.jky"]
     mimetypes = ["text/x-jocky"]
-    url = "https://jocky.vercel.app"
+    url = "https://github.com/Pamure/jocky-forensics"
 
     tokens = {
         "root": [*_CODE_RULES],

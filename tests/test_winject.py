@@ -1051,3 +1051,206 @@ def test_module_path_grading_end_to_end(fake_windows, tmp_path):
     assert not any(finding["evidence"]["module"] == "payload.exe"
                    for finding in findings)
     assert meta  # the image really has a section table to have built
+
+
+# ======================================================= audit regression set
+# Each test below failed against the code as the audit in
+# `docs/AUDIT-2026-09-17-runtime-modules.md` found it.
+def _differ(base: bytes, count: int, filler: int = 0xCC) -> bytes:
+    """`base` with its first `count` bytes replaced — a section rewrite."""
+    return bytes([filler]) * count + base[count:]
+
+
+def test_an_entry_point_rewrite_outranks_a_noisier_other_section(fake_windows,
+                                                                 tmp_path):
+    """The audit's A2: the class was chosen by the *highest-ratio* section.
+
+    `.rdata` reaching 70% on a healthy host is this module's own measurement, so
+    a 6.2% rewrite of the entry-point section was graded `info`/`section_content`
+    whenever the loader had churned a different section harder — inverting the
+    precedence the function documents.
+    """
+    image, meta = _build_image(_code_sections())
+    target = tmp_path / "payload.exe"
+    target.write_bytes(image)
+    payload = _mapped(image, meta, {
+        ".text": _differ(b"\x90" * 0x400, 64, 0xCC),      # 64/1024  =  6.2%
+        ".data": _differ(b"\x01" * 0x400, 717, 0xEE),     # 717/1024 = 70.0%
+    })
+    fake_windows({4242: _make_model(str(target), payload, threads=[(8, 0x140001000)])})
+
+    findings = winject.hollowed_processes()
+    assert len(findings) == 1, findings
+    entry = findings[0]["evidence"]["sections"]
+    ratios = {row["name"]: (row["mismatch_bytes"], row["compared_bytes"])
+              for row in entry}
+    assert ratios[".data"][0] > ratios[".text"][0], (
+        f"the fixture must make .data the noisier section, got {ratios}"
+    )
+    assert findings[0]["evidence"]["mismatch"] == "entry_point_content", (
+        f"graded {findings[0]['evidence']['mismatch']!r} / "
+        f"{findings[0]['severity']!r}: the noisier .data decided the class "
+        f"although .text holds the entry point"
+    )
+    assert findings[0]["severity"] == "high"
+
+
+def test_an_incomplete_module_map_is_reported_not_silently_clean(fake_windows,
+                                                                 tmp_path):
+    """The audit's A1: the detector built a `skipped` list and never passed it.
+
+    The row exists precisely because a module whose extent is unknown could
+    cover the address about to be called unbacked — the code comments say it
+    must be "reported instead of accusing", and it was reported as nothing.
+    """
+    image, meta = _build_image(_code_sections())
+    target = tmp_path / "payload.exe"
+    target.write_bytes(image)
+    fake = fake_windows({4242: _make_model(
+        str(target), _mapped(image, meta), threads=[(8, 0x140001000)],
+        modules_extra=[{"name": "extra.dll", "path": str(target),
+                        "base": 0x10000000, "size": 0x1000}])})
+
+    original = fake.libs["psapi"].GetModuleInformation
+    seen = []
+
+    def fail_on_the_second(handle, module, info, size):
+        seen.append(1)
+        if len(seen) > 1:
+            return False
+        return original(handle, module, info, size)
+
+    fake.libs["psapi"].GetModuleInformation = _FakeFunction(fail_on_the_second)
+
+    findings = winject.unbacked_executable_threads()
+    assert seen, "the fixture did not exercise GetModuleInformation at all"
+    assert findings, (
+        "a process skipped for an incomplete module map produced an empty "
+        "result, which is indistinguishable from a clean sweep"
+    )
+    assert findings[0]["check"] == "partial_visibility", findings
+    reasons = [row.get("reason") or ""
+               for row in findings[0]["evidence"]["skipped_processes"]]
+    assert any("module map incomplete" in reason for reason in reasons), reasons
+
+
+DETECTOR_CALLS = ("hollowed_processes", "executable_private_memory",
+                  "unbacked_executable_threads", "modules_from_temp_paths")
+
+
+@pytest.mark.parametrize("detector", DETECTOR_CALLS)
+def test_a_failed_process_snapshot_is_never_a_clean_sweep(fake_windows, monkeypatch,
+                                                          tmp_path, detector):
+    """The audit's A3: an empty snapshot resolved no names, so `_scan_targets`
+    targeted nothing and all four detectors returned `[]`.
+
+    On the measured non-elevated host 140 of 254 processes were denied, so
+    "nothing found" and "nothing seen" reading identically is the one thing this
+    module must not do.
+    """
+    image, meta = _build_image(_code_sections())
+    target = tmp_path / "payload.exe"
+    target.write_bytes(image)
+    fake_windows({4242: _make_model(str(target), _mapped(image, meta),
+                                    threads=[(8, 0x140001000)])})
+    monkeypatch.setattr(winapi, "_snapshot_processes", list)
+
+    findings = getattr(winject, detector)()
+    assert len(findings) == 1, findings
+    assert findings[0]["check"] == "partial_visibility", findings
+    assert findings[0]["evidence"]["snapshot_failed"] is True
+    assert findings[0]["evidence"]["processes_scanned"] == 0
+
+
+def test_a_refused_address_space_walk_is_a_denial(fake_windows, monkeypatch,
+                                                  tmp_path):
+    """The audit's A4: `_regions` never returned `None`, so the caller's
+    "VirtualQueryEx refused" branch was dead and a first-query refusal was
+    downgraded to a truncated-walk skip."""
+    image, meta = _build_image(_code_sections())
+    target = tmp_path / "payload.exe"
+    target.write_bytes(image)
+    fake = fake_windows({4242: _make_model(str(target), _mapped(image, meta),
+                                           threads=[(8, 0x140001000)])})
+
+    fake.libs["kernel32"].VirtualQueryEx = _FakeFunction(lambda *args: 0)
+    errors: list = []
+    handle = winject._open_image_process(4242, errors)
+    assert handle is not None, errors
+    assert winject._regions(handle, errors) is None, (
+        "a walk that never read a single region must return None, which is what "
+        "the docstring promises and the caller's denial branch tests for"
+    )
+
+    findings = winject.executable_private_memory()
+    assert findings, "a refused address-space walk produced no finding at all"
+    assert findings[0]["check"] == "partial_visibility", findings
+    assert findings[0]["evidence"]["denied_count"] >= 1, findings[0]["evidence"]
+
+
+def test_the_address_space_ceiling_follows_the_interpreter_bitness():
+    """The audit's A5: the ceiling was the x64-only constant, so on a 32-bit
+    build every process reported a truncated walk.
+
+    This assertion only bites on a 32-bit interpreter — it is a build-flavour
+    invariant, recorded here because that is the build it protects.
+    """
+    expected = 0x7FFFFFFF0000 if winject._POINTER_SIZE == 8 else 0x7FFF0000
+    assert winject._USER_SPACE_TOP == expected, (
+        f"ceiling {winject._USER_SPACE_TOP:#x} does not match "
+        f"{winject._POINTER_SIZE * 8}-bit pointer size"
+    )
+
+
+def test_a_walk_that_reaches_the_ceiling_reports_complete(fake_windows, tmp_path,
+                                                          monkeypatch):
+    """A space that ends exactly at the ceiling is a *complete* walk.
+
+    Run against the 32-bit ceiling so the shape matches the build flavour the
+    32-bit ``MEMORY_BASIC_INFORMATION`` exists to serve.
+    """
+    monkeypatch.setattr(winject, "_USER_SPACE_TOP", 0x7FFF0000)
+    image, meta = _build_image(_code_sections())
+    target = tmp_path / "payload.exe"
+    target.write_bytes(image)
+    fake_windows({4242: _make_model(str(target), _mapped(image, meta),
+                                    threads=[(8, 0x140001000)])})
+    errors: list = []
+    handle = winject._open_image_process(4242, errors)
+    assert handle is not None, errors
+    walk = winject._regions(handle, errors)
+    assert walk is not None and walk["complete"] is True, (
+        f"a walk over an address space ending at the ceiling reported "
+        f"complete={None if walk is None else walk['complete']}"
+    )
+    assert winapi.access_errors() == [], winapi.access_errors()
+
+
+def test_a_failed_bind_does_not_leave_the_module_half_initialized(fake_windows,
+                                                                 monkeypatch):
+    """The audit's A6: `_BOUND` was set before `_bind` ran.
+
+    One missing export left the flag True, so every later call skipped binding
+    and ran with undeclared prototypes — 64-bit handles truncated at the call
+    site, with nothing pointing back at the cause.
+    """
+    image, meta = _build_image(_code_sections())
+    fake_windows({4242: _make_model("/tmp/payload.exe", _mapped(image, meta))})
+
+    attempts = []
+
+    def exploding(libs):
+        attempts.append(1)
+        raise AttributeError("function 'ReadProcessMemory' not found")
+
+    monkeypatch.setattr(winject, "_bind", exploding)
+    for _ in range(2):
+        with pytest.raises(AttributeError):
+            winject._dlls()
+    assert winject._BOUND is False, (
+        "the module marked itself bound although binding failed"
+    )
+    assert len(attempts) == 2, (
+        f"binding was attempted {len(attempts)} time(s) across two calls; a "
+        f"failed bind must be retried, not remembered as done"
+    )

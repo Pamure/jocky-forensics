@@ -12,11 +12,14 @@ dist/
 .jocky-agent/
 *.jky.build
 
-# --- docs site ----------------------------------------------------------
-site/node_modules/
-site/build/
-site/.svelte-kit/
-.vercel/
+# --- editor / OS junk ----------------------------------------------------
+# WSL materialises Windows NTFS alternate data streams as literal files, which
+# is how a tracked `GUIDE.md:Zone.Identifier` ended up in this repository.
+*:Zone.Identifier
+.DS_Store
+Thumbs.db
+
+# --- docs site (removed) -------------------------------------------------
 
 # --- generated probe directories ----------------------------------------
 evidence/_pycache_probe/

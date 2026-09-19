@@ -144,17 +144,28 @@ def cmd_run(args: argparse.Namespace) -> int:
 def cmd_exec(args: argparse.Namespace) -> int:
     with open(args.artifact, "rb") as fh:
         artifact = fh.read()
+    is_native = artifact[:4] == b"\x7fELF"
+    if is_native:
+        from jocky.native.runner import run_native, inspect_blob
     if args.inspect:
-        _emit(runner.inspect_artifact(artifact), True)
+        _emit(inspect_blob(artifact) if is_native
+              else runner.inspect_artifact(artifact), True)
         return 0
     try:
         ctx = runner.policy_ctx(args.allow)
     except ValueError as exc:
         print(f"jocky: {exc}", file=sys.stderr)
         return 2
-    result = runner.run_artifact(artifact, wall_clock_ms=args.wall_ms, ctx=ctx,
-                                 sandbox=args.sandbox, max_steps=args.max_steps,
-                                 emit_sink=_run_sink(args))
+    if is_native:
+        # The ELF stub itself only prints a marker; the script runs in the
+        # existing VM after the embedded artifact is recovered from the image.
+        result = run_native(artifact, wall_clock_ms=args.wall_ms, ctx=ctx,
+                            sandbox=args.sandbox, max_steps=args.max_steps,
+                            emit_sink=_run_sink(args))
+    else:
+        result = runner.run_artifact(artifact, wall_clock_ms=args.wall_ms, ctx=ctx,
+                                     sandbox=args.sandbox, max_steps=args.max_steps,
+                                     emit_sink=_run_sink(args))
     if args.stamp_findings:
         runner.stamp_findings(result.findings)
     _emit(result.to_dict(), True) if (args.json and not args.ndjson) else None
@@ -174,11 +185,44 @@ def cmd_build(args: argparse.Namespace) -> int:
         print("jocky: --seed-hex must be hexadecimal", file=sys.stderr)
         return 2
     build_kwargs = {"seed": seed, "deterministic": args.deterministic}
+
+    if getattr(args, "alias_tokens", False):
+        # Per-build source tokenisation (pillar 1's "token generation"):
+        # keywords are replaced by seed-derived aliases before compile, so the
+        # delivered .jky text streams differ per build while the compiled
+        # Program is provably identical (tests/test_token_mutation.py).
+        import os as _os
+        from jocky.poly import sourcemut
+        alias_seed = seed if (seed and args.deterministic) else _os.urandom(32)
+        alias_map = sourcemut.choose_alias_map(alias_seed)
+        source = sourcemut.mutate_source(source, alias_map)
+        build_kwargs["keyword_table"] = sourcemut.mutated_lexer_kwargs(alias_map)[
+            "keyword_table"]
+
+    def is_native() -> bool:
+        return args.target == "native"
+
+    def _wrap_native(artifact: bytes) -> bytes:
+        """Wrap an artifact in a runnable ELF when --target native is set.
+
+        The wrap seed is distinct-but-derived: the ELF layout must vary for
+        the same artifact across builds, so a fresh 32 bytes from the OS when
+        the caller has not pinned one, the caller's seed otherwise.
+        """
+        import hashlib
+        from jocky.native.emit_elf import emit_elf
+        elf_seed = seed if (seed and args.deterministic) else hashlib.sha256(
+            os.urandom(32) + artifact[:64]).digest()
+        return emit_elf(artifact, seed=elf_seed)
+
     if args.repeat > 1:
         infos: List[dict] = []
         artifacts: List[bytes] = []
         for _ in range(args.repeat):
             artifact, meta = runner.build_artifact(source, **build_kwargs)
+            if is_native():
+                artifact = _wrap_native(artifact)
+                meta["container"] = "elf64"
             meta["size"] = len(artifact)
             infos.append(meta)
             artifacts.append(artifact)
@@ -199,7 +243,11 @@ def cmd_build(args: argparse.Namespace) -> int:
         _emit(report, True)
         return 0
     artifact, meta = runner.build_artifact(source, **build_kwargs)
-    out = args.output or (args.script.rsplit(".", 1)[0] + ".jky.build")
+    if is_native():
+        artifact = _wrap_native(artifact)
+        meta["container"] = "elf64"
+    out = args.output or (args.script.rsplit(".", 1)[0] +
+                          (".jky.native" if is_native() else ".jky.build"))
     with open(out, "wb") as fh:
         fh.write(artifact)
     meta["path"] = out
@@ -595,6 +643,14 @@ def build_parser() -> argparse.ArgumentParser:
                          help="build N times and report hash uniqueness")
     p_build.add_argument("--deterministic", action="store_true",
                          help="reproduce identical bytes from --seed-hex (no per-build entropy)")
+    p_build.add_argument("--target", choices=["bytecode", "native"], default="bytecode",
+                         help="artifact container: JKY1 bytecode (default) or a runnable "
+                              "x86-64 ELF64 wrapping it (Linux hosts; `jocky exec` on the "
+                              "image extracts and runs the embedded artifact)")
+    p_build.add_argument("--alias-tokens", action="store_true",
+                         help="rewrite keyword spellings from a per-build alias map "
+                              "before compile (source-token mutation; semantic identity "
+                              "proven by tests/test_token_mutation.py)")
     p_build.add_argument("--seed-hex", default=None,
                          help="build seed as hex (with --deterministic for reproducible output)")
     p_build.add_argument("--json", action="store_true")

@@ -29,7 +29,7 @@ Grammar (informal)::
 """
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Mapping, Optional
 
 from jocky.errors import JockySyntaxError
 from jocky.lang import nodes as N
@@ -423,7 +423,7 @@ class Parser:
         return N.Interp(line=tok.line, col=tok.col, parts=parts)
 
 
-def parse(source: str) -> N.Program:
+def parse(source: str, keyword_table: Optional[Mapping[str, str]] = None) -> N.Program:
     """Parse a JOCKY source string into an AST.
 
     Deeply nested input (`'(' * 500 + '1' + ')' * 500`, a chain of 500 method
@@ -432,9 +432,13 @@ def parse(source: str) -> N.Program:
     ``RecursionError`` becomes the same syntax error every other bad input
     produces. The limit is the interpreter's, not a language constant: it is
     roughly 90 nested groups on a default CPython stack.
+
+    ``keyword_table`` is the polymorphism surface: when the per-build alias
+    stage (:mod:`jocky.poly.sourcemut`) has replaced keyword spellings, the
+    lexer needs that table to recognise them.  ``None`` is the ordinary path.
     """
     try:
-        tokens = Lexer(source).tokenize()
+        tokens = Lexer(source, keyword_table=keyword_table).tokenize()
         return Parser(tokens, source).parse_program()
     except RecursionError:
         raise JockySyntaxError(

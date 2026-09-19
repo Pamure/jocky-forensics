@@ -1,0 +1,74 @@
+<!-- Maintained by hand — keep in step with jocky.rt.builtins.core_builtins(). -->
+<!-- regenerate with: cd site && npm run gen -->
+
+
+# Standard library
+
+Global functions available to every script. Values are plain JOCKY data —
+lists are lists, maps are maps — so these compose with methods such as
+`list.sort()` and `str.split()`.
+
+Arity is enforced by the VM: calling with the wrong number of arguments
+raises a catchable error naming the function.
+
+| Function | Arity |
+|---|---|
+| `assert` | 1..2 |
+| `chr` | 1..1 |
+| `contains` | 2..2 |
+| `count` | 1..2 |
+| `dict` | 0..0 |
+| `error` | 1..1 |
+| `expect` | 2..3 |
+| `expect_throws` | 1..3 |
+| `fail` | 0..1 |
+| `filter` | 2..2 |
+| `float` | 1..1 |
+| `group_by` | 2..2 |
+| `hex` | 1..1 |
+| `index_by` | 2..2 |
+| `int` | 1..1 |
+| `join` | 1..2 |
+| `json_decode` | 1..1 |
+| `json_encode` | 1..1 |
+| `keys` | 1..1 |
+| `len` | 1..1 |
+| `now` | 0..0 |
+| `ord` | 1..1 |
+| `print` | 0+ |
+| `range` | 1..2 |
+| `skip` | 0..1 |
+| `sleep` | 1..1 |
+| `sort` | 1..1 |
+| `sort_by` | 2..2 |
+| `str` | 1..1 |
+| `transform` | 2..2 |
+| `type` | 1..1 |
+| `values` | 1..1 |
+
+## Examples
+
+```jocky
+let ports = transform(net.listeners(), fn(c) { return c.local_port })
+emit {"count": count(ports), "unique": ports.unique().sort()}
+
+let findings = filter(det.triage().findings, fn(f) {
+  return f.severity == "critical"
+})
+for f in findings { emit {"check": f.check, "title": f.title} }
+
+print(join(["scanned", str(len(proc.list())), "processes"], " "))
+```
+
+## Higher-order helpers
+
+`transform`, `filter`, `sort_by` and `count` accept a JOCKY closure and run
+it inside the VM (no host round-trip), so they can call natives and other
+closures:
+
+```jocky
+let suspicious = filter(proc.list(400), fn(p) {
+  return contains("/tmp/", p.exe) or p.memfd_exe
+})
+emit {"suspects": len(suspicious)}
+```

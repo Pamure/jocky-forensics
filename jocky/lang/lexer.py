@@ -11,11 +11,17 @@ Design notes
 * Token kinds are ``int``, ``float``, ``str``, ``ident``, ``kw``, ``op``
   and ``eof``.  For operators the kind *is* the operator text, which keeps
   the parser free of an operator enum.
+* ``keyword_table`` (optional) maps per-build alias spellings to canonical
+  keyword names; an identifier that matches an alias tokenizes as a ``kw``
+  token whose value is the canonical keyword, so the parser sees no
+  difference.  Strings, raw strings, interpolation segments and comments
+  never pass through this lookup — only identifier-position text can be
+  aliased.  ``None`` (the default) preserves the historical behaviour.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Tuple
+from typing import Any, List, Mapping, Optional, Tuple
 
 from jocky.errors import JockySyntaxError
 
@@ -53,11 +59,16 @@ class Token:
 class Lexer:
     """Turns JOCKY source into a flat token list."""
 
-    def __init__(self, source: str):
+    def __init__(self, source: str,
+                 keyword_table: Optional[Mapping[str, str]] = None):
         self.src = source or ""
         self.i = 0
         self.line = 1
         self.col = 1
+        # Alias spellings -> canonical keyword.  Empty means off; the mapping
+        # is only consulted in ``_ident``, so string/comment text can never
+        # be reinterpreted as a keyword.
+        self.keyword_table: Mapping[str, str] = keyword_table or {}
 
     # ------------------------------------------------------------------ utils
     def _peek(self, k: int = 0) -> str:
@@ -243,7 +254,15 @@ class Lexer:
         while self._peek().isalnum() or self._peek() == "_":
             text += self._peek()
             self._adv()
-        return Token("kw" if text in KEYWORDS else "ident", text, line, col)
+        if text in KEYWORDS:
+            # Canonical keywords win over the alias table: an alias that
+            # collides with a real keyword keeps the keyword meaning rather
+            # than silently re-binding.
+            return Token("kw", text, line, col)
+        aliased = self.keyword_table.get(text)
+        if aliased is not None:
+            return Token("kw", aliased, line, col)
+        return Token("ident", text, line, col)
 
     # ------------------------------------------------------------------ entry
     def tokenize(self) -> List[Token]:
@@ -288,6 +307,7 @@ class Lexer:
         return tokens
 
 
-def tokenize(source: str) -> List[Token]:
+def tokenize(source: str,
+             keyword_table: Optional[Mapping[str, str]] = None) -> List[Token]:
     """Convenience wrapper used by tests and tooling."""
-    return Lexer(source).tokenize()
+    return Lexer(source, keyword_table=keyword_table).tokenize()

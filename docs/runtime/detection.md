@@ -1,0 +1,303 @@
+<!-- Maintained by hand — keep in step with jocky.rt.detect.CHECK_CATALOG. -->
+<!-- regenerate with: cd site && npm run gen -->
+
+
+# Detection checks
+
+`det.triage()` runs every check, counts findings by severity and reports how
+many processes and sockets it scanned, so a clean result is distinguishable
+from a failed run. Each check is also callable on its own.
+
+Severity scale: `info < low < medium < high < critical`.
+
+| Check | Severity | Data source |
+|---|---|---|
+| `byovd_deleted_driver_file` | high | kernel module list vs the driver's image path (Windows) |
+| `byovd_deleted_module_file` | high | /proc/modules vs /lib/modules/<release> |
+| `byovd_forced_module` | high | /sys/module/<name>/taint (F) |
+| `byovd_kernel_taint` | medium | /proc/sys/kernel/tainted |
+| `byovd_known_vulnerable_module` | varies | /proc/modules vs a curated abused-driver list |
+| `byovd_late_loaded_module` | info | /sys/module/<name> mtime vs boot time |
+| `byovd_out_of_tree_module` | medium | /sys/module/<name>/taint (O) |
+| `byovd_unsigned_module` | high | /sys/module/<name>/taint (E) |
+| `check_error` | info | internal |
+| `deleted_executable` | medium | /proc/<pid>/exe |
+| `deleted_open_file` | medium | /proc/<pid>/fd |
+| `fileless_process` | high | /proc/<pid>/exe |
+| `hidden_module` | critical | /proc/modules vs loadable /sys/module subset |
+| `hijackable_path` | low | $PATH resolved through symlinks + /proc/mounts |
+| `hollowed_process` | high | on-disk image vs the image mapped in the process (Windows) |
+| `injection_primitive` | low | /proc/<pid>/fd (anon_inode) |
+| `ioc_connection` | critical | /proc/net/* cross-referenced with an IOC set |
+| `ld_env_injection` | medium | /proc/<pid>/environ |
+| `ld_preload` | high | /etc/ld.so.preload |
+| `memfd_fd_holder` | high | /proc/<pid>/cmdline + /proc/<pid>/fd |
+| `memfd_mapping` | high | /proc/<pid>/maps |
+| `module_from_temp_path` | medium | loaded module paths (Windows) |
+| `partial_visibility` | info | /proc/<pid>/exe reachability across the process table |
+| `persistence` | high | cron, systemd, rc.local, profile.d, authorized_keys |
+| `private_executable_memory` | medium | VirtualQueryEx region walk (Windows) |
+| `rwx_memory` | low | /proc/<pid>/maps |
+| `suspicious_cmdline` | varies | /proc/<pid>/cmdline vs pattern table |
+| `temp_executable` | high | /proc/<pid>/exe |
+| `unbacked_thread_start` | high | thread start addresses vs loaded modules (Windows) |
+| `unusual_listener` | low | /proc/net/tcp{,6} + /proc/*/fd |
+
+## What each check means
+
+### `byovd_deleted_driver_file`
+
+A loaded kernel driver's image file is missing on disk — the Windows ghost-driver signal.
+
+- **Source:** kernel module list vs the driver's image path (Windows)
+- **Severity:** high
+- **Analyst action:** dump the driver from memory and identify who loaded it before the host is rebooted
+
+### `byovd_deleted_module_file`
+
+A loaded module's backing .ko is gone from disk.
+
+- **Source:** /proc/modules vs /lib/modules/<release>
+- **Severity:** high
+- **Analyst action:** dump the module from memory before the host is rebooted
+
+### `byovd_forced_module`
+
+Module was force-loaded, bypassing vermagic and version checks.
+
+- **Source:** /sys/module/<name>/taint (F)
+- **Severity:** high
+- **Analyst action:** treat as deliberate tampering unless a maintenance action explains it
+
+### `byovd_kernel_taint`
+
+Global kernel taint bits 12/13 are set: out-of-tree and/or unsigned code is running in ring 0. A summary — the per-module findings carry the precise grade.
+
+- **Source:** /proc/sys/kernel/tainted
+- **Severity:** medium
+- **Analyst action:** enumerate the offending modules before drawing conclusions from any check
+
+### `byovd_known_vulnerable_module`
+
+A loaded module matches a driver abused in published BYOVD research. Third-party drivers grade critical; in-tree modules with a patched flaw grade info.
+
+- **Source:** /proc/modules vs a curated abused-driver list
+- **Severity:** varies
+- **Analyst action:** third-party: treat the load as hostile. in-tree: compare the kernel build against the vendor fix — presence is not compromise
+
+### `byovd_late_loaded_module`
+
+Module appeared well after boot. Correlation input, not a verdict: modules load on demand for ordinary reasons.
+
+- **Source:** /sys/module/<name> mtime vs boot time
+- **Severity:** info
+- **Analyst action:** correlate the load time with process, cron and package-manager activity
+
+### `byovd_out_of_tree_module`
+
+Module was not shipped with this kernel build (taint bit 12).
+
+- **Source:** /sys/module/<name>/taint (O)
+- **Severity:** medium
+- **Analyst action:** identify the vendor or package that installed the module
+
+### `byovd_unsigned_module`
+
+Module carries no signature (taint bit 13) — the BYOVD precondition.
+
+- **Source:** /sys/module/<name>/taint (E)
+- **Severity:** high
+- **Analyst action:** hash the .ko and compare it against the distribution package manifest
+
+### `check_error`
+
+A check raised — reported instead of aborting the whole triage.
+
+- **Source:** internal
+- **Severity:** info
+- **Analyst action:** treat a clean result as unknown for that check
+
+### `deleted_executable`
+
+Executable was unlinked after start (loader that drops its dropper).
+
+- **Source:** /proc/<pid>/exe
+- **Severity:** medium
+- **Analyst action:** recover the binary from /proc/<pid>/exe and hash it
+
+### `deleted_open_file`
+
+File unlinked on disk but still held open (memfd targets excluded).
+
+- **Source:** /proc/<pid>/fd
+- **Severity:** medium
+- **Analyst action:** recover the content via /proc/<pid>/fd/<fd>
+
+### `fileless_process`
+
+Process image runs from anonymous memory (/memfd:…) or a deleted file.
+
+- **Source:** /proc/<pid>/exe
+- **Severity:** high
+- **Analyst action:** copy /proc/<pid>/exe to evidence storage before the process exits
+
+### `hidden_module`
+
+The two kernel views of loadable modules disagree — one was tampered with.
+
+- **Source:** /proc/modules vs loadable /sys/module subset
+- **Severity:** critical
+- **Analyst action:** treat the kernel as compromised; acquire a memory image
+
+### `hijackable_path`
+
+PATH directory is writable (permission-opaque filesystems excluded).
+
+- **Source:** $PATH resolved through symlinks + /proc/mounts
+- **Severity:** low
+- **Analyst action:** remove it from PATH or fix permissions
+
+### `hollowed_process`
+
+A process's main image differs from its file on disk — the process-hollowing signature.
+
+- **Source:** on-disk image vs the image mapped in the process (Windows)
+- **Severity:** high
+- **Analyst action:** dump the memory image and compare entry-point bytes against a known-good copy
+
+### `injection_primitive`
+
+Anonymous descriptors used for injection (userfaultfd, io_uring) are held open.
+
+- **Source:** /proc/<pid>/fd (anon_inode)
+- **Severity:** low
+- **Analyst action:** correlate with ptrace/process_vm_* activity; legitimate for some software
+
+### `ioc_connection`
+
+Live connection involving an indicator from the supplied IOC set.
+
+- **Source:** /proc/net/* cross-referenced with an IOC set
+- **Severity:** critical
+- **Analyst action:** isolate the host and capture volatile state
+
+### `ld_env_injection`
+
+Process environment carries LD_PRELOAD/LD_AUDIT/LD_LIBRARY_PATH.
+
+- **Source:** /proc/<pid>/environ
+- **Severity:** medium
+- **Analyst action:** inspect the referenced library
+
+### `ld_preload`
+
+Global library preloading injects code into every process.
+
+- **Source:** /etc/ld.so.preload
+- **Severity:** high
+- **Analyst action:** verify each listed library against the package manager
+
+### `memfd_fd_holder`
+
+A memfd payload is being executed through an interpreter (/proc/self/fd/N in argv).
+
+- **Source:** /proc/<pid>/cmdline + /proc/<pid>/fd
+- **Severity:** high
+- **Analyst action:** recover the payload from the referenced descriptor
+
+### `memfd_mapping`
+
+Executable mapping backed by a memfd object.
+
+- **Source:** /proc/<pid>/maps
+- **Severity:** high
+- **Analyst action:** capture the mapping and correlate with the parent process
+
+### `module_from_temp_path`
+
+A module was loaded from a temporary or world-writable directory.
+
+- **Source:** loaded module paths (Windows)
+- **Severity:** medium
+- **Analyst action:** hash the module and identify what loaded it
+
+### `partial_visibility`
+
+Part of the process table could not be inspected, so a clean result is not conclusive.
+
+- **Source:** /proc/<pid>/exe reachability across the process table
+- **Severity:** info
+- **Analyst action:** re-run as root or with CAP_SYS_PTRACE before treating the host as clean
+
+### `persistence`
+
+Persistence artefact modified recently or world-writable.
+
+- **Source:** cron, systemd, rc.local, profile.d, authorized_keys
+- **Severity:** high
+- **Analyst action:** review the file against the package manifest
+
+### `private_executable_memory`
+
+Committed private memory that is executable — where a manually-mapped payload lives. Also where a JIT lives.
+
+- **Source:** VirtualQueryEx region walk (Windows)
+- **Severity:** medium
+- **Analyst action:** correlate with the process's provenance; a JIT runtime looks identical
+
+### `rwx_memory`
+
+Writable+executable anonymous region — correlation input, not a verdict.
+
+- **Source:** /proc/<pid>/maps
+- **Severity:** low
+- **Analyst action:** correlate with fileless flags rather than alerting alone
+
+### `suspicious_cmdline`
+
+Command line matches an intrusion pattern (download-and-execute, reverse shell, log tampering, …).
+
+- **Source:** /proc/<pid>/cmdline vs pattern table
+- **Severity:** varies
+- **Analyst action:** reconstruct the process tree around the PID
+
+### `temp_executable`
+
+Execution from a world-writable drop zone (/tmp, /dev/shm, /var/tmp).
+
+- **Source:** /proc/<pid>/exe
+- **Severity:** high
+- **Analyst action:** hash the binary and reconstruct the parent chain
+
+### `unbacked_thread_start`
+
+A thread's start address lies outside every loaded module — the thread-execution-hijacking signal.
+
+- **Source:** thread start addresses vs loaded modules (Windows)
+- **Severity:** high
+- **Analyst action:** capture the thread context and the memory at its start address
+
+### `unusual_listener`
+
+TCP listener outside the baseline port set, attributed to a process.
+
+- **Source:** /proc/net/tcp{,6} + /proc/*/fd
+- **Severity:** low
+- **Analyst action:** confirm the service is expected on this host
+
+## Running a subset
+
+```jocky
+let report = det.triage()
+
+let critical = filter(report.findings, fn(f) { return f.severity == "critical" })
+for f in critical { emit f }
+
+emit {"scanned": report.scanned, "counts": report.counts}
+```
+
+## Extending the catalog
+
+A new check must be added to `jocky/rt/detect.py` **and** to
+`CHECK_CATALOG`; `tests/test_runtime.py` fails when a check can be emitted
+without a catalog entry, which keeps this page truthful.

@@ -192,9 +192,13 @@ _IMAGE_SCN_MEM_DISCARDABLE = 0x02000000
 
 _PAGE_SIZE = 0x1000
 _PAGE_MASK = ~(_PAGE_SIZE - 1)
-#: The user-mode address ceiling on x64; the region walk stops here so a wild
-#: ``RegionSize`` cannot spin the loop.
-_USER_SPACE_TOP = 0x7FFFFFFF0000
+#: The user-mode address ceiling for *this interpreter's* bitness.  A single
+#: 64-bit constant was wrong under a 32-bit Python: the walk would step from
+#: 0x7FFF0000 to 0x7FFFFFFF0000, every query past the real ceiling would fail,
+#: and every process would report its address-space walk as truncated — a
+#: coverage gap indistinguishable from a hostile process.  This mirrors the
+#: ``_MBI`` choice below.
+_USER_SPACE_TOP = 0x7FFFFFFF0000 if _POINTER_SIZE == 8 else 0x7FFF0000
 
 #: Read budgets.  A scan reads a bounded slice of each image, and always less
 #: than the module's own declared size.  The per-image budget is what keeps a
@@ -736,22 +740,31 @@ def _image_mismatch(
     return report
 
 
+def _section_ratio(entry: Dict[str, Any]) -> float:
+    """The mismatch fraction of one compared section, or 0.0 when nothing was
+    compared.  The single definition both ``_worst_section`` and the
+    entry-point precedence in :func:`_hollow_finding` grade against — section
+    entries themselves do not carry the ratio, they carry the byte counts."""
+    compared = int(entry.get("compared_bytes") or 0)
+    if compared <= 0:
+        return 0.0
+    return int(entry.get("mismatch_bytes") or 0) / compared
+
+
 def _worst_section(report: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """The compared section with the highest mismatch fraction, or ``None``."""
     worst: Optional[Dict[str, Any]] = None
     worst_ratio = 0.0
     for entry in report.get("sections") or []:
-        compared = int(entry.get("compared_bytes") or 0)
-        if compared <= 0:
+        if int(entry.get("compared_bytes") or 0) <= 0:
             continue
-        ratio = int(entry.get("mismatch_bytes") or 0) / compared
+        ratio = _section_ratio(entry)
         if worst is None or ratio > worst_ratio:
             worst, worst_ratio = entry, ratio
     if worst is None:
         return None
     entry = dict(worst)
-    entry["mismatch_ratio"] = round(int(worst["mismatch_bytes"])
-                                   / int(worst["compared_bytes"]), 4)
+    entry["mismatch_ratio"] = round(_section_ratio(worst), 4)
     return entry
 
 
@@ -826,8 +839,12 @@ def _dlls() -> Optional[Dict[str, Any]]:
     if libs is None:
         return None
     if not _BOUND:
-        _BOUND = True
+        # Order matters. Setting the flag first meant a raise inside ``_bind``
+        # left it True, so every later call skipped the declaration and failed
+        # at the first call on an undeclared prototype — an error a long way
+        # from its cause.
         _bind(libs)
+        _BOUND = True
     return libs
 
 
@@ -936,6 +953,14 @@ def _regions(handle: int, errors: Optional[List[Dict[str, Any]]] = None,
                                           ctypes.byref(info), _SIZE_T(info_size))
         if not written:
             winapi._fail("VirtualQueryEx", errors)
+            if not rows:
+                # The documented contract, and the caller depends on it: no
+                # region was ever readable, so this is "cannot see the address
+                # space at all", not "no private executable memory here". The
+                # old code returned an empty complete=False walk instead, which
+                # the caller recorded as a truncated walk and then reported
+                # nothing for — a refusal reading as a clean process.
+                return None
             break
         base = int(info.BaseAddress or 0)
         size = int(info.RegionSize or 0)
@@ -1130,6 +1155,35 @@ def _name_of(names: Dict[int, str], pid: int) -> str:
     return names.get(pid) or "?"
 
 
+def _process_names() -> Optional[Dict[int, str]]:
+    """``pid -> name`` for the host, or ``None`` when the snapshot failed.
+
+    An empty snapshot on a running Windows host is a *failure*, not a host with
+    no processes — ``System Idle Process`` and ``System`` always exist.
+    :func:`jocky.rt.winapi._snapshot_processes` returns ``[]`` when the toolhelp
+    snapshot itself cannot be taken, and the four detectors then resolved no
+    names, targeted nothing through :func:`_scan_targets`, and returned ``[]``:
+    a refusal that is byte-identical in shape to a clean sweep. The caller turns
+    ``None`` into a ``partial_visibility`` note instead.
+    """
+    rows = winapi._snapshot_processes()
+    if not rows:
+        return None
+    return {row["pid"]: row["name"] for row in rows}
+
+
+def _snapshot_gap(detector: str) -> Dict[str, Any]:
+    """The note for a sweep that could not list the host's processes at all."""
+    return _finding(
+        "partial_visibility", "info",
+        f"{detector}: the process snapshot failed, so no process was inspected",
+        {"detector": detector, "processes_scanned": 0,
+         "snapshot_failed": True, "platform": sys.platform},
+        "re-run elevated (SeDebugPrivilege) before treating this as a clean "
+        "result; nothing was scanned",
+    )
+
+
 # ------------------------------------------------------- check: hollowing
 def _hollow_finding(pid: int, name: str, image_path: str, base: int, size: int,
                     report: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -1162,32 +1216,48 @@ def _hollow_finding(pid: int, name: str, image_path: str, base: int, size: int,
     else:
         truncated = [entry["name"] for entry in sections
                      if entry.get("truncated_disk_read")]
+        # The entry-point section is tested FIRST and on its own ratio, not as
+        # a property of whichever section happens to be noisiest. Selecting
+        # `_worst_section` first meant that ordinary IAT churn in `.rdata` (the
+        # module's own measurements put it at up to 70% on healthy hosts) could
+        # out-noise a >5% rewrite of the entry-point section and bury it at
+        # `info` — the opposite of the precedence this function documents.
+        entry_section = next(
+            (entry for entry in sections if entry.get("entry_point_section")), None)
         worst = _worst_section(report)
         if truncated:
             mismatch, severity = "disk_truncated", "high"
             title = (f"pid {pid} ({name}) image file is shorter than its own "
                      f"headers declare")
+        elif (entry_section is not None
+              and _section_ratio(entry_section) > _MISMATCH_FRACTION):
+            mismatch, severity = "entry_point_content", "high"
+            title = (f"pid {pid} ({name}) entry-point section "
+                     f"{entry_section['name']} differs from {image_path} "
+                     f"({entry_section['mismatch_bytes']} of "
+                     f"{entry_section['compared_bytes']} bytes)")
         elif worst is not None and worst["mismatch_ratio"] > _MISMATCH_FRACTION:
-            if worst.get("entry_point_section"):
-                mismatch, severity = "entry_point_content", "high"
-            else:
-                # ``info``, not ``medium``, and the measurement is why. On a
-                # healthy Windows 11 host this comparison fires on essentially
-                # every process — measured across the machine: `.fptable` 43x,
-                # `fothk` 41x, `.rdata` 36x, `.data` 11x, `.idata` 3x — at a
-                # median of 1.06% of section bytes and up to 70%. The loader
-                # writes the resolved Import Address Table into `.rdata`/`.idata`
-                # on every process that imports anything, JIT engines rewrite
-                # their own code, and `.data` is writable by design. A verdict
-                # cannot rest on bytes the loader and the runtime are entitled to
-                # write, so the *structural* classes above keep the severity and
-                # this one is context an analyst may confirm.
-                mismatch, severity = "section_content", "info"
+            # ``info``, not ``medium``, and the measurement is why. On a
+            # healthy Windows 11 host this comparison fires on essentially
+            # every process — measured across the machine: `.fptable` 43x,
+            # `fothk` 41x, `.rdata` 36x, `.data` 11x, `.idata` 3x — at a
+            # median of 1.06% of section bytes and up to 70%. The loader
+            # writes the resolved Import Address Table into `.rdata`/`.idata`
+            # on every process that imports anything, JIT engines rewrite
+            # their own code, and `.data` is writable by design. A verdict
+            # cannot rest on bytes the loader and the runtime are entitled to
+            # write, so the *structural* classes above keep the severity and
+            # this one is context an analyst may confirm.
+            mismatch, severity = "section_content", "info"
             title = (f"pid {pid} ({name}) section {worst['name']} differs from "
                      f"{image_path} ({worst['mismatch_bytes']} of "
                      f"{worst['compared_bytes']} bytes)")
-    if mismatch is None:
-        return None
+        else:
+            # Nothing crossed the fraction. Returning here also keeps `mismatch`
+            # and `title` guaranteed-bound on every path below, which the old
+            # shape did not: with no branch taken they were simply unset and the
+            # `if mismatch is None` guard raised instead of returning.
+            return None
     evidence = {
         "pid": pid,
         "process": name,
@@ -1255,7 +1325,9 @@ def hollowed_processes(pids: Optional[Iterable[int]] = None) -> List[Dict[str, A
     libs = _dlls()
     if libs is None:
         return []
-    names = {row["pid"]: row["name"] for row in winapi._snapshot_processes()}
+    names = _process_names()
+    if names is None:
+        return [_snapshot_gap("hollowed_processes")]
     targets, dropped = _scan_targets(pids, names)
     findings: List[Dict[str, Any]] = []
     denied: List[Dict[str, Any]] = []
@@ -1341,7 +1413,9 @@ def executable_private_memory(pids: Optional[Iterable[int]] = None) -> List[Dict
     libs = _dlls()
     if libs is None:
         return []
-    names = {row["pid"]: row["name"] for row in winapi._snapshot_processes()}
+    names = _process_names()
+    if names is None:
+        return [_snapshot_gap("executable_private_memory")]
     targets, dropped = _scan_targets(pids, names)
     findings: List[Dict[str, Any]] = []
     denied: List[Dict[str, Any]] = []
@@ -1459,7 +1533,9 @@ def unbacked_executable_threads(pids: Optional[Iterable[int]] = None) -> List[Di
     libs = _dlls()
     if libs is None:
         return []
-    names = {row["pid"]: row["name"] for row in winapi._snapshot_processes()}
+    names = _process_names()
+    if names is None:
+        return [_snapshot_gap("unbacked_executable_threads")]
     targets, dropped = _scan_targets(pids, names)
     wanted = set(targets)
     snapshot_errors: List[Dict[str, Any]] = []
@@ -1554,7 +1630,8 @@ def unbacked_executable_threads(pids: Optional[Iterable[int]] = None) -> List[Di
         if errors:
             denied.append({"pid": pid, "process": name,
                            "reason": errors[0].get("error", "call failed")})
-    note = _partial_finding("unbacked_executable_threads", len(targets), denied)
+    note = _partial_finding("unbacked_executable_threads", len(targets), denied,
+                            skipped)
     if note is not None:
         findings.append(note)
     return findings
@@ -1615,7 +1692,9 @@ def modules_from_temp_paths(pids: Optional[Iterable[int]] = None) -> List[Dict[s
     libs = _dlls()
     if libs is None:
         return []
-    names = {row["pid"]: row["name"] for row in winapi._snapshot_processes()}
+    names = _process_names()
+    if names is None:
+        return [_snapshot_gap("modules_from_temp_paths")]
     targets, dropped = _scan_targets(pids, names)
     findings: List[Dict[str, Any]] = []
     denied: List[Dict[str, Any]] = []

@@ -27,8 +27,8 @@ from jocky.rt import filefs, netfs, procfs, sysinfo
 SEVERITY_ORDER = {"info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4}
 
 #: Every check this module can emit, with its data source and default severity.
-#: This catalog is the single source of truth for the documentation generator
-#: (`site/tools/gen_reference.py`) and is asserted against real triage output by
+#: This catalog is the single source of truth for the check reference in
+#: `docs/DESIGN.md` and is asserted against real triage output by
 #: `tests/test_runtime.py`, so docs cannot drift from behaviour.
 CHECK_CATALOG = (
     {

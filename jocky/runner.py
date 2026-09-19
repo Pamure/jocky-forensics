@@ -17,7 +17,7 @@ import hashlib
 import json
 import os
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from jocky.lang.compiler import Program, compile_program
 from jocky.lang.parser import parse
@@ -55,9 +55,10 @@ def policy_ctx(allow: Any = None) -> Dict[str, Any]:
     return {"policy": {"allow": granted}}
 
 
-def compile_source(source: str) -> Program:
-    """Parse + compile a script."""
-    return compile_program(parse(source))
+def compile_source(source: str, **kwargs: Any) -> Program:
+    """Parse + compile a script. ``keyword_table=`` passes through to the lexer
+    for per-build token-aliased source (see :mod:`jocky.poly.sourcemut`)."""
+    return compile_program(parse(source, keyword_table=kwargs.get("keyword_table")))
 
 
 def disassemble(source: str) -> str:
@@ -66,14 +67,18 @@ def disassemble(source: str) -> str:
 
 
 def build_artifact(source: str, seed: Optional[bytes] = None,
-                   deterministic: bool = False) -> Tuple[bytes, Dict[str, Any]]:
+                   deterministic: bool = False,
+                   keyword_table: Optional[Mapping[str, str]] = None
+                   ) -> Tuple[bytes, Dict[str, Any]]:
     """Compile a script and encode it into a polymorphic artifact.
 
     ``deterministic=True`` (with an explicit ``seed``) reproduces identical
     bytes, which is what rebuild-and-compare provenance needs.
+    ``keyword_table`` is the per-build source-alias map from
+    :mod:`jocky.poly.sourcemut` when ``--alias-tokens`` was used.
     """
     from jocky.poly.encoder import PolyEncoder
-    program = compile_source(source)
+    program = compile_source(source, keyword_table=keyword_table)
     encoder = PolyEncoder(seed=seed, deterministic=deterministic)
     artifact = encoder.encode(program)
     meta = PolyEncoder.inspect(artifact)
@@ -127,9 +132,12 @@ def run_artifact(artifact: bytes, **kwargs: Any) -> RunResult:
 
 
 def run_bytes(payload: bytes, **kwargs: Any) -> RunResult:
-    """Run an artifact if it looks like one, otherwise treat it as source."""
+    """Run an artifact or native image if it looks like one, else source."""
     if payload[:4] in (b"JKY1", b"JKY0"):
         return run_artifact(payload, **kwargs)
+    if payload[:4] == b"\x7fELF":
+        from jocky.native.runner import run_native  # late: no import cycle
+        return run_native(payload, **kwargs)
     return run_source(payload.decode("utf-8"), **kwargs)
 
 

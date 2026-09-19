@@ -437,9 +437,17 @@ def _decode_ipv6(data: bytes, packet: Dict[str, Any]) -> Optional[str]:
             header = _unpack("!BBHI", data, offset)
             if header is None:
                 return "ipv6: fragment header truncated"
-            fragment_field = header[3]
-            packet["fragment_offset"] = (fragment_field >> 3) * 8
+            # The fragment header is (next_header, reserved, offset_flags,
+            # identification). Reading the *identification* as the offset word
+            # was a real defect: it made `fragment_offset` garbage, and when the
+            # identification happened to end in 0 the M-flag read false, the
+            # fragment was treated as a first fragment, and TCP/UDP ports were
+            # decoded out of raw fragment bytes. Masked to the 13-bit offset
+            # field, which is what the format defines.
+            fragment_field = header[2]
+            packet["fragment_offset"] = ((fragment_field >> 3) & 0x1FFF) * 8
             packet["more_fragments"] = bool(fragment_field & 1)
+            packet["identification"] = header[3]
             length = 8
             next_header = header[0]
         elif next_header == _IPV6_EXT_AH:
@@ -732,6 +740,19 @@ def read_pcapng(path: str, limit: Optional[int] = None,
             result["stop_reason"] = "truncated"
             result["bytes_read"] = consumed
             return result
+        # The trailing length field must repeat the header's, and every later
+        # block is checked for exactly that. The opening block was not, so a
+        # file whose first SHB disagreed with itself parsed as valid and then
+        # bounded the rest of the read off a length the file denies.
+        trailer = struct.unpack(endian + "I", rest[-4:])[0]
+        if trailer != block_length:
+            result["error"] = (f"pcapng: section trailer {trailer} does not "
+                               f"match header length {block_length}")
+            result["malformed_records"] += 1
+            result["truncated"] = True
+            result["stop_reason"] = "malformed"
+            result["bytes_read"] = consumed
+            return result
         version_major, version_minor = struct.unpack(endian + "HH", section[0:4])
         result["version"] = f"{version_major}.{version_minor}"
         result["sections"] = 1
@@ -774,7 +795,14 @@ def read_pcapng(path: str, limit: Optional[int] = None,
                     break
                 result["byte_order"] = "little" if endian == "<" else "big"
             block_length = struct.unpack(endian + "I", header[4:8])[0]
-            if block_length < 12 or block_length > MAX_BLOCK_BYTES:
+            # A section header block is 28 bytes minimum (8 header + 16 body +
+            # 4 trailer); every other block needs 4 trailer bytes after its
+            # 8-byte header. The old guard only rejected < 12, so a SHB
+            # declaring 12..15 left `rest` shorter than the 4-byte trailer and
+            # `struct.unpack(rest[-4:])` raised out of a reader whose contract
+            # is "malformed blocks are recorded, never raised".
+            minimum = 28 if is_section else 12
+            if block_length < minimum or block_length > MAX_BLOCK_BYTES:
                 result["malformed_records"] += 1
                 result["truncated"] = True
                 result["stop_reason"] = "malformed"
@@ -795,6 +823,13 @@ def read_pcapng(path: str, limit: Optional[int] = None,
 
             if is_section:
                 result["sections"] += 1
+                # Interface IDs are scoped to a section: the spec numbers them
+                # from 0 in every SHB. Accumulating across sections made a
+                # second writer's packets resolve against the first section's
+                # interface table — wrong linktype, and the wrong tsresol
+                # placing every timestamp silently. A merged capture is a
+                # routine artefact, so this has to be per-section.
+                result["interfaces"] = []
                 if len(body) >= 8:
                     version_major, version_minor = struct.unpack(
                         endian + "HH", body[4:8])
@@ -891,7 +926,11 @@ def _parse_spb(body: bytes, endian: str,
     interface = interfaces[0] if interfaces else None
     if interface is None:
         return None
-    caplen = min(orig_len, interface["snaplen"], len(body) - 4)
+    # A snaplen of 0 in an Interface Description Block means "no limit", not
+    # "capture nothing". Taking it literally made `caplen` 0 for every Simple
+    # Packet Block, so a whole capture decoded as empty frames.
+    snaplen = interface["snaplen"] or orig_len
+    caplen = max(0, min(orig_len, snaplen, len(body) - 4))
     packet = decode_packet(body[4:4 + caplen], interface["linktype"])
     packet["ts"] = None
     packet["interface"] = 0
@@ -909,11 +948,17 @@ def _parse_pb(body: bytes, endian: str,
     interface = _interface(interfaces, interface_id)
     if interface is None:
         return None
-    packet = decode_packet(body[20:20 + caplen], interface["linktype"])
+    data = body[20:20 + caplen]
+    packet = decode_packet(data, interface["linktype"])
     _stamp(packet, ts_high, ts_low, interface)
     packet["interface"] = interface_id
-    packet["incl_len"] = caplen
+    # Report what the block actually holds. The EPB path already does this;
+    # echoing the claimed length here meant a truncated block was decoded from
+    # ten bytes while claiming sixty, with no truncation marker at all.
+    packet["incl_len"] = len(data)
     packet["orig_len"] = orig_len
+    if len(data) < caplen:
+        packet["malformed"] = packet["malformed"] or "pcapng: pb data truncated"
     return packet
 
 
@@ -1303,9 +1348,19 @@ def live_capture(count: int = _CAF_DEFAULT_COUNT, timeout_s: float = 5.0,
     ``malformed`` reason rather than dropped.
     """
     result = _empty_result("live")
+    requested_snaplen = snaplen
+    # A snaplen at or below zero is not a capture setting: `recv(0)` returns
+    # b"" immediately (the loop then spins on the CPU until the deadline) and a
+    # negative value raises ValueError from `recv`, which is not an OSError and
+    # so escaped the loop's handler. Both are normalised to the default rather
+    # than allowed to decide the run's behaviour.
+    if snaplen <= 0:
+        snaplen = 65535
     result.update({"interface": interface, "snaplen": snaplen,
                    "linktype": LINKTYPE_ETHERNET, "promiscuous": promiscuous,
                    "requested_count": count})
+    if requested_snaplen != snaplen:
+        result["snaplen_adjusted_from"] = requested_snaplen
     if not sys.platform.startswith("linux"):
         result["stop_reason"] = "unsupported"
         result["error"] = (f"live capture uses AF_PACKET, which is Linux-only "
@@ -1336,7 +1391,15 @@ def live_capture(count: int = _CAF_DEFAULT_COUNT, timeout_s: float = 5.0,
     deadline = time.monotonic() + max(0.0, timeout_s)
     try:
         if interface:
-            sock.bind((interface, 0))
+            try:
+                sock.bind((interface, 0))
+            except OSError as exc:
+                # The docstring's contract: a capture that cannot run is
+                # reported, never raised. Binding a missing or down interface
+                # raised ENODEV straight out of the module.
+                result["stop_reason"] = "error"
+                result["error"] = f"cannot bind {interface!r}: {exc}"
+                return result
         sock.settimeout(0.25)
         while len(result["packets"]) < max(0, count):
             if time.monotonic() > deadline:
@@ -1356,6 +1419,11 @@ def live_capture(count: int = _CAF_DEFAULT_COUNT, timeout_s: float = 5.0,
             decoded = decode_packet(frame, LINKTYPE_ETHERNET)
             decoded["index"] = len(result["packets"])
             decoded["ts"] = time.time()
+            # Without these, `flows()` billed live traffic by payload bytes and
+            # file traffic by wire bytes, so the same flow reported 42 bytes
+            # from a file and 0 from a capture of it.
+            decoded["incl_len"] = len(frame)
+            decoded["orig_len"] = len(frame)
             result["packets"].append(decoded)
             result["bytes_read"] += len(frame)
             if decoded.get("malformed"):
@@ -1513,15 +1581,31 @@ def _tls_sni(data: bytes) -> Optional[str]:
     return None
 
 
+def _is_grease(value: Any) -> bool:
+    """RFC 8701 GREASE: a 16-bit value whose octets are equal and 0x?a each."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return False
+    return 0 <= number <= 0xFFFF and (number & 0x0F0F) == 0x0A0A
+
+
 def _ja3(hello: Dict[str, Any]) -> str:
     """The JA3 string: version, ciphers, extensions, curves, point formats.
 
     Hyphens between values inside a field, commas between fields, decimal
     integers, order as sent — the fingerprint is the *order*, which is why the
     parser preserves it rather than sorting.
+
+    GREASE values are removed from all four lists. They are randomised per
+    connection by design, so leaving them in makes the string unique to that
+    one handshake and the MD5 matches nothing in any threat-intel feed — which
+    is the whole stated use of the field. Standard JA3 strips them, and the
+    ``extensions`` list is filtered too, since Chrome sends GREASE there as
+    well as first in the cipher and curve lists.
     """
     def joined(values: Iterable[Any]) -> str:
-        return "-".join(str(v) for v in values)
+        return "-".join(str(v) for v in values if not _is_grease(v))
 
     return ",".join((
         str(hello["version"]),
@@ -1679,12 +1763,19 @@ def http_requests(packets: Union[Dict[str, Any], Iterable[Dict[str, Any]]],
                     break
                 position = next_match.start()
                 continue
-            header_end = data.find(b"\r\n\r\n", match.end(),
-                                   match.end() + MAX_HTTP_HEADER_BYTES)
+            search_end = match.end() + MAX_HTTP_HEADER_BYTES
+            header_end = data.find(b"\r\n\r\n", match.end(), search_end)
+            headers_truncated = False
             if header_end < 0:
-                break
+                # The terminator is past the cap, or absent entirely. The
+                # request line matched, so this *is* a request — `break` here
+                # erased it (and every request after it in the stream) from the
+                # output with nothing recording why. Emit what is present and
+                # say the headers are cut.
+                header_end = min(search_end, len(data))
+                headers_truncated = True
             headers = _http_headers(data[match.end():header_end])
-            body_start = header_end + 4
+            body_start = header_end if headers_truncated else header_end + 4
             method = match.group(1).decode("latin-1")
             target = match.group(2).decode("latin-1")
             host = _header(headers, "Host")
@@ -1712,11 +1803,16 @@ def http_requests(packets: Union[Dict[str, Any], Iterable[Dict[str, Any]]],
                 "referer": _header(headers, "Referer"),
                 "content_length": _header(headers, "Content-Length"),
                 "headers": headers,
+                "headers_truncated": headers_truncated,
                 "index": stream["index"],
             })
             if limit is not None and len(results) >= limit:
                 return results
             if len(results) >= MAX_HTTP_REQUESTS:
                 return results
+            if headers_truncated:
+                # Offsets past a capped header block cannot be trusted, so this
+                # stream is finished rather than desynchronised.
+                break
             position = body_start + _http_body_length(headers, data, body_start)
     return results
