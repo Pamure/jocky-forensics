@@ -236,7 +236,7 @@ immediately.
 **Claim:** every number the repository states is reproducible by a command.
 
 - **Command:** `python3 tools/claims_audit.py -v`
-- **Measured:** `scripts 38 · test functions 467 · in-language checks 535 ·
+- **Measured:** `scripts 38 · test functions 468 · in-language checks 535 ·
   namespaces 13 · detection checks 30 · version 1.8.0`; "no drift: stated script
   counts and the evidence ledger both match the tree". The audit is wired into
   CI, where a drift fails the build — and it checks **this file's own numbers**
