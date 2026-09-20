@@ -8,9 +8,11 @@ returned empty structures (or wrong attribution) would fail these.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import pathlib
 import socket
+import subprocess
 import sys
 import tempfile
 import time
@@ -100,6 +102,39 @@ def test_hash_matches_hashlib():
         assert filefs.hash_file(path + ".missing") is None
     finally:
         os.unlink(path)
+
+
+def test_a_named_pipe_under_a_scan_root_does_not_block_the_scan(tmp_path):
+    """A FIFO blocks ``open(2)`` until a writer appears.
+
+    One named pipe anywhere under a scan root hung collection forever — the CI
+    runner keeps one in ``/tmp``, which is how this was found, and a host that
+    wants to stall an analyst can plant one deliberately. The scan has to name
+    the pipe for what it is and carry on.
+
+    The probe runs in a child process on purpose: the failure mode of this bug
+    is a hang, and a hanging test tells the next person nothing about the cause.
+    """
+    os.mkfifo(tmp_path / "pipe")
+    (tmp_path / "note.txt").write_text("hello", encoding="utf-8")
+    probe = (
+        "import json;"
+        "from jocky.rt import filefs;"
+        f"root = {str(tmp_path)!r};"
+        "entries = filefs.scan(root, max_files=10);"
+        "print(json.dumps({"
+        "'names': sorted(e['path'].rsplit('/', 1)[-1] for e in entries),"
+        "'magic': sorted(e['magic'] for e in entries),"
+        "'pipe_hash': filefs.hash_file(root + '/pipe'),"
+        "}))"
+    )
+    finished = subprocess.run([sys.executable, "-c", probe], cwd=str(REPO),
+                              capture_output=True, text=True, timeout=30)
+    assert finished.returncode == 0, finished.stderr
+    report = json.loads(finished.stdout)
+    assert report["names"] == ["note.txt", "pipe"], report
+    assert report["magic"] == ["data", "fifo"], report
+    assert report["pipe_hash"] is None, "a pipe has no content to hash"
 
 
 def test_permission_flags_are_read_from_the_target():

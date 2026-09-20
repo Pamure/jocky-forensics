@@ -218,9 +218,38 @@ def read_bytes(path: str, offset: int = 0, limit: int = 262144) -> str:
     return data.decode("latin-1")
 
 
+def _non_regular_kind(path: str) -> Optional[str]:
+    """The kind of ``path`` when it must not be opened, else ``None``.
+
+    ``open(2)`` on a named pipe blocks until a writer appears, so one FIFO
+    anywhere under a scan root hung the collector forever — found by CI, whose
+    runner has one in ``/tmp``. A socket, block or character device is the same
+    hazard with no payoff: its leading bytes are not its type. Regular files
+    (and symlinks resolving to one) are the only entries worth reading.
+    """
+    try:
+        mode = os.stat(path).st_mode
+    except OSError:
+        return None          # unreadable or dangling: let the open report it
+    if stat_mod.S_ISREG(mode):
+        return None
+    for predicate, name in (
+        (stat_mod.S_ISFIFO, "fifo"),
+        (stat_mod.S_ISSOCK, "socket"),
+        (stat_mod.S_ISBLK, "block-device"),
+        (stat_mod.S_ISCHR, "char-device"),
+        (stat_mod.S_ISDIR, "directory"),
+    ):
+        if predicate(mode):
+            return name
+    return "unreadable"
+
+
 def hash_file(path: str, algo: str = "sha256", chunk: int = 1 << 20,
               max_bytes: Optional[int] = None) -> Optional[str]:
     """Streamed file hash; ``None`` when the file cannot be read."""
+    if _non_regular_kind(path) is not None:
+        return None
     digest = hashlib.new(algo)
     total = 0
     try:
@@ -239,7 +268,14 @@ def hash_file(path: str, algo: str = "sha256", chunk: int = 1 << 20,
 
 
 def magic(path: str, size: int = 16) -> str:
-    """Coarse file type from its leading bytes."""
+    """Coarse file type from its leading bytes.
+
+    An entry that cannot be opened without blocking is named for what it is
+    (``fifo``, ``socket``, …) instead of read; see :func:`_non_regular_kind`.
+    """
+    kind = _non_regular_kind(path)
+    if kind is not None:
+        return kind
     try:
         with open(path, "rb") as fh:
             head = fh.read(size)
