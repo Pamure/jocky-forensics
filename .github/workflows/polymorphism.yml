@@ -32,6 +32,12 @@ jobs:
         run: python -m pip install -e ".[dev]"
 
       - name: Run test suite
+        # A stall here used to cost the whole 6-hour job cap before anyone saw a
+        # result: the suite hung on a FIFO under the runner's /tmp (fixed in
+        # jocky/rt/filefs.py) and the only symptom was a job that never
+        # finished. The suite takes ~3 minutes on this runner, so 20 is already
+        # ten times the budget and a hang now reports itself in minutes.
+        timeout-minutes: 20
         run: python -m pytest tests/ -q -o addopts=""
 
       # A number in prose must be reproducible by a command. This repository
