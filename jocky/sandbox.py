@@ -109,6 +109,16 @@ READ_ROOTS = ("/proc", "/sys", "/dev", "/usr", "/lib", "/lib64", "/etc", "/bin",
 #: call (`jocky.exec.memfd`, `jocky.rt.raw`), and denying them turns a routine
 #: read into an EACCES far from the cause. Granted as a read rule in every level.
 PACKAGE_ROOT = os.path.dirname(os.path.abspath(__file__))
+
+#: The same argument one level up: the *installation* the interpreter itself
+#: lives in. ``READ_ROOTS`` assumes the FHS layout, which is where a distribution
+#: Python sits, but a standalone or pyenv install does not live there at all — a
+#: GitHub runner keeps CPython under /opt/hostedtoolcache, where the first lazy
+#: stdlib import inside the ruleset (``threading``, say) is denied, as is
+#: reading ``/proc/self/exe`` because that resolves to the interpreter binary.
+INTERPRETER_ROOTS = tuple(dict.fromkeys(
+    path for path in (sys.base_prefix, sys.prefix, sys.exec_prefix) if path))
+
 #: Where output may be written (per level).
 WRITE_ROOTS = ("/tmp", "/var/tmp", "/dev/shm")
 
@@ -391,7 +401,7 @@ def apply(level: str, extra_write: Optional[List[str]] = None,
         else:
             report.rules_skipped.append((path, access))
 
-    for root in READ_ROOTS + (PACKAGE_ROOT,):
+    for root in READ_ROOTS + (PACKAGE_ROOT,) + INTERPRETER_ROOTS:
         grant(root, read_access)
     for root in extra_read or ():
         grant(root, read_access)
