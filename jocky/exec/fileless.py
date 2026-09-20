@@ -192,6 +192,14 @@ def run_fileless(payload: bytes, wall_clock_ms: float = 60_000.0,
             env = {
                 "PATH": "/usr/bin:/bin",
                 "PYTHONDONTWRITEBYTECODE": "1",
+                # The image is a byte copy of this process's own interpreter, but
+                # /proc/self/fd/<n> is not a path a Python installation can be
+                # discovered from: the child falls back to a compiled-in prefix
+                # and, where that lands on a different or partial stdlib tree
+                # (a GitHub runner's /usr/lib/python3.12 has no lib-dynload), it
+                # dies importing _struct before the bootstrap runs. Point it at
+                # the installation the image came from.
+                "PYTHONHOME": sys.base_prefix,
                 "JKY_PKG": str(pkg_fd),
                 "JKY_PAYLOAD": str(pay_fd),
                 "JKY_WALL": str(float(wall_clock_ms)),
